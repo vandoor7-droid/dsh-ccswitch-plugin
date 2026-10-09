@@ -574,6 +574,45 @@ function reasoningEffortOf(provider) {
 }
 
 /**
+ * Whether `auth.json` holds a login Codex would itself authenticate with.
+ *
+ * A port of cc-switch's `codex_auth_has_credential_login_material`
+ * (`src-tauri/src/codex_config.rs`), and deliberately not "is there anything in
+ * the file". A bare `OPENAI_API_KEY` — which is exactly what earlier versions of
+ * this writer left behind — is *not* a login, and neither is pure metadata such
+ * as `last_refresh` or `tokens.account_id`; counting those would shield a stale
+ * third-party key from being recognised for what it is.
+ *
+ * cc-switch's own `login_on_disk` is computed with a sibling predicate,
+ * `codex_auth_has_openai_account_material`, which differs on two inputs: it
+ * counts a bare `OPENAI_API_KEY` as a login and does not count
+ * `bedrock_api_key`. Neither difference reaches us. cc-switch only has a bare
+ * key to count because of a delete it performs and we do not — with its default
+ * `preserve_codex_official_auth_on_switch = false` it removes the stale key on
+ * the way in — and counting a key we leave in place would tell Codex to fall
+ * back to *another* provider's credential, which is the keyless-fallback hazard
+ * cc-switch itself refuses to write. `bedrock_api_key` is a Bedrock credential,
+ * which Codex cannot load as an OpenAI account at all. This predicate is the
+ * one that answers the question this writer actually faces.
+ */
+function hasCredentialLoginMaterial(auth) {
+  if (!isRecord(auth)) return false
+  const present = (value) => {
+    if (value === null || value === undefined) return false
+    if (typeof value === 'string') return value.trim() !== ''
+    if (Array.isArray(value)) return value.length > 0
+    if (isRecord(value)) return Object.keys(value).length > 0
+    return true
+  }
+  if (['personal_access_token', 'agent_identity', 'bedrock_api_key'].some((key) => present(auth[key]))) {
+    return true
+  }
+  const tokens = auth.tokens
+  if (!isRecord(tokens)) return false
+  return ['id_token', 'access_token', 'refresh_token'].some((key) => present(tokens[key]))
+}
+
+/**
  * The keys this writer owns in `config.toml`.
  *
  * `model_reasoning_effort` is emitted as a removal when the provider carries no
@@ -583,8 +622,17 @@ function reasoningEffortOf(provider) {
  * absent model is written as *no edit at all* rather than as a removal — a
  * provider with no models is a gap in our record, not a statement that the user
  * wants no model, and clearing the key would leave Codex unable to start.
+ *
+ * The credential is the route table's `experimental_bearer_token`, not anything
+ * in `auth.json`: from Codex 0.149 a custom provider no longer reads a key out
+ * of `auth.json`, which is reserved for the official login. Emitting the token
+ * as an edit is also what stops the previous provider's token from being left
+ * behind — cc-switch keeps the same key in its floor for that reason.
+ *
+ * `requires_openai_auth` is computed by the caller rather than fixed; see
+ * {@link writeCodexConfig} for the rule and why neither fixed value is safe.
  */
-function codexTomlEdits(provider) {
+function codexTomlEdits(provider, apiKey, requiresOpenaiAuth) {
   const edits = []
   const model = primaryModelId(provider)
   if (model !== undefined) {
@@ -605,7 +653,12 @@ function codexTomlEdits(provider) {
       key: 'wire_api',
       literal: tomlString(provider?.api === 'openai-responses' ? 'responses' : 'chat'),
     },
-    { section: CODEX_ROUTE_SECTION, key: 'requires_openai_auth', literal: 'true' },
+    { section: CODEX_ROUTE_SECTION, key: 'experimental_bearer_token', literal: tomlString(apiKey) },
+    {
+      section: CODEX_ROUTE_SECTION,
+      key: 'requires_openai_auth',
+      literal: requiresOpenaiAuth ? 'true' : 'false',
+    },
   )
   return edits
 }
@@ -648,7 +701,7 @@ function scanStructure(lines) {
  * immediately before the first table, because anything after a `[table]` header
  * would join that table, and table keys at the end of their own table.
  */
-function patchCodexToml(text, provider, { trailingNewline } = {}) {
+function patchCodexToml(text, provider, { apiKey, requiresOpenaiAuth, trailingNewline } = {}) {
   const endsWithNewline = trailingNewline ?? text.endsWith('\n')
   const lines = text === '' ? [] : (endsWithNewline ? text.slice(0, -1) : text).split('\n')
   const structure = scanStructure(lines)
@@ -671,7 +724,7 @@ function patchCodexToml(text, provider, { trailingNewline } = {}) {
   const written = []
   const removed = []
 
-  for (const edit of codexTomlEdits(provider)) {
+  for (const edit of codexTomlEdits(provider, apiKey, requiresOpenaiAuth)) {
     const label = edit.section === null ? edit.key : `${edit.section}.${edit.key}`
     let found = -1
     for (let index = 0; index < lines.length; index += 1) {
@@ -778,7 +831,7 @@ function patchCodexToml(text, provider, { trailingNewline } = {}) {
   }
 
   const next = `${out.join('\n')}${endsWithNewline ? '\n' : ''}`
-  verifyCodexToml(next, provider)
+  verifyCodexToml(next, provider, { apiKey, requiresOpenaiAuth })
   return { text: next, written, removed }
 }
 
@@ -793,7 +846,7 @@ function patchCodexToml(text, provider, { trailingNewline } = {}) {
  * belong; raising here costs a failed write, whereas writing would cost the
  * user's configuration.
  */
-function verifyCodexToml(text, provider) {
+function verifyCodexToml(text, provider, { apiKey, requiresOpenaiAuth } = {}) {
   const lines = text === '' ? [] : text.replace(/\n$/, '').split('\n')
 
   // Repeating a `[table]` header is the one corruption that silently changes a
@@ -838,6 +891,31 @@ function verifyCodexToml(text, provider) {
   expect('base_url', parsed.provider.baseUrl, String(provider?.baseURL ?? ''))
   expect('name', parsed.provider.name, String(provider?.displayName ?? ''))
   expect('wire_api', parsed.provider.wireApi, provider?.api === 'openai-responses' ? 'responses' : 'chat')
+  expect('requires_openai_auth', parsed.provider.requiresOpenaiAuth, requiresOpenaiAuth)
+
+  // `experimental_bearer_token` is not exposed by the reader, so like the
+  // duplicate-header check above it is verified by scanning the text directly.
+  // Comparing the raw value is the point: it proves the credential landed under
+  // `[model_providers.custom]` and not in some table the line scanner mistook
+  // for the route.
+  const wantedToken = tomlString(apiKey)
+  let inRoute = false
+  let tokenFound = false
+  for (const line of lines) {
+    const name = sectionNameOf(line)
+    if (name !== undefined) {
+      inRoute = name === CODEX_ROUTE_SECTION
+      continue
+    }
+    if (!inRoute || keyOf(line) !== 'experimental_bearer_token') continue
+    const raw = line.slice(line.indexOf('=') + 1)
+    const at = commentStart(raw)
+    if ((at === -1 ? raw : raw.slice(0, at)).trim() !== wantedToken) {
+      refuse('experimental_bearer_token')
+    }
+    tokenFound = true
+  }
+  if (!tokenFound) refuse('experimental_bearer_token')
 }
 
 // --- warnings ---------------------------------------------------------------
@@ -904,8 +982,22 @@ export async function writeClaudeConfig({ provider, apiKey, home, io } = {}) {
  * `write_codex_live_atomic`: a key left in `auth.json` while `config.toml`
  * still points at the previous provider is worse than having written nothing.
  *
- * The key goes into `auth.json` under `OPENAI_API_KEY`, merged into whatever
- * object is already there so a ChatGPT `tokens` login survives.
+ * The credential goes into the route table's `experimental_bearer_token`, not
+ * into `auth.json`. From Codex 0.149 a custom provider no longer reads a key
+ * out of `auth.json` — that file is the store for the *official* login, and a
+ * third-party key written there authenticates nothing while still being read as
+ * an `apikey` credential by Codex's auth-mode resolution, which outranks the
+ * ChatGPT `tokens` that may sit next to it. So `auth.json` is left as the
+ * official-login store: its members are re-emitted unchanged, and nothing of
+ * ours is added. A key already there is *not* removed either, because this
+ * module is handed one provider at a time and cannot prove the key was its own
+ * — cc-switch only clears one it can match against a known provider key, and
+ * deleting on shape alone would destroy a `codex login --api-key` credential.
+ *
+ * The route's `requires_openai_auth` is computed from `auth.json` and is
+ * therefore exactly the state Codex will find after the write, since nothing
+ * this writer does changes that file's meaning — see
+ * {@link hasCredentialLoginMaterial} for why neither fixed value is safe.
  *
  * @param {object} options - as {@link writeClaudeConfig}.
  * @returns {Promise<{files: Array<{path: string, keys: string[], removed: string[]}>, warnings: string[]}>}
@@ -921,16 +1013,31 @@ export async function writeCodexConfig({ provider, apiKey, home, io } = {}) {
   return withWriterLock(authPath, () => withWriterLock(configPath, async () => {
     const authRaw = await fileIo.read(authPath)
     const { doc, style } = parseJsonDocument(authRaw, authPath)
-    doc.OPENAI_API_KEY = key
+
+    // This writer's route always carries its credential as a bearer token, and
+    // cc-switch's rule for that case — `requires_openai_auth(RouteAuth::Bearer,
+    // login_on_disk)` — therefore reduces to the login check alone.
+    //
+    // cc-switch reaches the same answer by a different route: with its default
+    // `preserve_codex_official_auth_on_switch = false` it *deletes* a stale
+    // third-party key from `auth.json` on the way to a third-party provider, so
+    // its post-write file holds no such key either. This writer leaves the file
+    // alone instead — see the doc comment above — so it has to classify the
+    // residue rather than remove it, which is what the predicate does.
+    const requiresOpenaiAuth = hasCredentialLoginMaterial(doc)
     const authNext = serializeJson(doc, style)
 
     const configRaw = await fileIo.read(configPath)
     const patched = patchCodexToml(
       configRaw === undefined ? '' : configRaw.toString('utf8'),
       provider,
-      // A file being created gets a trailing newline even though there was no
-      // "original" habit to copy.
-      { trailingNewline: configRaw === undefined ? true : undefined },
+      {
+        apiKey: key,
+        requiresOpenaiAuth,
+        // A file being created gets a trailing newline even though there was no
+        // "original" habit to copy.
+        trailingNewline: configRaw === undefined ? true : undefined,
+      },
     )
 
     await fileIo.write(authPath, authNext, 0o600)
@@ -943,7 +1050,7 @@ export async function writeCodexConfig({ provider, apiKey, home, io } = {}) {
 
     return {
       files: [
-        { path: authPath, keys: ['OPENAI_API_KEY'], removed: [] },
+        { path: authPath, keys: [], removed: [] },
         { path: configPath, keys: patched.written, removed: patched.removed },
       ],
       warnings: protocolWarnings('codex', provider),

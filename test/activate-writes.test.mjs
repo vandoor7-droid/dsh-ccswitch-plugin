@@ -222,7 +222,18 @@ test('activating a Codex provider writes both of its files', async () => {
     assert.ok(paths.some((path) => path.endsWith('config.toml')))
 
     assert.ok(fixture.read('.codex/config.toml').includes('https://api.deepseek.com/v1'))
-    assert.ok(fixture.read('.codex/auth.json').includes('sk-new-secret'))
+    // The credential belongs to the route table, not `auth.json`: Codex 0.149+
+    // reads a custom provider's key from `experimental_bearer_token`, and a key
+    // in `auth.json` would be read as an `apikey` credential that outranks the
+    // official login living there.
+    assert.ok(
+      fixture.read('.codex/config.toml').includes('experimental_bearer_token = "sk-new-secret"'),
+      'the key is written into the route table',
+    )
+    assert.ok(
+      !fixture.read('.codex/auth.json').includes('sk-new-secret'),
+      'auth.json is left for the official login and must not gain the key',
+    )
   } finally {
     fixture.cleanup()
   }

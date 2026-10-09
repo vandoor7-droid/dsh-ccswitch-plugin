@@ -532,6 +532,13 @@ var BLOCKED = {
   /** claude-desktop keeps its endpoint at the top level and names the key field. */
   MISSING_CLAUDE_DESKTOP_KEY: "missing-claude-desktop-key",
   MISSING_CLAUDE_DESKTOP_BASE_URL: "missing-claude-desktop-base-url",
+  /**
+   * claude-desktop carries an `apiFormat` naming the wire format its own tool
+   * speaks. We already read the row's fields, so a value we cannot serve has to
+   * be refused by name rather than imported as the one protocol we do serve —
+   * that is exactly how a provider ends up registered and unable to answer.
+   */
+  UNSUPPORTED_CLAUDE_DESKTOP_PROTOCOL: "unsupported-claude-desktop-protocol",
   MISSING_OPENCODE_KEY: "missing-opencode-key",
   MISSING_OPENCODE_BASE_URL: "missing-opencode-base-url",
   UNSUPPORTED_OPENCODE_ADAPTER: "unsupported-opencode-adapter",
@@ -1449,6 +1456,16 @@ function extractClaudeDesktop(base, parsed) {
     return { ...base, blocked: true, blockedReason: "\u672A\u627E\u5230 base URL\uFF08\u7F3A\u5C11\u9876\u7EA7 baseUrl \u4E0E env.ANTHROPIC_BASE_URL\uFF09", blockedCode: BLOCKED.MISSING_CLAUDE_DESKTOP_BASE_URL };
   }
   const warnings = [];
+  const declared = asText(source.apiFormat);
+  if (declared !== void 0 && declared !== "anthropic") {
+    return {
+      ...base,
+      blocked: true,
+      blockedReason: `claude-desktop \u7684 apiFormat \u4E0D\u662F DSH \u652F\u6301\u7684\u534F\u8BAE\uFF1A${declared}`,
+      blockedCode: BLOCKED.UNSUPPORTED_CLAUDE_DESKTOP_PROTOCOL,
+      blockedDetail: declared
+    };
+  }
   return {
     ...base,
     apiKey,
@@ -2650,7 +2667,23 @@ function reasoningEffortOf(provider) {
   }
   return void 0;
 }
-function codexTomlEdits(provider) {
+function hasCredentialLoginMaterial(auth) {
+  if (!isRecord(auth)) return false;
+  const present = (value) => {
+    if (value === null || value === void 0) return false;
+    if (typeof value === "string") return value.trim() !== "";
+    if (Array.isArray(value)) return value.length > 0;
+    if (isRecord(value)) return Object.keys(value).length > 0;
+    return true;
+  };
+  if (["personal_access_token", "agent_identity", "bedrock_api_key"].some((key) => present(auth[key]))) {
+    return true;
+  }
+  const tokens = auth.tokens;
+  if (!isRecord(tokens)) return false;
+  return ["id_token", "access_token", "refresh_token"].some((key) => present(tokens[key]));
+}
+function codexTomlEdits(provider, apiKey, requiresOpenaiAuth) {
   const edits = [];
   const model = primaryModelId(provider);
   if (model !== void 0) {
@@ -2671,7 +2704,12 @@ function codexTomlEdits(provider) {
       key: "wire_api",
       literal: tomlString(provider?.api === "openai-responses" ? "responses" : "chat")
     },
-    { section: CODEX_ROUTE_SECTION, key: "requires_openai_auth", literal: "true" }
+    { section: CODEX_ROUTE_SECTION, key: "experimental_bearer_token", literal: tomlString(apiKey) },
+    {
+      section: CODEX_ROUTE_SECTION,
+      key: "requires_openai_auth",
+      literal: requiresOpenaiAuth ? "true" : "false"
+    }
   );
   return edits;
 }
@@ -2696,7 +2734,7 @@ function scanStructure(lines) {
   const ranges = new Map([...headers].map(([name2, start]) => [name2, { start, end: endOf(start) }]));
   return { sectionAt, headers, ranges, unterminated: state.unterminated };
 }
-function patchCodexToml(text, provider, { trailingNewline } = {}) {
+function patchCodexToml(text, provider, { apiKey, requiresOpenaiAuth, trailingNewline } = {}) {
   const endsWithNewline = trailingNewline ?? text.endsWith("\n");
   const lines = text === "" ? [] : (endsWithNewline ? text.slice(0, -1) : text).split("\n");
   const structure = scanStructure(lines);
@@ -2712,7 +2750,7 @@ function patchCodexToml(text, provider, { trailingNewline } = {}) {
   const pending = [];
   const written = [];
   const removed = [];
-  for (const edit of codexTomlEdits(provider)) {
+  for (const edit of codexTomlEdits(provider, apiKey, requiresOpenaiAuth)) {
     const label = edit.section === null ? edit.key : `${edit.section}.${edit.key}`;
     let found = -1;
     for (let index = 0; index < lines.length; index += 1) {
@@ -2793,10 +2831,10 @@ function patchCodexToml(text, provider, { trailingNewline } = {}) {
     out.push(replacements.has(index) ? replacements.get(index) : lines[index]);
   }
   const next = `${out.join("\n")}${endsWithNewline ? "\n" : ""}`;
-  verifyCodexToml(next, provider);
+  verifyCodexToml(next, provider, { apiKey, requiresOpenaiAuth });
   return { text: next, written, removed };
 }
-function verifyCodexToml(text, provider) {
+function verifyCodexToml(text, provider, { apiKey, requiresOpenaiAuth } = {}) {
   const lines = text === "" ? [] : text.replace(/\n$/, "").split("\n");
   const seen = /* @__PURE__ */ new Set();
   for (const line of lines) {
@@ -2832,6 +2870,25 @@ function verifyCodexToml(text, provider) {
   expect("base_url", parsed.provider.baseUrl, String(provider?.baseURL ?? ""));
   expect("name", parsed.provider.name, String(provider?.displayName ?? ""));
   expect("wire_api", parsed.provider.wireApi, provider?.api === "openai-responses" ? "responses" : "chat");
+  expect("requires_openai_auth", parsed.provider.requiresOpenaiAuth, requiresOpenaiAuth);
+  const wantedToken = tomlString(apiKey);
+  let inRoute = false;
+  let tokenFound = false;
+  for (const line of lines) {
+    const name2 = sectionNameOf(line);
+    if (name2 !== void 0) {
+      inRoute = name2 === CODEX_ROUTE_SECTION;
+      continue;
+    }
+    if (!inRoute || keyOf(line) !== "experimental_bearer_token") continue;
+    const raw = line.slice(line.indexOf("=") + 1);
+    const at = commentStart(raw);
+    if ((at === -1 ? raw : raw.slice(0, at)).trim() !== wantedToken) {
+      refuse("experimental_bearer_token");
+    }
+    tokenFound = true;
+  }
+  if (!tokenFound) refuse("experimental_bearer_token");
 }
 function protocolWarnings(appType, provider) {
   const api = String(provider?.api ?? "");
@@ -2872,15 +2929,19 @@ async function writeCodexConfig({ provider, apiKey, home, io } = {}) {
   return withWriterLock(authPath, () => withWriterLock(configPath, async () => {
     const authRaw = await fileIo.read(authPath);
     const { doc, style } = parseJsonDocument(authRaw, authPath);
-    doc.OPENAI_API_KEY = key;
+    const requiresOpenaiAuth = hasCredentialLoginMaterial(doc);
     const authNext = serializeJson(doc, style);
     const configRaw = await fileIo.read(configPath);
     const patched = patchCodexToml(
       configRaw === void 0 ? "" : configRaw.toString("utf8"),
       provider,
-      // A file being created gets a trailing newline even though there was no
-      // "original" habit to copy.
-      { trailingNewline: configRaw === void 0 ? true : void 0 }
+      {
+        apiKey: key,
+        requiresOpenaiAuth,
+        // A file being created gets a trailing newline even though there was no
+        // "original" habit to copy.
+        trailingNewline: configRaw === void 0 ? true : void 0
+      }
     );
     await fileIo.write(authPath, authNext, 384);
     try {
@@ -2891,7 +2952,7 @@ async function writeCodexConfig({ provider, apiKey, home, io } = {}) {
     }
     return {
       files: [
-        { path: authPath, keys: ["OPENAI_API_KEY"], removed: [] },
+        { path: authPath, keys: [], removed: [] },
         { path: configPath, keys: patched.written, removed: patched.removed }
       ],
       warnings: protocolWarnings("codex", provider)

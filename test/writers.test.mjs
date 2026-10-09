@@ -282,7 +282,11 @@ test('claude: the key is written under ANTHROPIC_AUTH_TOKEN only', async () => {
 
 // --- Codex: two files, one unit ---------------------------------------------
 
-test('codex: auth.json gains the key while unknown members survive', async () => {
+test('codex: auth.json keeps the official login and never gains the key', async () => {
+  // From Codex 0.149 a custom provider reads its credential out of the route
+  // table, not `auth.json`; a key written here would authenticate nothing while
+  // still outranking the ChatGPT tokens beside it in Codex's auth-mode
+  // resolution, which reads the file as an `apikey` credential.
   const fixture = makeHome()
   try {
     fixture.write('.codex/auth.json', JSON.stringify({
@@ -290,11 +294,106 @@ test('codex: auth.json gains the key while unknown members survive', async () =>
       last_refresh: '2026-01-01T00:00:00Z',
     }, null, 2))
     const result = await writeCodexConfig({ provider: CODEX_PROVIDER, apiKey: 'sk-new', home: fixture.home })
-    const doc = JSON.parse(fixture.read('.codex/auth.json'))
-    assert.equal(doc.OPENAI_API_KEY, 'sk-new')
+    const raw = fixture.read('.codex/auth.json')
+    const doc = JSON.parse(raw)
+    assert.equal(doc.OPENAI_API_KEY, undefined, 'the route table carries the key now, not auth.json')
     assert.deepEqual(doc.tokens, { access_token: 'chatgpt-token' })
     assert.equal(doc.last_refresh, '2026-01-01T00:00:00Z')
+    assert.ok(!raw.includes('sk-new'), 'the key value must not reach auth.json at all')
     assert.deepEqual(result.files.map((file) => file.path.split(/[\\/]/).pop()), ['auth.json', 'config.toml'])
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('codex: the key lands in the route table, and never in a response', async () => {
+  const fixture = makeHome()
+  try {
+    const result = await writeCodexConfig({ provider: CODEX_PROVIDER, apiKey: 'sk-new', home: fixture.home })
+    const parsed = parseTomlish(fixture.read('.codex/config.toml'))
+    assert.equal(
+      parsed.sections['model_providers.custom'].experimental_bearer_token,
+      'sk-new',
+      'this is the one place Codex 0.149+ reads a custom provider credential from',
+    )
+    assert.ok(!JSON.stringify(result).includes('sk-new'), 'the key value never crosses back out')
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('codex: requires_openai_auth follows whether a login is on disk', async () => {
+  // Neither fixed value is safe. `true` with no login in auth.json makes Codex
+  // stall on a login page; `false` while a ChatGPT login sits next to it makes
+  // Codex treat itself as signed out, so account info vanishes and tokens stop
+  // being refreshed.
+  const withLogin = makeHome()
+  const withoutLogin = makeHome()
+  try {
+    withLogin.write('.codex/auth.json', JSON.stringify({
+      tokens: { id_token: 'id', access_token: 'at', refresh_token: 'rt' },
+    }))
+    // The same file, minus the credential: metadata must not count as a login.
+    withoutLogin.write('.codex/auth.json', JSON.stringify({
+      tokens: { account_id: 'acct-meta-only' },
+      last_refresh: '2026-01-01T00:00:00Z',
+    }))
+
+    await writeCodexConfig({ provider: CODEX_PROVIDER, apiKey: 'sk-a', home: withLogin.home })
+    await writeCodexConfig({ provider: CODEX_PROVIDER, apiKey: 'sk-b', home: withoutLogin.home })
+
+    assert.equal(
+      parseTomlish(withLogin.read('.codex/config.toml')).sections['model_providers.custom'].requires_openai_auth,
+      'true',
+    )
+    assert.equal(
+      parseTomlish(withoutLogin.read('.codex/config.toml')).sections['model_providers.custom'].requires_openai_auth,
+      'false',
+    )
+  } finally {
+    withLogin.cleanup()
+    withoutLogin.cleanup()
+  }
+})
+
+test('codex: a bare OPENAI_API_KEY is not a login, and a stale one is left alone', async () => {
+  // This is the shape earlier versions of this writer left behind. It must not
+  // be mistaken for a login (or `requires_openai_auth` would stay true and
+  // Codex would stall), and it is not ours to delete: with one provider in hand
+  // we cannot prove the key came from us rather than `codex login --api-key`.
+  const fixture = makeHome()
+  try {
+    fixture.write('.codex/auth.json', '{"OPENAI_API_KEY": "sk-stale"}\n')
+    await writeCodexConfig({ provider: CODEX_PROVIDER, apiKey: 'sk-new', home: fixture.home })
+    assert.equal(
+      parseTomlish(fixture.read('.codex/config.toml')).sections['model_providers.custom'].requires_openai_auth,
+      'false',
+    )
+    assert.equal(JSON.parse(fixture.read('.codex/auth.json')).OPENAI_API_KEY, 'sk-stale')
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('codex: a stale experimental_bearer_token is replaced, not left behind', async () => {
+  // The token is floor: a value from the previous provider would otherwise keep
+  // authenticating against the new provider's base_url.
+  const fixture = makeHome()
+  try {
+    fixture.write('.codex/config.toml', [
+      'model = "gpt-5"',
+      '',
+      '[model_providers.custom]',
+      'name = "Old"',
+      'base_url = "https://old.example/v1"',
+      'experimental_bearer_token = "sk-old"',
+      '',
+    ].join('\n'))
+    await writeCodexConfig({ provider: CODEX_PROVIDER, apiKey: 'sk-new', home: fixture.home })
+    const out = fixture.read('.codex/config.toml')
+    const parsed = parseTomlish(out)
+    assert.equal(parsed.sections['model_providers.custom'].experimental_bearer_token, 'sk-new')
+    assert.ok(!out.includes('sk-old'), 'the previous provider token must be gone')
   } finally {
     fixture.cleanup()
   }
@@ -331,7 +430,9 @@ test('codex: config.toml gains the floor keys and the custom table, and keeps th
     assert.equal(parsed.sections['model_providers.custom'].name, 'DeepSeek')
     assert.equal(parsed.sections['model_providers.custom'].base_url, 'https://api.deepseek.com/v1')
     assert.equal(parsed.sections['model_providers.custom'].wire_api, 'chat')
-    assert.equal(parsed.sections['model_providers.custom'].requires_openai_auth, 'true')
+    // No auth.json here, so there is no login on disk for the route to follow.
+    assert.equal(parsed.sections['model_providers.custom'].requires_openai_auth, 'false')
+    assert.equal(parsed.sections['model_providers.custom'].experimental_bearer_token, 'sk-new')
     // The edited line keeps its trailing comment.
     assert.ok(out.includes('model = "deepseek-chat"          # keep this comment'))
   } finally {
