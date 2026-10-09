@@ -33,9 +33,10 @@
  * at the same time. `writeFileAtomic` supplies the rename-based commit, so a
  * reader observes either the old or the new file and never a half-written one.
  */
+import { createHash } from 'node:crypto'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { parseCodexToml } from '../../lib/core/toml.js'
 
 /**
@@ -50,19 +51,27 @@ export const WRITER_APP_TYPES = Object.freeze(['claude', 'codex'])
  * A refusal to touch a target file, as opposed to a failure to write one.
  *
  * `kind` is `'parse'` when the existing file is not valid JSON, `'shape'` when
- * it parses but is not the structure we require, and `'unsupported'` when no
- * writer serves the app type at all. The first two mean "this is the user's
- * file and we do not understand it", which the route reports differently from
- * an I/O failure.
+ * it parses but is not the structure we require, `'unsupported'` when no writer
+ * serves the app type at all, and `'route'` when the file is perfectly
+ * well-formed but the provider we were asked to activate would not actually be
+ * the one the tool routes through. The first two mean "this is the user's file
+ * and we do not understand it", which the route reports differently from an
+ * I/O failure; `'route'` means "we understand it, and writing would not do what
+ * you asked", which is a refusal rather than a bug.
+ *
+ * `profile` and `key` are carried on a `'route'` refusal so the message can
+ * name the profile that is in the way — see {@link checkCodexEffectiveRoute}.
  */
 export class WriterError extends Error {
-  constructor(message, { kind = 'parse', path, line, column } = {}) {
+  constructor(message, { kind = 'parse', path, line, column, profile, key } = {}) {
     super(message)
     this.name = 'WriterError'
     this.kind = kind
     if (path !== undefined) this.path = path
     if (line !== undefined) this.line = line
     if (column !== undefined) this.column = column
+    if (profile !== undefined) this.profile = profile
+    if (key !== undefined) this.key = key
   }
 }
 
@@ -137,9 +146,111 @@ function isClaudeFloorEnv(key) {
     || (key.startsWith('CLAUDE_CODE_SKIP_') && key.endsWith('_AUTH'))
 }
 
+/**
+ * Window values earlier versions of CC Switch injected into Claude Code's
+ * `env`, frozen as exact (key, value) pairs — a verbatim port of
+ * `CLAUDE_RESIDUE_ENV` (`src-tauri/src/live/residue.rs`).
+ *
+ * These are the leftovers that a value-comparison rule cannot prove are the
+ * previous provider's: an early Kimi or Codex-OAuth row carried none of these
+ * keys, so the value in the file was put there by CC Switch itself rather than
+ * by the provider being switched away from. Each is *larger* than the window
+ * the next provider actually has, so leaving one behind over-runs the window
+ * silently. Timeout and telemetry switches are deliberately not collected:
+ * they are harmless when stale, and a user is likely to have set them globally
+ * from vendor documentation.
+ *
+ * The three keys are provider-exclusive fields, so they are otherwise left
+ * alone — this list is the only reason our writer touches them at all.
+ */
+const CLAUDE_RESIDUE_ENV = Object.freeze([
+  ['CLAUDE_CODE_MAX_CONTEXT_TOKENS', ['262144', '372000', '983616']],
+  ['CLAUDE_CODE_AUTO_COMPACT_WINDOW', ['262144', '372000', '1000000']],
+  ['CLAUDE_CODE_MAX_OUTPUT_TOKENS', ['131072']],
+])
+
+/**
+ * The spellings a residue value can have in JSON.
+ *
+ * The presets wrote strings, but a few early rows wrote the same number
+ * unquoted, so a match has to accept both — cc-switch's `residue_values`. Only
+ * values that parse as an unsigned integer get a numeric spelling; a bare
+ * `parseInt` would turn a value like `1e6` into a number it never was.
+ */
+function residueValues(values) {
+  const spellings = []
+  for (const value of values) {
+    spellings.push(value)
+    if (/^\d+$/.test(value)) spellings.push(Number(value))
+  }
+  return spellings
+}
+
 /** The table Codex is told to route third-party providers through. */
-const CODEX_ROUTE_SECTION = 'model_providers.custom'
 const CODEX_ROUTE_ID = 'custom'
+
+/**
+ * Codex's built-in provider ids, spelled as Codex spells them — a port of
+ * cc-switch's `BUILT_IN_IDS` (`src-tauri/src/live/project/codex.rs`). A table
+ * under one of these is not a custom route at all, so the one id this module
+ * writes its own route under must never be one of them.
+ */
+const CODEX_BUILT_IN_IDS = Object.freeze([
+  'amazon-bedrock',
+  'amazon-bedrock-runtime',
+  'openai',
+  'ollama',
+  'lmstudio',
+])
+
+/**
+ * The built-in ids whose provider table makes Codex 0.148+ refuse to load the
+ * *whole* file, not merely that table — cc-switch's `RESERVED_TABLE_IDS`. The
+ * two `amazon-bedrock` ids are deliberately absent: Codex allows a table there,
+ * because that is how the Bedrock region and profile are set.
+ */
+const CODEX_RESERVED_TABLE_IDS = Object.freeze(['openai', 'ollama', 'lmstudio'])
+
+/**
+ * The base id a table squatting on a reserved id is renamed to, with a numeric
+ * suffix when that too is taken — cc-switch's `LEGACY_REROUTE_ID`, used with
+ * its `first_free_id`.
+ */
+const CODEX_LEGACY_REROUTE_ID = 'cc-switch'
+
+/**
+ * The proxy placeholder token. cc-switch writes it into a route table's
+ * `experimental_bearer_token` while that route is dormant and recognises the
+ * literal on the way back in (`PROXY_TOKEN_PLACEHOLDER`,
+ * `src-tauri/src/live/project/claude.rs`). A table still holding it carries no
+ * real credential, which is the one thing that makes deleting that table safe
+ * rather than destructive.
+ */
+const CODEX_PROXY_TOKEN_PLACEHOLDER = 'PROXY_MANAGED'
+
+/** The top-level key naming the profile Codex actually applies. */
+const CODEX_PROFILE_KEY = 'profile'
+
+/**
+ * Keys inside `[profiles.<name>]` that would keep steering requests after this
+ * writer has moved the route — cc-switch's `check_effective_route`, and the
+ * same three it substitutes a warning for.
+ */
+const CODEX_PROFILE_ROUTE_KEYS = Object.freeze([
+  'model_provider',
+  'openai_base_url',
+  'experimental_bearer_token',
+])
+
+/**
+ * The model catalog file cc-switch generates next to `config.toml`, recognised
+ * by base name so a pointer is ours wherever the file is rooted — cc-switch's
+ * `CATALOG_FILENAME` and `is_cc_switch_catalog`.
+ */
+const CODEX_CATALOG_FILENAME = 'cc-switch-model-catalog.json'
+
+/** The top-level key pointing Codex at a model catalog file. */
+const CODEX_CATALOG_KEY = 'model_catalog_json'
 
 /** How long to wait for another writer before failing. */
 const LOCK_WAIT_MS = 5000
@@ -236,6 +347,80 @@ async function withWriterLock(path, operation) {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 })
   if (atomic === null) return operation()
   return atomic.withFileLock(path, operation, { waitMs: LOCK_WAIT_MS })
+}
+
+// --- the first-write backup -------------------------------------------------
+
+/**
+ * This plugin's device-local state directory, `~/.dsh-ccswitch-plugin`.
+ *
+ * cc-switch keeps the same kind of state in `~/.cc-switch` and pins that
+ * location on purpose (the `DeviceStore` doc comment, `live/engine.rs`: "覆盖
+ * 目录可能指向网盘同步目录，而写前意图和备份都是这台设备的事实"). The
+ * reasoning is what matters here, not the name: a first-write backup is a fact
+ * about *this machine*, so it must not follow a directory the user can redirect
+ * — a redirected one may be a cloud-sync folder, and a "first write" that syncs
+ * between machines is no longer a first write, it is another machine's second.
+ *
+ * This plugin has no separate config-directory knob, so the guarantee is
+ * expressed the only way it can be: the directory is derived from the home
+ * directory, exactly as `~/.claude` and `~/.codex` are, and from nothing else a
+ * caller passes. (Deriving it from `home` is also what keeps the tests
+ * hermetic: `home` is the temp directory they already isolate.)
+ */
+const DEVICE_DIR = '.dsh-ccswitch-plugin'
+
+/**
+ * `<home>/<device dir>/backups/live-first-write/` — cc-switch's layout under
+ * its own device store, which is where its `first_write_backup_dir` points.
+ */
+function defaultBackupRoot(home) {
+  return join(home ?? homedir(), DEVICE_DIR, 'backups', 'live-first-write')
+}
+
+/**
+ * Save one byte-level copy of a file before this plugin ever writes to it.
+ *
+ * A port of cc-switch's `ensure_first_write_backup` (`live/engine.rs`). The
+ * purpose is a way back: if a later version of this writer has a bug, the file
+ * as it was *before the plugin ever touched it* is still on disk. That is why
+ * the copy is taken once and never again — the `.source` marker's presence
+ * means "already saved", so the copy beside it always holds the original and
+ * never a version this plugin wrote.
+ *
+ * The name is `<first 12 hex of sha256(absolute path)>-<basename>`, and the
+ * marker beside it records the original absolute path so the directory can be
+ * read by a human. A file that did not exist on the first write gets only the
+ * marker: there were no original bytes to keep, and writing it means the
+ * content this plugin is about to create is never later mistaken for the
+ * user's own.
+ *
+ * Both files are written 0600. A backup of `settings.json` or `config.toml`
+ * holds the same credential the live file does, so a wider mode would undo the
+ * reason those two are owner-only in the first place.
+ *
+ * A failure here propagates and aborts the write, which is cc-switch's
+ * behaviour too (`?` on the call in `mode/operation.rs`): if the original
+ * cannot be saved, the file must not be touched.
+ */
+async function ensureFirstWriteBackup(path, current, backupRoot, fileIo) {
+  // The backup is keyed by the absolute path, so the same file reached through
+  // a relative path or a symlinked parent still maps to one entry — cc-switch
+  // hashes `path.to_string_lossy()`, and `resolve` is the closest thing Node
+  // has to what Rust's `Path` already holds.
+  const absolute = resolve(path)
+  const key = createHash('sha256').update(absolute).digest('hex').slice(0, 12)
+  const backup = join(backupRoot, `${key}-${basename(absolute)}`)
+  const marker = `${backup}.source`
+  // The marker is the whole test, and it is written last, so its presence
+  // proves the copy beside it is complete.
+  if (await fileIo.read(marker) !== undefined) return
+  // The backup root is almost never there on the first write, and cc-switch
+  // creates it the same way its `stage_write` creates any target's parent
+  // (`create_dir_all`) rather than leaving it to the caller.
+  await mkdir(backupRoot, { recursive: true, mode: 0o700 })
+  if (current !== undefined) await fileIo.write(backup, current, 0o600)
+  await fileIo.write(marker, absolute, 0o600)
 }
 
 // --- JSON documents ---------------------------------------------------------
@@ -397,6 +582,21 @@ function applyClaudePatch(doc, top, env, path) {
       removed.push(`env.${key}`)
     }
   }
+  // Residue cleanup, cc-switch's `remove_if` half of `direct_patch`. The rule
+  // is value-equality, not ownership: a window key is only deleted when it
+  // holds a value CC Switch itself is known to have written, so a window the
+  // user set by hand to some other number survives. A key the incoming
+  // provider writes is skipped outright — its value is assigned below and wins
+  // in place, which is what cc-switch means by "the target's own value stays
+  // in place".
+  for (const [key, values] of CLAUDE_RESIDUE_ENV) {
+    if (envTargets.has(key)) continue
+    const current = doc.env?.[key]
+    if (current === undefined) continue
+    if (!residueValues(values).includes(current)) continue
+    delete doc.env[key]
+    removed.push(`env.${key}`)
+  }
   for (const [key, value] of Object.entries(top)) doc[key] = value
   if (envTargets.size > 0) {
     if (!isRecord(doc.env)) doc.env = {}
@@ -508,6 +708,167 @@ function keyOf(line) {
   return match === null ? undefined : unquoteKey(match[1])
 }
 
+/** A non-empty string, trimmed; `undefined` for anything else. */
+function nonEmptyString(value) {
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined
+}
+
+/**
+ * The provider ids sitting under `[model_providers]`, as far as the scanner can
+ * see them: named tables and direct members both count.
+ */
+function codexProviderIds(structure) {
+  const ids = new Set()
+  for (const name of structure.ranges.keys()) {
+    const parts = name.split('.')
+    if (parts.length === 2 && parts[0] === 'model_providers') ids.add(parts[1])
+  }
+  for (const name of structure.values.keys()) {
+    const parts = name.split('.')
+    if (parts.length >= 3 && parts[0] === 'model_providers') ids.add(parts[1])
+  }
+  return ids
+}
+
+/**
+ * Move or drop `[model_providers.<reserved>]` tables before anything else runs.
+ *
+ * Codex 0.148+ refuses to load the *entire* file when one of these three ids
+ * carries a provider table, so a config that has one cannot be activated at all
+ * until it is dealt with — this is cc-switch's loop over `RESERVED_TABLE_IDS`
+ * at the top of `CodexConfigPatch::write_route`, and it is the reason
+ * `first_free_id` exists.
+ *
+ * The two outcomes differ by what can be proved. A table still holding the
+ * proxy placeholder carries no real credential, so it is provably CC Switch's
+ * own leftover and is deleted. Anything else may be the user's — CC Switch
+ * cannot tell which of its keys they care about, so it keeps the table and
+ * renames it, and so does this.
+ *
+ * cc-switch additionally deletes a table it can match against its `retired`
+ * list of known earlier routes. That list lives in CC Switch's database and
+ * this writer has no equivalent, so the placeholder test is the only deletion
+ * this module can justify; everything else is renamed, which is the
+ * conservative half of the same rule.
+ *
+ * @returns the rewritten lines and the labels removed, or `null` when there was
+ *   nothing to repair. Lines are returned rather than edited in place because
+ *   every caller keys its edits off line indices, which a deletion moves.
+ */
+function repairReservedCodexTables(lines, structure) {
+  const renames = new Map()
+  const drops = []
+  const removed = []
+  const taken = codexProviderIds(structure)
+  for (const id of CODEX_RESERVED_TABLE_IDS) {
+    const section = `model_providers.${id}`
+    const range = structure.ranges.get(section)
+    if (range === undefined) continue
+    // An array-of-tables header is not a provider table, and renaming one
+    // line of it would leave its siblings pointing at the old name.
+    if (structure.arrays.has(section)) continue
+    const token = structure.values.get(`${section}.experimental_bearer_token`)
+    if (token === CODEX_PROXY_TOKEN_PLACEHOLDER) {
+      drops.push(range)
+      removed.push(section)
+      continue
+    }
+    taken.delete(id)
+    const renamed = firstFreeCodexTableId(taken, CODEX_LEGACY_REROUTE_ID)
+    taken.add(renamed)
+    // The header carries the whole dotted name, not just the id: unlike
+    // cc-switch, which re-keys an entry in the `model_providers` map, this
+    // patches the line, so the parent prefix has to be preserved.
+    renames.set(range.start, `model_providers.${renamed}`)
+    removed.push(`${section} -> model_providers.${renamed}`)
+  }
+  if (renames.size === 0 && drops.length === 0) return null
+
+  const dropped = new Set()
+  for (const range of drops) {
+    for (let index = range.start; index < range.end; index += 1) dropped.add(index)
+  }
+  const out = []
+  for (let index = 0; index < lines.length; index += 1) {
+    if (dropped.has(index)) continue
+    const renamed = renames.get(index)
+    if (renamed === undefined) {
+      out.push(lines[index])
+      continue
+    }
+    out.push(renameSectionHeader(lines[index], renamed))
+  }
+  return { lines: out, removed }
+}
+
+/**
+ * Rewrite a `[table]` header line to open `name` instead, keeping the original
+ * indentation, the array-of-tables brackets if any, and any trailing comment.
+ */
+function renameSectionHeader(line, name) {
+  const match = /^(\s*)(\[\[?)([^\]]+)(\]\]?)(\s*(?:#.*)?)$/.exec(line)
+  if (match === null) return line
+  return `${match[1]}${match[2]}${name}${match[4]}${match[5]}`
+}
+
+/**
+ * Refuse to write when the configuration that would result does not actually
+ * route to the provider being activated — cc-switch's `check_effective_route`
+ * (`src-tauri/src/live/project/codex.rs`).
+ *
+ * Codex prefers the top-level `profile` when one is named, and a key inside
+ * that profile table outranks the top-level one this writer just set. The
+ * request would then keep going wherever the profile sends it, which looks
+ * exactly like success from here: the file is well-formed and every key this
+ * module owns says what it should. So the write is refused instead, and the
+ * message names the profile and the key so the user can fix it.
+ *
+ * Only three keys can do this (`CODEX_PROFILE_ROUTE_KEYS`), and
+ * `model_provider` is special: a profile naming the same route this writer is
+ * about to select agrees with it rather than overriding it, so it is not a
+ * conflict. cc-switch compares against the selected route with the built-in
+ * `openai` as the fallback; here the route is always a custom table, so the
+ * comparison is against that id.
+ *
+ * cc-switch checks the *resulting* document, and so does this — the profile
+ * keys are not ones this module writes, but proving that by construction would
+ * mean every future edit re-proves it.
+ */
+function checkCodexEffectiveRoute(text, routeId) {
+  const lines = text === '' ? [] : text.replace(/\n$/, '').split('\n')
+  const { values } = scanStructure(lines)
+  const name = nonEmptyString(values.get(CODEX_PROFILE_KEY))
+  if (name === undefined) return
+  const overridden = CODEX_PROFILE_ROUTE_KEYS.find((key) => {
+    const value = values.get(`profiles.${name}.${key}`)
+    if (value === undefined) return false
+    // A value the scanner saw but will not read — an array, a float, a
+    // multi-line string — is treated as a conflict. cc-switch reads the file
+    // with a real TOML parser, so it finds a value for all three of those; the
+    // one place the two disagree is a genuine multi-line string, which
+    // cc-switch reads as a string and this does not. Refusing is the
+    // recoverable direction either way: a wrongly-refused write costs the user
+    // one edit, while a wrongly-allowed one hides the fact that the switch did
+    // nothing at all.
+    if (value === UNREADABLE_TOML_VALUE) return true
+    // A *readable* non-string — `openai_base_url = 123` — is not a conflict
+    // here, and is not one in cc-switch either: its `non_empty_str` is
+    // `Item::as_str(..).filter(non-empty)`, so anything that is not a string
+    // reads as absent and the key is skipped.
+    const text = nonEmptyString(value)
+    if (text === undefined) return false
+    if (key === 'model_provider') return text !== routeId
+    return true
+  })
+  if (overridden === undefined) return
+  throw new WriterError(
+    `the active Codex profile "${name}" ([profiles.${name}]) sets ${overridden}, so requests would keep `
+    + `following it instead of the target provider. Remove ${overridden} from that profile or change the `
+    + 'top-level profile; nothing was written',
+    { kind: 'route', profile: name, key: overridden },
+  )
+}
+
 /**
  * Where the trailing `# comment` on a line begins, or `-1` when there is none.
  *
@@ -617,6 +978,90 @@ function hasCredentialLoginMaterial(auth) {
 }
 
 /**
+ * Whether `id` names one of Codex's built-in providers rather than a custom
+ * route — cc-switch's `is_built_in_id`. Case-sensitive on purpose: `OpenAI` is
+ * a perfectly legal custom id, only the lowercase spelling is the built-in.
+ */
+function isBuiltInCodexId(id) {
+  return CODEX_BUILT_IN_IDS.includes(id)
+}
+
+/**
+ * Whether a `[model_providers.<id>]` table under this id makes Codex 0.148+
+ * refuse to load the entire file — cc-switch's `RESERVED_TABLE_IDS`. The two
+ * `amazon-bedrock` ids are built-in but deliberately *not* reserved.
+ */
+function isReservedCodexId(id) {
+  return CODEX_RESERVED_TABLE_IDS.includes(id)
+}
+
+/**
+ * The first free id of the form `base`, `base-2`, `base-3`, … — a direct port
+ * of cc-switch's `first_free_id`.
+ *
+ * CC Switch uses it to pick a new home for a provider table squatting on a
+ * reserved id, and this module uses it to *name* that home in the refusal it
+ * raises instead (see {@link checkCodexReservedTables}); the two are the same
+ * calculation, which is the point — the name in the message is the one
+ * cc-switch would have moved the table to.
+ */
+function firstFreeCodexTableId(taken, base) {
+  let candidate = base
+  let suffix = 2
+  while (taken.has(candidate)) {
+    candidate = `${base}-${suffix}`
+    suffix += 1
+  }
+  return candidate
+}
+
+/**
+ * The id this writer puts its own route table under.
+ *
+ * In practice this is `custom`: reusing that table is intended, because it is
+ * the one this plugin owns and the one cc-switch's `put_table` writes.
+ *
+ * What must never happen is the id landing on one Codex claims for itself — a
+ * table under a built-in id is not a custom route at all, and under `openai` /
+ * `ollama` / `lmstudio` it makes Codex refuse the entire file. The check is
+ * spelled out rather than left as a comment because it is what stops a later
+ * change to `CODEX_ROUTE_ID` from quietly corrupting every config it touches,
+ * and the fallback is cc-switch's `first_free_id` walk — pointed at the ids
+ * that would break the file rather than at the ids merely in use, which is the
+ * same set, since `RESERVED_TABLE_IDS` is a subset of `BUILT_IN_IDS`.
+ */
+function codexRouteId() {
+  if (!isBuiltInCodexId(CODEX_ROUTE_ID) && !isReservedCodexId(CODEX_ROUTE_ID)) return CODEX_ROUTE_ID
+  return firstFreeCodexTableId(new Set(CODEX_BUILT_IN_IDS), CODEX_ROUTE_ID)
+}
+
+/**
+ * Whether a `model_catalog_json` value points at a catalog CC Switch generated.
+ *
+ * Matched on base name alone, so the pointer is recognised wherever the file
+ * is rooted — cc-switch's `is_cc_switch_catalog`. This is the test that keeps
+ * a catalog belonging to someone else from being mistaken for ours.
+ */
+function isCcSwitchCatalog(value) {
+  if (typeof value !== 'string' || value === '') return false
+  const name = value.split(/[\\/]/).pop()
+  return name === CODEX_CATALOG_FILENAME
+}
+
+/**
+ * Whether the config carries a pointer at a catalog CC Switch generated.
+ *
+ * `model_catalog_json` is read back as the literal the scanner parsed, so a
+ * pointer written some way this scanner will not guess at comes back as the
+ * unreadable marker rather than a string, and the answer is `false`. That is
+ * the conservative direction: an unrecognised pointer is left alone rather than
+ * deleted on a guess.
+ */
+function hasStaleCatalogPointer(structure) {
+  return isCcSwitchCatalog(structure.values.get(CODEX_CATALOG_KEY))
+}
+
+/**
  * The keys this writer owns in `config.toml`.
  *
  * `model_reasoning_effort` is emitted as a removal when the provider carries no
@@ -636,13 +1081,14 @@ function hasCredentialLoginMaterial(auth) {
  * `requires_openai_auth` is computed by the caller rather than fixed; see
  * {@link writeCodexConfig} for the rule and why neither fixed value is safe.
  */
-function codexTomlEdits(provider, apiKey, requiresOpenaiAuth) {
+function codexTomlEdits(provider, apiKey, requiresOpenaiAuth, routeId) {
   const edits = []
+  const routeSection = `model_providers.${routeId}`
   const model = primaryModelId(provider)
   if (model !== undefined) {
     edits.push({ section: null, key: 'model', literal: tomlString(model) })
   }
-  edits.push({ section: null, key: 'model_provider', literal: tomlString(CODEX_ROUTE_ID) })
+  edits.push({ section: null, key: 'model_provider', literal: tomlString(routeId) })
   const effort = reasoningEffortOf(provider)
   edits.push({
     section: null,
@@ -650,16 +1096,16 @@ function codexTomlEdits(provider, apiKey, requiresOpenaiAuth) {
     literal: effort === undefined ? null : tomlString(effort),
   })
   edits.push(
-    { section: CODEX_ROUTE_SECTION, key: 'name', literal: tomlString(provider?.displayName ?? '') },
-    { section: CODEX_ROUTE_SECTION, key: 'base_url', literal: tomlString(provider?.baseURL ?? '') },
+    { section: routeSection, key: 'name', literal: tomlString(provider?.displayName ?? '') },
+    { section: routeSection, key: 'base_url', literal: tomlString(provider?.baseURL ?? '') },
     {
-      section: CODEX_ROUTE_SECTION,
+      section: routeSection,
       key: 'wire_api',
       literal: tomlString(provider?.api === 'openai-responses' ? 'responses' : 'chat'),
     },
-    { section: CODEX_ROUTE_SECTION, key: 'experimental_bearer_token', literal: tomlString(apiKey) },
+    { section: routeSection, key: 'experimental_bearer_token', literal: tomlString(apiKey) },
     {
-      section: CODEX_ROUTE_SECTION,
+      section: routeSection,
       key: 'requires_openai_auth',
       literal: requiresOpenaiAuth ? 'true' : 'false',
     },
@@ -674,10 +1120,19 @@ function codexTomlEdits(provider, apiKey, requiresOpenaiAuth) {
  * root), and `ranges` maps a table name to its header line and the line that
  * ends it. A key may only be matched inside the table it belongs to — matching
  * `model` at the root must not find the `model` inside `[some_table]`.
+ *
+ * `values` keeps the *last* assignment seen for each `table.key`, with the key
+ * spelled as a dotted name from the root. Array-of-tables headers
+ * (`[[thing]]`) overwrite rather than accumulate, because TOML allows the same
+ * name to repeat and there is no way to tell the entries apart by name alone;
+ * every reader here wants the last one. It is deliberately not a general TOML
+ * reader — it only ever sees lines the scanner was able to classify.
  */
 function scanStructure(lines) {
   const sectionAt = []
   const headers = new Map()
+  const values = new Map()
+  const arrays = new Set()
   const state = { multiline: null, arrays: 0, unterminated: false }
   let current = null
   for (let index = 0; index < lines.length; index += 1) {
@@ -686,7 +1141,20 @@ function scanStructure(lines) {
       const name = sectionNameOf(lines[index])
       if (name !== undefined) {
         if (!headers.has(name)) headers.set(name, index)
+        if (/^\s*\[\[/.test(lines[index])) arrays.add(name)
         current = name
+        continue
+      }
+      const key = keyOf(lines[index])
+      if (key !== undefined && !state.unterminated) {
+        const value = parseTomlLiteral(lines[index])
+        // A value the scanner saw but will not read is recorded as unreadable
+        // rather than dropped, because "this key is absent" and "this key is
+        // here and I cannot read it" call for opposite answers below.
+        values.set(
+          current === null ? key : `${current}.${key}`,
+          value === undefined ? UNREADABLE_TOML_VALUE : value,
+        )
       }
     }
     scanLine(lines[index], state)
@@ -694,8 +1162,94 @@ function scanStructure(lines) {
   const starts = [...headers.values()].sort((left, right) => left - right)
   const endOf = (start) => starts.find((candidate) => candidate > start) ?? lines.length
   const ranges = new Map([...headers].map(([name, start]) => [name, { start, end: endOf(start) }]))
-  return { sectionAt, headers, ranges, unterminated: state.unterminated }
+  return { sectionAt, headers, ranges, values, arrays, unterminated: state.unterminated }
 }
+
+/**
+ * The value a `key = …` line assigns, as a JavaScript value, or `undefined`
+ * when the line holds something this scanner will not guess at.
+ *
+ * Only the shapes the route check actually reads are understood: quoted
+ * strings, booleans, integers, and inline tables one level deep. Anything else
+ * — an array, a multi-line value, a float — comes back `undefined`, which
+ * makes the check treat it as "present but unreadable" rather than as absent.
+ */
+function parseTomlLiteral(line) {
+  const eq = line.indexOf('=')
+  if (eq === -1) return undefined
+  const raw = line.slice(eq + 1)
+  const at = commentStart(raw)
+  const body = (at === -1 ? raw : raw.slice(0, at)).trim()
+  if (body === '') return undefined
+  if (body.startsWith('"') || body.startsWith("'")) {
+    const quote = body[0]
+    if (body.length < 2 || body[body.length - 1] !== quote) return undefined
+    const inner = body.slice(1, -1)
+    if (quote === "'") return inner
+    // A basic string's escapes are close enough to JSON's for the values read
+    // here; a body JSON refuses is left unread rather than coerced.
+    try {
+      return JSON.parse(body)
+    } catch {
+      return inner
+    }
+  }
+  if (body === 'true') return true
+  if (body === 'false') return false
+  if (/^[+-]?\d+$/.test(body)) return Number(body)
+  if (body.startsWith('{') && body.endsWith('}')) {
+    return parseInlineTable(body.slice(1, -1))
+  }
+  return undefined
+}
+
+/**
+ * The members of an inline table body (`{ a = 1, b = "x" }` without the
+ * braces), as a plain object. Nested inline tables and arrays come back as
+ * `undefined` members: this exists to answer "does this table set key X, and
+ * to what", not to be a TOML reader.
+ */
+function parseInlineTable(body) {
+  const members = {}
+  let depth = 0
+  let start = 0
+  const parts = []
+  for (let index = 0; index < body.length; index += 1) {
+    const char = body[index]
+    if (char === '"' || char === "'") {
+      const close = body.indexOf(char, index + 1)
+      if (close === -1) return undefined
+      index = close
+      continue
+    }
+    if (char === '{' || char === '[') depth += 1
+    else if (char === '}' || char === ']') depth -= 1
+    else if (char === ',' && depth === 0) {
+      parts.push(body.slice(start, index))
+      start = index + 1
+    }
+  }
+  parts.push(body.slice(start))
+  for (const part of parts) {
+    const eq = part.indexOf('=')
+    if (eq === -1) continue
+    const key = unquoteKey(part.slice(0, eq).trim())
+    if (key === '') continue
+    const value = parseTomlLiteral(`x = ${part.slice(eq + 1)}`)
+    // An inline member we cannot read still has to be *seen*: the caller
+    // distinguishes "absent" from "present, value unknown" by the key's
+    // presence, so it is recorded explicitly rather than dropped.
+    members[key] = value === undefined ? UNREADABLE_TOML_VALUE : value
+  }
+  return members
+}
+
+/**
+ * A marker for a TOML value the scanner positively saw but cannot represent.
+ * It is never compared for equality — only tested for — so a single frozen
+ * symbol is enough.
+ */
+const UNREADABLE_TOML_VALUE = Symbol('unreadable-toml-value')
 
 /**
  * Patch `text`, returning the new text plus what was written and removed.
@@ -707,9 +1261,8 @@ function scanStructure(lines) {
  */
 function patchCodexToml(text, provider, { apiKey, requiresOpenaiAuth, trailingNewline } = {}) {
   const endsWithNewline = trailingNewline ?? text.endsWith('\n')
-  const lines = text === '' ? [] : (endsWithNewline ? text.slice(0, -1) : text).split('\n')
-  const structure = scanStructure(lines)
-  const { sectionAt, headers, ranges } = structure
+  const original = text === '' ? [] : (endsWithNewline ? text.slice(0, -1) : text).split('\n')
+  let structure = scanStructure(original)
 
   // An unterminated string means the line scanner stopped early on some line and
   // every later key it found is a guess. cc-switch parses the whole document
@@ -722,13 +1275,57 @@ function patchCodexToml(text, provider, { apiKey, requiresOpenaiAuth, trailingNe
     )
   }
 
+  // Reserved-id tables are dealt with before anything is matched, because
+  // deleting one shifts every line index below it. Renaming does not, but both
+  // are re-scanned together rather than tracking offsets.
+  const repaired = repairReservedCodexTables(original, structure)
+  let lines = original
+  const removed = []
+  if (repaired !== null) {
+    lines = repaired.lines
+    removed.push(...repaired.removed)
+    structure = scanStructure(lines)
+  }
+  const { sectionAt, headers, ranges } = structure
+
+  // The route id is chosen from the ids Codex claims for itself, never from the
+  // ids already in the document — see {@link codexRouteId}.
+  const routeId = codexRouteId()
+  const routeSection = `model_providers.${routeId}`
+
   const replacements = new Map()
   const removals = new Set()
   const pending = []
   const written = []
-  const removed = []
 
-  for (const edit of codexTomlEdits(provider, apiKey, requiresOpenaiAuth)) {
+  // The model-catalog pointer is a floor key — one the provider owns — but only
+  // half of that can be honoured here, and the half that cannot is the
+  // dangerous one. This writer never generates a catalog, so it can never
+  // *set* the pointer; what it can do is recognise a pointer at a catalog
+  // CC Switch generated and drop it. Such a catalog describes the models of
+  // whichever provider was active when it was written, and leaving the pointer
+  // in place would keep Codex reading a model list for a route it no longer
+  // describes — the same silent wrongness the effective-route check refuses.
+  //
+  // A pointer at anything else is somebody else's catalogue — the user's own,
+  // or another tool's — and is left exactly as it is. cc-switch's
+  // `foreign_catalog` and `live_catalog_is_ours` exist precisely to tell those
+  // two apart (`live/project/codex.rs`), and erring in the other direction
+  // would delete a file someone else manages.
+  //
+  // The catalog *file* is deliberately not touched. This writer did not create
+  // it in this activation, and removing a pointer already makes Codex stop
+  // reading it; deleting the bytes as well would be an unrecoverable act taken
+  // on a guess about who wrote them.
+  if (hasStaleCatalogPointer(structure)) {
+    const at = lines.findIndex((line, index) => sectionAt[index] === null && keyOf(line) === CODEX_CATALOG_KEY)
+    if (at !== -1) {
+      removals.add(at)
+      removed.push(CODEX_CATALOG_KEY)
+    }
+  }
+
+  for (const edit of codexTomlEdits(provider, apiKey, requiresOpenaiAuth, routeId)) {
     const label = edit.section === null ? edit.key : `${edit.section}.${edit.key}`
     let found = -1
     for (let index = 0; index < lines.length; index += 1) {
@@ -753,17 +1350,17 @@ function patchCodexToml(text, provider, { apiKey, requiresOpenaiAuth, trailingNe
     written.push(label)
   }
 
-  // Appending a second `[model_providers.custom]` header is a TOML error, so a
-  // file that already spells the table some other way is refused rather than
-  // risked. An inline `custom = { … }` under an existing `[model_providers]`
-  // cannot be patched line-wise at all.
-  if (pending.some((edit) => edit.section === CODEX_ROUTE_SECTION) && !headers.has(CODEX_ROUTE_SECTION)) {
-    const inlineCustom = ranges.has('model_providers') && lines
+  // Appending a second route-table header is a TOML error, so a file that
+  // already spells the table some other way is refused rather than risked. An
+  // inline `custom = { … }` under an existing `[model_providers]` cannot be
+  // patched line-wise at all.
+  if (pending.some((edit) => edit.section === routeSection) && !headers.has(routeSection)) {
+    const inlineRoute = ranges.has('model_providers') && lines
       .slice(ranges.get('model_providers').start, ranges.get('model_providers').end)
-      .some((line) => keyOf(line) === 'custom')
-    if (inlineCustom) {
+      .some((line) => keyOf(line) === routeId)
+    if (inlineRoute) {
       throw new WriterError(
-        'config.toml defines model_providers.custom inline; refusing to rewrite it',
+        `config.toml defines model_providers.${routeId} inline; refusing to rewrite it`,
         { kind: 'shape' },
       )
     }
@@ -835,7 +1432,12 @@ function patchCodexToml(text, provider, { apiKey, requiresOpenaiAuth, trailingNe
   }
 
   const next = `${out.join('\n')}${endsWithNewline ? '\n' : ''}`
-  verifyCodexToml(next, provider, { apiKey, requiresOpenaiAuth })
+  verifyCodexToml(next, provider, { apiKey, requiresOpenaiAuth, routeId })
+  // The effective-route check runs last, on the finished document: it is about
+  // what Codex will do with the file, not about the edits, and a refusal here
+  // is still before any write. cc-switch checks at the same point, at the end
+  // of `CodexConfigPatch::apply_to`.
+  checkCodexEffectiveRoute(next, routeId)
   return { text: next, written, removed }
 }
 
@@ -850,8 +1452,9 @@ function patchCodexToml(text, provider, { apiKey, requiresOpenaiAuth, trailingNe
  * belong; raising here costs a failed write, whereas writing would cost the
  * user's configuration.
  */
-function verifyCodexToml(text, provider, { apiKey, requiresOpenaiAuth } = {}) {
+function verifyCodexToml(text, provider, { apiKey, requiresOpenaiAuth, routeId = CODEX_ROUTE_ID } = {}) {
   const lines = text === '' ? [] : text.replace(/\n$/, '').split('\n')
+  const routeSection = `model_providers.${routeId}`
 
   // Repeating a `[table]` header is the one corruption that silently changes a
   // file's meaning rather than breaking it loudly, so it is checked directly
@@ -891,7 +1494,7 @@ function verifyCodexToml(text, provider, { apiKey, requiresOpenaiAuth } = {}) {
   } else {
     expect('model_reasoning_effort', parsed.reasoningEffort, effort)
   }
-  if (parsed.provider === null) refuse('model_providers.custom')
+  if (parsed.provider === null) refuse(routeSection)
   expect('base_url', parsed.provider.baseUrl, String(provider?.baseURL ?? ''))
   expect('name', parsed.provider.name, String(provider?.displayName ?? ''))
   expect('wire_api', parsed.provider.wireApi, provider?.api === 'openai-responses' ? 'responses' : 'chat')
@@ -900,15 +1503,14 @@ function verifyCodexToml(text, provider, { apiKey, requiresOpenaiAuth } = {}) {
   // `experimental_bearer_token` is not exposed by the reader, so like the
   // duplicate-header check above it is verified by scanning the text directly.
   // Comparing the raw value is the point: it proves the credential landed under
-  // `[model_providers.custom]` and not in some table the line scanner mistook
-  // for the route.
+  // the route table and not in some table the line scanner mistook for it.
   const wantedToken = tomlString(apiKey)
   let inRoute = false
   let tokenFound = false
   for (const line of lines) {
     const name = sectionNameOf(line)
     if (name !== undefined) {
-      inRoute = name === CODEX_ROUTE_SECTION
+      inRoute = name === routeSection
       continue
     }
     if (!inRoute || keyOf(line) !== 'experimental_bearer_token') continue
@@ -950,20 +1552,26 @@ function protocolWarnings(appType, provider) {
  * @param {string} options.apiKey - the resolved key. Never logged or returned.
  * @param {string} [options.home] - home directory; defaults to `os.homedir()`.
  *   Tests point this at a temp dir so the real `~/.claude` is never touched.
+ * @param {string} [options.backupRoot] - where the once-per-file first-write
+ *   backup goes; defaults to `<home>/.dsh-ccswitch-plugin/backups/live-first-write`.
+ *   Parameterised for the same reason `home` is, and never derived from the
+ *   file being written — see {@link defaultBackupRoot}.
  * @param {object} [options.io] - file primitives, for tests that need a write
  *   to fail. Production never passes it.
  * @returns {Promise<{files: Array<{path: string, keys: string[], removed: string[]}>, warnings: string[]}>}
  * @throws {WriterError} when the existing file cannot be understood.
  */
-export async function writeClaudeConfig({ provider, apiKey, home, io } = {}) {
+export async function writeClaudeConfig({ provider, apiKey, home, io, backupRoot } = {}) {
   const key = requireApiKey(apiKey)
   const path = join(home ?? homedir(), '.claude', 'settings.json')
   const fileIo = io ?? defaultIo
+  const backups = backupRoot ?? defaultBackupRoot(home)
   return withWriterLock(path, async () => {
     const raw = await fileIo.read(path)
     const { doc, style } = parseJsonDocument(raw, path)
     const { top, env } = claudeProjection(provider, key)
     const removed = applyClaudePatch(doc, top, env, path)
+    await ensureFirstWriteBackup(path, raw, backups, fileIo)
     await fileIo.write(path, serializeJson(doc, style), 0o600)
     return {
       files: [{
@@ -1007,12 +1615,13 @@ export async function writeClaudeConfig({ provider, apiKey, home, io } = {}) {
  * @returns {Promise<{files: Array<{path: string, keys: string[], removed: string[]}>, warnings: string[]}>}
  * @throws {WriterError} when an existing file cannot be understood.
  */
-export async function writeCodexConfig({ provider, apiKey, home, io } = {}) {
+export async function writeCodexConfig({ provider, apiKey, home, io, backupRoot } = {}) {
   const key = requireApiKey(apiKey)
   const directory = join(home ?? homedir(), '.codex')
   const authPath = join(directory, 'auth.json')
   const configPath = join(directory, 'config.toml')
   const fileIo = io ?? defaultIo
+  const backups = backupRoot ?? defaultBackupRoot(home)
 
   return withWriterLock(authPath, () => withWriterLock(configPath, async () => {
     const authRaw = await fileIo.read(authPath)
@@ -1043,6 +1652,13 @@ export async function writeCodexConfig({ provider, apiKey, home, io } = {}) {
         trailingNewline: configRaw === undefined ? true : undefined,
       },
     )
+
+    // Both files are rendered before either is backed up or written, so a file
+    // this module refuses to understand costs neither a write nor a backup —
+    // the same ordering cc-switch gets from rendering in `plan` and backing up
+    // in the publish step.
+    await ensureFirstWriteBackup(authPath, authRaw, backups, fileIo)
+    await ensureFirstWriteBackup(configPath, configRaw, backups, fileIo)
 
     await fileIo.write(authPath, authNext, 0o600)
     try {

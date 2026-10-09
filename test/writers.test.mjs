@@ -9,9 +9,10 @@
 // comparatively easy to notice and fix.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import {
   WRITER_APP_TYPES,
   WriterError,
@@ -571,9 +572,15 @@ test('codex: a failing config.toml write rolls auth.json back', async () => {
     fixture.write('.codex/config.toml', 'model = "gpt-5"\n')
 
     const failing = {
-      read: async (path) => readFileSync(path),
+      // `io.read` is `readBytesIfExists`, so "not there" is `undefined` rather
+      // than a throw. A stub that throws ENOENT would be implementing a
+      // different interface from the one the writers use.
+      read: async (path) => {
+        try { return readFileSync(path) } catch (err) { if (err.code === 'ENOENT') return undefined; throw err }
+      },
       write: async (path, content) => {
         if (path.endsWith('config.toml')) throw Object.assign(new Error('disk full'), { code: 'ENOSPC' })
+        mkdirSync(join(path, '..'), { recursive: true })
         writeFileSync(path, content)
       },
     }
@@ -597,6 +604,7 @@ test('codex: rolling back removes an auth.json that did not exist before', async
       },
       write: async (path, content) => {
         if (path.endsWith('config.toml')) throw new Error('nope')
+        mkdirSync(join(path, '..'), { recursive: true })
         writeFileSync(path, content)
       },
     }
@@ -856,6 +864,582 @@ test('the writers route is loopback and same-origin fenced', async () => {
     noProof,
   )
   assert.equal(statusOf(noProof), 403)
+})
+
+// --- Claude: the residue table ----------------------------------------------
+
+/** One (key, value) pair per entry of cc-switch's frozen residue list. */
+const RESIDUE_PAIRS = [
+  ['CLAUDE_CODE_MAX_CONTEXT_TOKENS', '262144'],
+  ['CLAUDE_CODE_MAX_CONTEXT_TOKENS', '372000'],
+  ['CLAUDE_CODE_MAX_CONTEXT_TOKENS', '983616'],
+  ['CLAUDE_CODE_AUTO_COMPACT_WINDOW', '262144'],
+  ['CLAUDE_CODE_AUTO_COMPACT_WINDOW', '372000'],
+  ['CLAUDE_CODE_AUTO_COMPACT_WINDOW', '1000000'],
+  ['CLAUDE_CODE_MAX_OUTPUT_TOKENS', '131072'],
+]
+
+test('claude: every frozen residue pair is removed, in both spellings', async () => {
+  // These are window values earlier CC Switch versions injected. Each is larger
+  // than the window the next provider actually has, so a leftover one over-runs
+  // the window silently — which is why they are deleted rather than preserved
+  // like other provider-exclusive fields.
+  for (const [key, value] of RESIDUE_PAIRS) {
+    for (const spelling of [value, Number(value)]) {
+      const fixture = makeHome()
+      try {
+        fixture.write('.claude/settings.json', `${JSON.stringify({
+          env: { [key]: spelling, KEEP_ME: '1' },
+        }, null, 2)}\n`)
+        const result = await writeClaudeConfig({ provider: CLAUDE_PROVIDER, apiKey: 'sk-new', home: fixture.home })
+        const env = JSON.parse(fixture.read('.claude/settings.json')).env
+        assert.equal(env[key], undefined, `${key} = ${JSON.stringify(spelling)} must be removed`)
+        assert.equal(env.KEEP_ME, '1', 'an unrelated user key is untouched')
+        assert.ok(result.files[0].removed.includes(`env.${key}`), `the removal is reported: ${result.files[0].removed}`)
+      } finally {
+        fixture.cleanup()
+      }
+    }
+  }
+})
+
+test('claude: a window the user set to some other value survives', async () => {
+  // The rule is value equality, not ownership of the key. A number that CC
+  // Switch never wrote is the user's own setting, and deleting it would be the
+  // exact failure this module exists to avoid.
+  const fixture = claudeFixture()
+  try {
+    fixture.write('.claude/settings.json', `${JSON.stringify({
+      env: {
+        CLAUDE_CODE_MAX_CONTEXT_TOKENS: '65536',
+        CLAUDE_CODE_AUTO_COMPACT_WINDOW: 777,
+        CLAUDE_CODE_MAX_OUTPUT_TOKENS: 'not-a-number',
+      },
+    }, null, 2)}\n`)
+    const result = await writeClaudeConfig({ provider: CLAUDE_PROVIDER, apiKey: 'sk-new', home: fixture.home })
+    const env = JSON.parse(fixture.read('.claude/settings.json')).env
+    assert.equal(env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, '65536')
+    assert.equal(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, 777)
+    assert.equal(env.CLAUDE_CODE_MAX_OUTPUT_TOKENS, 'not-a-number')
+    assert.deepEqual(result.files[0].removed, [], 'nothing was claimed as removed')
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('claude: a residue value is not removed when the provider writes that key', async () => {
+  // The target's own value wins in place, which is cc-switch's `remove_if`
+  // rule: a path named by `set` is skipped by the removal pass. The projection
+  // emits no window key today, so the guard itself is unreachable through the
+  // public API and this pins the behaviour that *is* reachable — residue
+  // cleanup runs in the same pass as a real write, and an unrelated
+  // `CLAUDE_CODE_*` switch is not swept up with it.
+  const fixture = makeHome()
+  try {
+    fixture.write('.claude/settings.json', `${JSON.stringify({
+      env: {
+        ANTHROPIC_BASE_URL: 'https://old.example',
+        CLAUDE_CODE_MAX_OUTPUT_TOKENS: '131072',
+        API_TIMEOUT_MS: '300000',
+      },
+    }, null, 2)}\n`)
+    await writeClaudeConfig({ provider: CLAUDE_PROVIDER, apiKey: 'sk-new', home: fixture.home })
+    const doc = JSON.parse(fixture.read('.claude/settings.json'))
+    assert.equal(doc.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS, undefined)
+    assert.equal(doc.env.ANTHROPIC_AUTH_TOKEN, 'sk-new')
+    assert.equal(doc.env.API_TIMEOUT_MS, '300000')
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+// --- Codex: the effective route ---------------------------------------------
+
+test('codex: a profile that overrides the route is refused, and nothing is written', async () => {
+  // Codex prefers the top-level `profile`, and a routing key inside it outranks
+  // the one this writer just set. The write would look successful and route
+  // somewhere else entirely, so it is refused instead.
+  const fixture = makeHome()
+  try {
+    const source = [
+      'model = "gpt-5"',
+      'profile = "work"',
+      '',
+      '[profiles.work]',
+      'model_provider = "openai"',
+      '',
+    ].join('\n')
+    fixture.write('.codex/config.toml', source)
+    await assert.rejects(
+      writeCodexConfig({ provider: CODEX_PROVIDER, apiKey: 'sk-new', home: fixture.home }),
+      (err) => {
+        assert.ok(err instanceof WriterError, 'a WriterError, not a generic failure')
+        assert.equal(err.kind, 'route')
+        assert.equal(err.profile, 'work')
+        assert.equal(err.key, 'model_provider')
+        assert.match(err.message, /\[profiles\.work\]/)
+        assert.match(err.message, /model_provider/)
+        assert.match(err.message, /nothing was written/)
+        return true
+      },
+    )
+    assert.equal(fixture.read('.codex/config.toml'), source, 'the file is byte-identical after a refusal')
+    assert.equal(fixture.exists('.codex/auth.json'), false, 'and the sibling file was not created either')
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('codex: each of the three overriding keys is refused by name', async () => {
+  for (const [key, value] of [
+    ['model_provider', '"openai"'],
+    ['openai_base_url', '"https://elsewhere.example/v1"'],
+    ['experimental_bearer_token', '"sk-someone-elses"'],
+  ]) {
+    const fixture = makeHome()
+    try {
+      fixture.write('.codex/config.toml', [
+        'profile = "work"',
+        '',
+        '[profiles.work]',
+        `${key} = ${value}`,
+        '',
+      ].join('\n'))
+      await assert.rejects(
+        writeCodexConfig({ provider: CODEX_PROVIDER, apiKey: 'sk-new', home: fixture.home }),
+        (err) => err instanceof WriterError && err.kind === 'route' && err.key === key,
+        `${key} must be refused`,
+      )
+    } finally {
+      fixture.cleanup()
+    }
+  }
+})
+
+test('codex: a profile naming the same route agrees rather than overriding', async () => {
+  // cc-switch compares `model_provider` against the route being selected, not
+  // against "is it set at all": a profile that selects the same table the
+  // writer is about to write is not a conflict.
+  const fixture = makeHome()
+  try {
+    fixture.write('.codex/config.toml', [
+      'profile = "work"',
+      '',
+      '[profiles.work]',
+      'model_provider = "custom"',
+      '',
+    ].join('\n'))
+    await writeCodexConfig({ provider: CODEX_PROVIDER, apiKey: 'sk-new', home: fixture.home })
+    const parsed = parseTomlish(fixture.read('.codex/config.toml'))
+    assert.equal(parsed.top.model_provider, 'custom')
+    assert.equal(parsed.sections['profiles.work'].model_provider, 'custom', "the user's profile is left alone")
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('codex: no top-level profile, or one that does not exist, is not a conflict', async () => {
+  for (const source of [
+    'model = "gpt-5"\n',
+    ['profile = "gone"', '', '[profiles.other]', 'model_provider = "openai"', ''].join('\n'),
+  ]) {
+    const fixture = makeHome()
+    try {
+      fixture.write('.codex/config.toml', source)
+      await writeCodexConfig({ provider: CODEX_PROVIDER, apiKey: 'sk-new', home: fixture.home })
+      assert.equal(parseTomlish(fixture.read('.codex/config.toml')).top.model_provider, 'custom')
+    } finally {
+      fixture.cleanup()
+    }
+  }
+})
+
+test('codex: a profile key the scanner cannot read is refused, not assumed harmless', async () => {
+  // "absent" and "here but unreadable" call for opposite answers: the first is
+  // not a conflict, the second might be. cc-switch reads these files with a
+  // real TOML parser and would see a value for an array or a float, so refusing
+  // is the direction that cannot hide a switch that did nothing.
+  for (const value of ['["a", "b"]', '1.5', '"""multi\nline"""']) {
+    const fixture = makeHome()
+    try {
+      const source = ['profile = "work"', '', '[profiles.work]', `openai_base_url = ${value}`, ''].join('\n')
+      fixture.write('.codex/config.toml', source)
+      await assert.rejects(
+        writeCodexConfig({ provider: CODEX_PROVIDER, apiKey: 'sk-new', home: fixture.home }),
+        (err) => err instanceof WriterError && err.kind === 'route' && err.key === 'openai_base_url',
+        `${value} must be treated as a conflict`,
+      )
+      assert.equal(fixture.read('.codex/config.toml'), source)
+    } finally {
+      fixture.cleanup()
+    }
+  }
+})
+
+test('codex: a readable non-string profile key is skipped, as cc-switch skips it', async () => {
+  // cc-switch's `non_empty_str` keeps only strings, so `openai_base_url = 123`
+  // reads as absent there and must not refuse the write here.
+  const fixture = makeHome()
+  try {
+    fixture.write('.codex/config.toml', [
+      'profile = "work"',
+      '',
+      '[profiles.work]',
+      'openai_base_url = 123',
+      'experimental_bearer_token = true',
+      '',
+    ].join('\n'))
+    await writeCodexConfig({ provider: CODEX_PROVIDER, apiKey: 'sk-new', home: fixture.home })
+    assert.equal(parseTomlish(fixture.read('.codex/config.toml')).top.model_provider, 'custom')
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+// --- Codex: reserved provider-table ids -------------------------------------
+
+test('codex: a reserved table that is not ours is renamed, not destroyed', async () => {
+  // Codex 0.148+ refuses to load the whole file when one of these ids carries a
+  // provider table. CC Switch cannot tell which of the user's keys matter, so
+  // it keeps the table and moves it aside; so does this.
+  const fixture = makeHome()
+  try {
+    fixture.write('.codex/config.toml', [
+      'model = "gpt-5"',
+      '',
+      '[model_providers.openai]',
+      'name = "My own openai-shaped relay"',
+      'base_url = "https://example.test/v1"',
+      '',
+    ].join('\n'))
+    await writeCodexConfig({ provider: CODEX_PROVIDER, apiKey: 'sk-new', home: fixture.home })
+    const parsed = parseTomlish(fixture.read('.codex/config.toml'))
+    assert.equal(parsed.sections['model_providers.cc-switch'].name, 'My own openai-shaped relay')
+    assert.equal(parsed.sections['model_providers.cc-switch'].base_url, 'https://example.test/v1')
+    assert.ok(!Object.hasOwn(parsed.sections, 'model_providers.openai'), 'the reserved id no longer carries a table')
+    assert.equal(parsed.sections['model_providers.custom'].base_url, 'https://api.deepseek.com/v1')
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('codex: a reserved table holding a real credential is renamed, never deleted', async () => {
+  // The placeholder is the *only* value that proves a table is CC Switch's own
+  // leftover, because it carries no credential. A bearer token that is anything
+  // else may be the user's own key — and one of these ids is exactly where a
+  // hand-written config would put one — so that table is moved aside with its
+  // key intact. Deleting it here would destroy a credential nothing can restore.
+  const fixture = makeHome()
+  try {
+    fixture.write('.codex/config.toml', [
+      '[model_providers.openai]',
+      'name = "my own openai-shaped relay"',
+      'base_url = "https://mine.example/v1"',
+      'experimental_bearer_token = "sk-users-own-key"',
+      '',
+    ].join('\n'))
+    const result = await writeCodexConfig({ provider: CODEX_PROVIDER, apiKey: 'sk-new', home: fixture.home })
+    const out = fixture.read('.codex/config.toml')
+    assert.ok(!out.includes('[model_providers.openai]'), 'the reserved id no longer carries a table')
+    assert.ok(out.includes('sk-users-own-key'), 'the user credential survives the move')
+    const parsed = parseTomlish(out)
+    assert.equal(parsed.sections['model_providers.cc-switch'].experimental_bearer_token, 'sk-users-own-key')
+    assert.ok(result.files[1].removed.includes('model_providers.openai -> model_providers.cc-switch'))
+    assert.ok(!JSON.stringify(result).includes('sk-users-own-key'), 'and it never crosses back out')
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('codex: the rename takes the first free cc-switch-N id', async () => {
+  const fixture = makeHome()
+  try {
+    fixture.write('.codex/config.toml', [
+      '[model_providers.cc-switch]',
+      'name = "already here"',
+      '',
+      '[model_providers.ollama]',
+      'name = "needs a new home"',
+      '',
+    ].join('\n'))
+    await writeCodexConfig({ provider: CODEX_PROVIDER, apiKey: 'sk-new', home: fixture.home })
+    const parsed = parseTomlish(fixture.read('.codex/config.toml'))
+    assert.equal(parsed.sections['model_providers.cc-switch'].name, 'already here')
+    assert.equal(parsed.sections['model_providers.cc-switch-2'].name, 'needs a new home')
+    assert.ok(!Object.hasOwn(parsed.sections, 'model_providers.ollama'))
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('codex: a reserved table still holding the proxy placeholder is deleted', async () => {
+  // The placeholder is the one value that proves a table is CC Switch's own
+  // leftover rather than the user's, because it carries no real credential.
+  const fixture = makeHome()
+  try {
+    fixture.write('.codex/config.toml', [
+      '[model_providers.lmstudio]',
+      'name = "cc-switch dormant route"',
+      'experimental_bearer_token = "PROXY_MANAGED"',
+      '',
+    ].join('\n'))
+    const result = await writeCodexConfig({ provider: CODEX_PROVIDER, apiKey: 'sk-new', home: fixture.home })
+    const out = fixture.read('.codex/config.toml')
+    assert.ok(!out.includes('[model_providers.lmstudio]'), 'the dormant table is gone')
+    assert.ok(!out.includes('PROXY_MANAGED'), 'and so is the placeholder')
+    assert.ok(!Object.hasOwn(parseTomlish(out).sections, 'model_providers.cc-switch'), 'nothing was renamed instead')
+    assert.ok(result.files[1].removed.includes('model_providers.lmstudio'))
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('codex: amazon-bedrock is built in but not reserved, so its table is left alone', async () => {
+  // Codex allows a table under the bedrock ids — that is how the region and
+  // profile are set — so renaming it would destroy a working configuration.
+  const fixture = makeHome()
+  try {
+    fixture.write('.codex/config.toml', [
+      '[model_providers.amazon-bedrock]',
+      'aws_region = "us-east-1"',
+      '',
+    ].join('\n'))
+    await writeCodexConfig({ provider: CODEX_PROVIDER, apiKey: 'sk-new', home: fixture.home })
+    const parsed = parseTomlish(fixture.read('.codex/config.toml'))
+    assert.equal(parsed.sections['model_providers.amazon-bedrock'].aws_region, 'us-east-1')
+    assert.equal(parsed.sections['model_providers.custom'].base_url, 'https://api.deepseek.com/v1')
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('codex: the route table is never written under a built-in id', async () => {
+  // A table Codex reads as built-in is not a custom route at all, so the id the
+  // writer picks has to be checked rather than assumed.
+  const fixture = makeHome()
+  try {
+    await writeCodexConfig({ provider: CODEX_PROVIDER, apiKey: 'sk-new', home: fixture.home })
+    const parsed = parseTomlish(fixture.read('.codex/config.toml'))
+    assert.equal(parsed.top.model_provider, 'custom')
+    for (const id of ['openai', 'ollama', 'lmstudio', 'amazon-bedrock', 'amazon-bedrock-runtime']) {
+      assert.ok(!Object.hasOwn(parsed.sections, `model_providers.${id}`), `${id} must not carry our route`)
+    }
+    assert.equal(parsed.sections['model_providers.custom'].experimental_bearer_token, 'sk-new')
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+// --- the first-write backup -------------------------------------------------
+
+/** The backup directory this plugin uses under a given home. */
+function backupDir(home) {
+  return join(home, '.dsh-ccswitch-plugin', 'backups', 'live-first-write')
+}
+
+/** The 12-hex key cc-switch derives from a file's absolute path. */
+function backupKey(path) {
+  return createHash('sha256').update(resolve(path)).digest('hex').slice(0, 12)
+}
+
+test('codex: the original bytes of both files are saved before the first write, once', async () => {
+  const fixture = makeHome()
+  try {
+    const authBefore = '{"tokens": {"access_token": "original"}}\n'
+    const configBefore = 'model = "gpt-5"\n'
+    fixture.write('.codex/auth.json', authBefore)
+    fixture.write('.codex/config.toml', configBefore)
+
+    await writeCodexConfig({ provider: CODEX_PROVIDER, apiKey: 'sk-new', home: fixture.home })
+    // A second activation must not overwrite the saved original.
+    await writeCodexConfig({
+      provider: { ...CODEX_PROVIDER, displayName: 'Second' },
+      apiKey: 'sk-second',
+      home: fixture.home,
+    })
+
+    const dir = backupDir(fixture.home)
+    const authPath = join(fixture.home, '.codex', 'auth.json')
+    const configPath = join(fixture.home, '.codex', 'config.toml')
+    assert.equal(readFileSync(join(dir, `${backupKey(configPath)}-config.toml`), 'utf8'), configBefore)
+    assert.equal(readFileSync(join(dir, `${backupKey(authPath)}-auth.json`), 'utf8'), authBefore)
+    // Two backups and two markers, and no more: the second write added nothing.
+    assert.equal(readdirSync(dir).length, 4, readdirSync(dir).join(', '))
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('codex: the .source marker records the original absolute path', async () => {
+  const fixture = makeHome()
+  try {
+    const configPath = join(fixture.home, '.codex', 'config.toml')
+    fixture.write('.codex/config.toml', 'model = "gpt-5"\n')
+    await writeCodexConfig({ provider: CODEX_PROVIDER, apiKey: 'sk-new', home: fixture.home })
+    const marker = join(backupDir(fixture.home), `${backupKey(configPath)}-config.toml.source`)
+    assert.equal(readFileSync(marker, 'utf8'), resolve(configPath))
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('codex: a file that did not exist gets only the marker, never a fake original', async () => {
+  // There were no original bytes to keep. Writing an empty backup would later
+  // read as "the user's file was empty", which it never was.
+  const fixture = makeHome()
+  try {
+    await writeCodexConfig({ provider: CODEX_PROVIDER, apiKey: 'sk-new', home: fixture.home })
+    const dir = backupDir(fixture.home)
+    const files = readdirSync(dir)
+    assert.equal(files.length, 2, `one marker per file, no copies: ${files.join(', ')}`)
+    for (const name of files) assert.ok(name.endsWith('.source'), `${name} must be a marker`)
+    // A later write still finds the marker and does not start backing up.
+    await writeCodexConfig({
+      provider: { ...CODEX_PROVIDER, displayName: 'Second' },
+      apiKey: 'sk-second',
+      home: fixture.home,
+    })
+    assert.equal(readdirSync(dir).length, 2)
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('claude: the first write saves the original settings.json', async () => {
+  const fixture = claudeFixture()
+  try {
+    await writeClaudeConfig({ provider: CLAUDE_PROVIDER, apiKey: 'sk-new', home: fixture.home })
+    const path = join(fixture.home, '.claude', 'settings.json')
+    const saved = readFileSync(join(backupDir(fixture.home), `${backupKey(path)}-settings.json`), 'utf8')
+    assert.equal(saved, CLAUDE_EXISTING)
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('the first-write backup is parameterisable and written owner-only', async () => {
+  // The backup root is a parameter for the same reason `home` is: it keeps the
+  // tests off the real device state directory. The mode is 0600 because a
+  // backup of settings.json or config.toml holds the same credential the live
+  // file does.
+  const fixture = makeHome()
+  const root = join(fixture.home, 'elsewhere', 'first-write')
+  try {
+    const modes = []
+    const recording = {
+      read: async (path) => {
+        try { return readFileSync(path) } catch (err) { if (err.code === 'ENOENT') return undefined; throw err }
+      },
+      write: async (path, content, mode) => { modes.push([path, mode]); writeFileSync(path, content) },
+    }
+    fixture.write('.codex/config.toml', 'model = "gpt-5"\n')
+    await writeCodexConfig({
+      provider: CODEX_PROVIDER, apiKey: 'sk-new', home: fixture.home, io: recording, backupRoot: root,
+    })
+    assert.ok(existsSync(root), 'the parameterised root is where the backup went')
+    assert.equal(existsSync(backupDir(fixture.home)), false, 'and not the default one')
+    // config.toml existed, so it gets a copy and a marker; auth.json did not,
+    // so it gets only a marker.
+    const configPath = join(fixture.home, '.codex', 'config.toml')
+    const key = backupKey(configPath)
+    assert.equal(readFileSync(join(root, `${key}-config.toml`), 'utf8'), 'model = "gpt-5"\n')
+    assert.equal(readFileSync(join(root, `${key}-config.toml.source`), 'utf8'), resolve(configPath))
+    const underRoot = modes.filter(([path]) => path.startsWith(root))
+    assert.equal(underRoot.length, 3, underRoot.map(([path]) => path).join(', '))
+    for (const [path, mode] of underRoot) {
+      assert.equal(mode, 0o600, `${path} must be owner-only, got 0o${Number(mode).toString(8)}`)
+    }
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('a refused write takes no backup', async () => {
+  // Refusal means the file is not touched, and a backup of a file nothing wrote
+  // to would just be noise in a directory whose whole meaning is "the original,
+  // saved once".
+  const fixture = makeHome()
+  try {
+    fixture.write('.claude/settings.json', '{ this is not json')
+    await assert.rejects(
+      writeClaudeConfig({ provider: CLAUDE_PROVIDER, apiKey: 'sk-new', home: fixture.home }),
+      (err) => err instanceof WriterError && err.kind === 'parse',
+    )
+    assert.equal(existsSync(backupDir(fixture.home)), false, 'nothing was backed up')
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+// --- Codex: the model-catalog pointer ---------------------------------------
+
+test('codex: a pointer at a catalog CC Switch generated is dropped', async () => {
+  // The generated catalog describes whichever provider was active when it was
+  // written. Leaving the pointer behind keeps Codex reading a model list for a
+  // route it no longer describes.
+  const fixture = makeHome()
+  try {
+    fixture.write('.codex/config.toml', [
+      'model = "gpt-5"',
+      'model_catalog_json = "cc-switch-model-catalog.json"',
+      '',
+    ].join('\n'))
+    const result = await writeCodexConfig({ provider: CODEX_PROVIDER, apiKey: 'sk-new', home: fixture.home })
+    const parsed = parseTomlish(fixture.read('.codex/config.toml'))
+    assert.equal(parsed.top.model_catalog_json, undefined, 'the stale pointer is gone')
+    assert.ok(result.files[1].removed.includes('model_catalog_json'))
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('codex: the catalog filename is recognised wherever it is rooted', async () => {
+  for (const pointer of [
+    'cc-switch-model-catalog.json',
+    '/home/me/.codex/cc-switch-model-catalog.json',
+    'C:\\Users\\me\\.codex\\cc-switch-model-catalog.json',
+    './sub/dir/cc-switch-model-catalog.json',
+  ]) {
+    const fixture = makeHome()
+    try {
+      fixture.write('.codex/config.toml', `model_catalog_json = ${JSON.stringify(pointer)}\n`)
+      await writeCodexConfig({ provider: CODEX_PROVIDER, apiKey: 'sk-new', home: fixture.home })
+      assert.equal(
+        parseTomlish(fixture.read('.codex/config.toml')).top.model_catalog_json,
+        undefined,
+        `${pointer} must be recognised as ours`,
+      )
+    } finally {
+      fixture.cleanup()
+    }
+  }
+})
+
+test('codex: a catalog belonging to someone else is left exactly as it is', async () => {
+  // cc-switch's `foreign_catalog` / `live_catalog_is_ours` exist for this: a
+  // pointer at a file this plugin did not generate belongs to the user or to
+  // another tool, and deleting it would take away a catalog someone else
+  // manages.
+  for (const pointer of [
+    '/home/me/my-own-catalog.json',
+    'C:\\Users\\me\\.codex\\custom-models.json',
+    'my-cc-switch-model-catalog.json', // a near miss: different base name
+    'cc-switch-model-catalog.JSON',    // case matters, as it does for cc-switch
+  ]) {
+    const fixture = makeHome()
+    try {
+      // Compared as raw text: the point is that the line is byte-identical, and
+      // a backslash in a Windows path is a TOML escape, so re-reading it
+      // through a parser would test the reader rather than the writer.
+      const assignment = `model_catalog_json = ${JSON.stringify(pointer)}`
+      fixture.write('.codex/config.toml', `model = "gpt-5"\n${assignment}\n`)
+      await writeCodexConfig({ provider: CODEX_PROVIDER, apiKey: 'sk-new', home: fixture.home })
+      const out = fixture.read('.codex/config.toml')
+      assert.ok(out.includes(assignment), `${pointer} belongs to someone else and must survive:\n${out}`)
+    } finally {
+      fixture.cleanup()
+    }
+  }
 })
 
 // --- a minimal TOML reader, so the assertions above do not trust the writer ---
