@@ -142,6 +142,8 @@ DSH_CATALOG_ORIGIN=https://catalog.example.com npm run build:catalog
 
 上游版权与许可证原样保留在 `LICENSE`；改动声明见 `NOTICE`，且每个被改动的源文件头部都带改动提示。
 
+移植架构、与 CC Switch 的对应关系、以及有意未移植的部分，见 [docs/ccswitch-port.md](./docs/ccswitch-port.md)。
+
 ## 开发与验证
 
 要求 Node.js 22.19 或更高版本：

@@ -131,6 +131,8 @@ Relative to [wtiaw/dsh-ccswitch-importer](https://github.com/wtiaw/dsh-ccswitch-
 
 The upstream copyright and license are kept unmodified in `LICENSE`; changed files carry a notice header and `NOTICE` records the modifications.
 
+The port architecture, its mapping onto CC Switch, and what is deliberately left out are documented in [docs/ccswitch-port.md](./docs/ccswitch-port.md).
+
 ## Development and Verification
 
 Requirements: Node.js 22.19 or newer.
