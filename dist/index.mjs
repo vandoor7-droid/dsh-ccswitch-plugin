@@ -3012,7 +3012,26 @@ function makeManagerRoutes(deps = {}) {
     queue = next.then(() => void 0, () => void 0);
     return next;
   };
-  const write = async (response, status, body) => writeJson(response, status, body);
+  const runWriter = async (provider, appType) => {
+    if (!WRITER_APP_TYPES.includes(appType)) {
+      throw Object.assign(new Error("unsupported app type"), { code: "UNSUPPORTED" });
+    }
+    const resolved = await credentials?.resolve?.(provider?.apiKeyEnv);
+    const apiKey = typeof resolved?.value === "string" ? resolved.value : "";
+    if (apiKey === "") {
+      throw Object.assign(new Error("credential is not set"), { code: "NO_CREDENTIAL" });
+    }
+    const written = await writeProviderConfig({ appType, provider, apiKey, home });
+    return {
+      appType,
+      files: written.files.map((file) => ({
+        path: file.path,
+        keys: file.keys.slice(0, 60).map((key) => redactText(key).slice(0, 120)),
+        removed: file.removed.slice(0, 60).map((key) => redactText(key).slice(0, 120))
+      })),
+      warnings: written.warnings.slice(0, 20).map((text) => redactText(text).slice(0, 200))
+    };
+  };
   return [
     {
       kind: "exact",
@@ -3172,24 +3191,35 @@ function makeManagerRoutes(deps = {}) {
             writeJson(response, 404, { error: "no such provider" });
             return;
           }
-          let warnings = [];
+          const provider = outcome.provider;
+          const appType = resolveAppType(provider);
+          const warnings = [];
+          let applied = true;
           try {
-            warnings = await applyProvider(body.key, outcome.provider) ?? [];
+            warnings.push(...await applyProvider(body.key, provider) ?? []);
           } catch (err) {
-            console.error("[dsh-ccswitch-plugin] activating the provider failed:", redactText(err));
-            writeJson(response, 200, {
-              key: body.key,
-              status: "activated",
-              applied: false,
-              warnings: ["the provider is marked active but DSH did not accept it; see the host log"]
-            });
-            return;
+            applied = false;
+            console.error("[dsh-ccswitch-plugin] projecting the provider into DSH failed:", redactText(err));
+            warnings.push("DSH did not accept the route, so model requests still use the previous one");
+          }
+          let written;
+          if (WRITER_APP_TYPES.includes(appType)) {
+            try {
+              written = await runWriter(provider, appType);
+              warnings.push(...written.warnings);
+            } catch (err) {
+              console.error("[dsh-ccswitch-plugin] writing the tool configuration failed:", redactText(err));
+              warnings.push(err?.code === "NO_CREDENTIAL" ? "no key is stored for this provider, so its configuration was not written" : writerRefusalMessage(err));
+            }
+          } else {
+            warnings.push(`nothing writes a "${appType}" configuration yet; supported: ${WRITER_APP_TYPES.join(", ")}`);
           }
           writeJson(response, 200, {
             key: body.key,
             status: "activated",
-            applied: true,
-            warnings: (Array.isArray(warnings) ? warnings : []).slice(0, 20).map((text) => redactText(text).slice(0, 200))
+            applied,
+            written,
+            warnings: warnings.slice(0, 20).map((text) => redactText(text).slice(0, 200))
           });
         } catch (err) {
           const conflict = /conflict/i.test(String(err?.code ?? "")) || /conflict/i.test(String(err?.message ?? ""));
@@ -3225,27 +3255,14 @@ function makeManagerRoutes(deps = {}) {
               throw Object.assign(new Error("no such provider"), { code: "NOT_FOUND" });
             }
             const provider = providers[body.key];
-            const appType = resolveAppType(provider, body.appType);
-            if (!WRITER_APP_TYPES.includes(appType)) {
-              throw Object.assign(new Error("unsupported app type"), { code: "UNSUPPORTED" });
-            }
-            const resolved = await credentials?.resolve?.(provider?.apiKeyEnv);
-            const apiKey = typeof resolved?.value === "string" ? resolved.value : "";
-            if (apiKey === "") {
-              throw Object.assign(new Error("credential is not set"), { code: "NO_CREDENTIAL" });
-            }
-            const written = await writeProviderConfig({ appType, provider, apiKey, home });
-            return { ...written, appType };
+            return runWriter(provider, resolveAppType(provider, body.appType));
           });
           writeJson(response, 200, {
             key: body.key,
             appType: outcome.appType,
-            written: outcome.files.map((file) => ({
-              path: file.path,
-              keys: file.keys.slice(0, 60).map((key) => redactText(key).slice(0, 120)),
-              removed: file.removed.slice(0, 60).map((key) => redactText(key).slice(0, 120))
-            })),
-            warnings: outcome.warnings.slice(0, 20).map((text) => redactText(text).slice(0, 200))
+            // Already redacted and clamped by runWriter.
+            written: outcome.files,
+            warnings: outcome.warnings
           });
         } catch (err) {
           if (err?.code === "NOT_FOUND") {
