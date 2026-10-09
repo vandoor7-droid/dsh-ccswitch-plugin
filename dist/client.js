@@ -155,6 +155,13 @@ window.__ModuleLoader__.load({
 		  /** claude-desktop keeps its endpoint at the top level and names the key field. */
 		  MISSING_CLAUDE_DESKTOP_KEY: "missing-claude-desktop-key",
 		  MISSING_CLAUDE_DESKTOP_BASE_URL: "missing-claude-desktop-base-url",
+		  /**
+		   * claude-desktop carries an `apiFormat` naming the wire format its own tool
+		   * speaks. We already read the row's fields, so a value we cannot serve has to
+		   * be refused by name rather than imported as the one protocol we do serve —
+		   * that is exactly how a provider ends up registered and unable to answer.
+		   */
+		  UNSUPPORTED_CLAUDE_DESKTOP_PROTOCOL: "unsupported-claude-desktop-protocol",
 		  MISSING_OPENCODE_KEY: "missing-opencode-key",
 		  MISSING_OPENCODE_BASE_URL: "missing-opencode-base-url",
 		  UNSUPPORTED_OPENCODE_ADAPTER: "unsupported-opencode-adapter",
@@ -850,6 +857,7 @@ window.__ModuleLoader__.load({
 		    "importer.blocked.unsupported-opencode-adapter": "\u6682\u4E0D\u652F\u6301\u7684 opencode \u9002\u914D\u5668\uFF1A{detail}",
 		    "importer.blocked.missing-claude-desktop-key": "\u7F3A\u5C11 API key\uFF08env.ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY\uFF09",
 		    "importer.blocked.missing-claude-desktop-base-url": "\u7F3A\u5C11 base URL\uFF08\u9876\u7EA7 baseUrl \u4E0E env.ANTHROPIC_BASE_URL \u90FD\u6CA1\u6709\uFF09",
+		    "importer.blocked.unsupported-claude-desktop-protocol": "claude-desktop \u7684 apiFormat \u4E0D\u662F DSH \u652F\u6301\u7684\u534F\u8BAE\uFF1A{detail}",
 		    "importer.blocked.unsupported-gemini-protocol": "Gemini CLI \u4F7F\u7528\u539F\u751F\u534F\u8BAE\uFF0CDSH \u6CA1\u6709\u5BF9\u5E94\u9002\u914D\u5668\uFF1A{detail}\uFF1B\u8BF7\u6539\u7528 OpenAI \u517C\u5BB9\u7684 Gemini \u4E2D\u8F6C",
 		    "importer.blocked.missing-hermes-key": "\u7F3A\u5C11 API key\uFF08api_key\uFF09",
 		    "importer.blocked.missing-hermes-base-url": "\u7F3A\u5C11 base URL\uFF08base_url\uFF09",
@@ -1029,6 +1037,7 @@ window.__ModuleLoader__.load({
 		    "importer.blocked.unsupported-opencode-adapter": "unsupported opencode adapter: {detail}",
 		    "importer.blocked.missing-claude-desktop-key": "missing API key (env.ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY)",
 		    "importer.blocked.missing-claude-desktop-base-url": "missing base URL (neither top-level baseUrl nor env.ANTHROPIC_BASE_URL)",
+		    "importer.blocked.unsupported-claude-desktop-protocol": "claude-desktop's apiFormat is not a protocol DSH supports: {detail}",
 		    "importer.blocked.unsupported-gemini-protocol": "the Gemini CLI speaks the Gemini-native protocol and DSH has no adapter for it: {detail}; use an OpenAI-compatible Gemini relay instead",
 		    "importer.blocked.missing-hermes-key": "missing API key (api_key)",
 		    "importer.blocked.missing-hermes-base-url": "missing base URL (base_url)",
@@ -1695,6 +1704,7 @@ window.__ModuleLoader__.load({
 		  "missing-anthropic-base-url": "\u7F3A\u5C11 base URL\uFF08env.ANTHROPIC_BASE_URL\uFF09",
 		  "missing-claude-desktop-key": "\u7F3A\u5C11 API key\uFF08env.ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY\uFF09",
 		  "missing-claude-desktop-base-url": "\u7F3A\u5C11 base URL\uFF08\u9876\u7EA7 baseUrl \u4E0E env.ANTHROPIC_BASE_URL \u90FD\u6CA1\u6709\uFF09",
+		  "unsupported-claude-desktop-protocol": "claude-desktop \u7684 apiFormat \u4E0D\u662F DSH \u652F\u6301\u7684\u534F\u8BAE\uFF1A{detail}",
 		  "unsupported-gemini-protocol": "Gemini CLI \u4F7F\u7528\u539F\u751F\u534F\u8BAE\uFF0CDSH \u6CA1\u6709\u5BF9\u5E94\u9002\u914D\u5668\uFF1A{detail}\uFF1B\u8BF7\u6539\u7528 OpenAI \u517C\u5BB9\u7684 Gemini \u4E2D\u8F6C",
 		  "missing-hermes-key": "\u7F3A\u5C11 API key\uFF08api_key\uFF09",
 		  "missing-hermes-base-url": "\u7F3A\u5C11 base URL\uFF08base_url\uFF09",

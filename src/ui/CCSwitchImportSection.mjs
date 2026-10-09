@@ -52,6 +52,7 @@ export const BLOCKED_FALLBACK = {
   'missing-anthropic-base-url': '缺少 base URL（env.ANTHROPIC_BASE_URL）',
   'missing-claude-desktop-key': '缺少 API key（env.ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY）',
   'missing-claude-desktop-base-url': '缺少 base URL（顶级 baseUrl 与 env.ANTHROPIC_BASE_URL 都没有）',
+  'unsupported-claude-desktop-protocol': 'claude-desktop 的 apiFormat 不是 DSH 支持的协议：{detail}',
   'unsupported-gemini-protocol': 'Gemini CLI 使用原生协议，DSH 没有对应适配器：{detail}；请改用 OpenAI 兼容的 Gemini 中转',
   'missing-hermes-key': '缺少 API key（api_key）',
   'missing-hermes-base-url': '缺少 base URL（base_url）',

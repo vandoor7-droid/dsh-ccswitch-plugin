@@ -107,7 +107,22 @@ DSH 的 `llm-pi-ai` 只能驱动三种协议：`openai-completions`、`openai-re
 由此，**Gemini 行永远不可导入**：Gemini CLI 走 Google 原生协议，DSH 没有对应适配器。
 该行仍然会被扫描并显示，说明原因，并给出它本应指向的端点——静默消失比明确拒绝更糟。
 
-### 7. 激活是两次独立投影，任一失败都不回滚
+### 7. `apiFormat` 是另一种"表达不了的协议"
+
+`claude-desktop` 的行除了 endpoint 与 key，还带一个 `apiFormat`，声明那个 CLI 自己用哪种线格式。
+cc-switch 的类型允许四个值：`anthropic`、`openai_chat`、`openai_responses`、`gemini_native`；
+它自己的直连校验（`claude_desktop_config.rs`）只放行 `anthropic`，其余一律报错
+（"第一阶段只支持原生 Anthropic Messages API"）。
+
+所以这里不是"挑一个最接近的协议导入"，而是**按名字拒绝**：缺省与 `anthropic` 走
+`anthropic-messages`，其余三个值以 `unsupported-claude-desktop-protocol` 阻断，`blockedDetail`
+带上那个值。这与第 6 条同一个理由——一个注册成功但永远无法应答的 provider，用户要在真正
+发请求时才发现，而那时线索已经断在几层之外。
+
+注意判定用的是**原值**，不做 trim：`"openai_chat "` 会被当作不匹配而拒绝并原样回显。
+把近似值规整成匹配，等于替用户宣称一个他没有写下的格式。
+
+### 8. 激活是两次独立投影，任一失败都不回滚
 
 「激活一个 provider」在这里意味着两件不同的事，它们写的是两个不同的地方：
 

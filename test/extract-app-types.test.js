@@ -157,6 +157,55 @@ test('claude-desktop keeps the thinking hint on a fallback model', () => {
   assert.match(profile.warnings.join('\n'), /claude-sonnet-4-5/)
 })
 
+test('claude-desktop with no apiFormat is native Anthropic', () => {
+  // Absent is the common case: every preset that predates the field omits it,
+  // and cc-switch itself reads absent as `anthropic`.
+  const profile = extractProfile(row('claude-desktop', {
+    baseUrl: 'https://relay.example',
+    env: { ANTHROPIC_AUTH_TOKEN: 'sk-x' },
+  }))
+  assert.equal(profile.blocked, false)
+  assert.equal(profile.api, 'anthropic-messages')
+})
+
+test('claude-desktop with apiFormat "anthropic" is native Anthropic', () => {
+  const profile = extractProfile(row('claude-desktop', {
+    baseUrl: 'https://relay.example',
+    env: { ANTHROPIC_AUTH_TOKEN: 'sk-x' },
+    apiFormat: 'anthropic',
+  }))
+  assert.equal(profile.blocked, false)
+  assert.equal(profile.api, 'anthropic-messages')
+})
+
+test('claude-desktop with a format DSH cannot serve is refused by name', () => {
+  // The three other formats cc-switch's own type allows. Importing any of
+  // them as the one protocol we do serve would register a provider that can
+  // never answer, so the row names the value it choked on instead.
+  for (const apiFormat of ['openai_chat', 'openai_responses', 'gemini_native']) {
+    const profile = extractProfile(row('claude-desktop', {
+      baseUrl: 'https://relay.example',
+      env: { ANTHROPIC_AUTH_TOKEN: 'sk-x' },
+      apiFormat,
+    }))
+    assert.equal(profile.blocked, true, `${apiFormat} must not import`)
+    assert.equal(profile.blockedCode, BLOCKED.UNSUPPORTED_CLAUDE_DESKTOP_PROTOCOL)
+    assert.equal(profile.blockedDetail, apiFormat)
+    assert.equal(profile.api, undefined, 'a blocked row carries no protocol')
+  }
+})
+
+test('claude-desktop reports a malformed apiFormat verbatim', () => {
+  // A near-miss is still something the user can act on, so it is echoed rather
+  // than trimmed into a match and rendered as success.
+  const profile = extractProfile(row('claude-desktop', {
+    baseUrl: 'https://relay.example',
+    env: { ANTHROPIC_AUTH_TOKEN: 'sk-x' },
+    apiFormat: 'openai_chat ',
+  }))
+  assert.equal(profile.blocked, true)
+  assert.equal(profile.blockedDetail, 'openai_chat ')
+})
 // --- hermes ----------------------------------------------------------------
 
 test('hermes maps every api_mode onto a DSH protocol', () => {
@@ -440,6 +489,7 @@ const NEW_CODES = [
   BLOCKED.MISSING_OPENCLAW_KEY,
   BLOCKED.MISSING_OPENCLAW_BASE_URL,
   BLOCKED.UNSUPPORTED_OPENCLAW_API,
+  BLOCKED.UNSUPPORTED_CLAUDE_DESKTOP_PROTOCOL,
 ]
 
 test('every new code is registered in BLOCKED and translatable in both locales', () => {
@@ -457,6 +507,7 @@ test('every blocked row from the new app types carries prose and a detail-free c
   const blockedRows = [
     row('gemini', { env: { GEMINI_API_KEY: 'k', GOOGLE_GEMINI_BASE_URL: 'https://g.example' } }),
     row('claude-desktop', { baseUrl: 'https://x.example', env: {} }),
+    row('claude-desktop', { baseUrl: 'https://x.example', env: { ANTHROPIC_AUTH_TOKEN: 'sk-k' }, apiFormat: 'gemini_native' }),
     row('hermes', { base_url: 'https://h.example' }),
     row('pi', { baseUrl: 'https://p.example', api: 'nope', apiKey: 'sk-k' }),
     row('mcode', { api: 'nope', options: { baseURL: 'https://m.example', apiKey: 'sk-k' } }),
