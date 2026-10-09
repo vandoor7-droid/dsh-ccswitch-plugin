@@ -154,20 +154,17 @@ cc-switch 的类型允许四个值：`anthropic`、`openai_chat`、`openai_respo
 
 1. **目录协议只有三种。** CC Switch 还能驱动 Gemini 原生协议、以及各家 OAuth 登录态。
 2. **没有代理模式。** 所以没有 `proxy_projection`、`PROXY_MANAGED` 占位符、也没有
-   `stack_default` 那套别名映射。
-3. **没有模型目录生成。** CC Switch 会为 Codex 生成 `cc-switch-model-catalog.json` 并写
-   `model_catalog_json` 指针；本插件不生成目录文件。
-4. **没有 profile 覆盖检测。** CC Switch 在写入 Codex 前会检查
-   `[profiles.<name>]` 是否覆盖了选路键，覆盖时拒绝写入（因为写了也不生效）。本插件
-   尚未做这项检查。
-5. **没有 failover 队列的消费方。** `inFailoverQueue`、`costMultiplier`、
+   `stack_default` 那套别名映射。（唯一的例外是反过来的那一半：一份**历史遗留的**
+   `PROXY_MANAGED` 会被当成「自己下发过、且没有密钥」的占位符清掉。）
+3. **不生成模型目录。** CC Switch 会为 Codex 生成 `cc-switch-model-catalog.json` 并写
+   `model_catalog_json` 指针；本插件不生成目录文件。反向的一半做了：一个指向 cc-switch
+   生成目录的**陈旧**指针会被摘掉，按文件 basename 识别，所以不管它被放在哪个目录下都
+   认得出；认不出的指针一律不动，不猜。
+4. **没有 failover 队列的消费方。** `inFailoverQueue`、`costMultiplier`、
    `limitDailyUsd/Monthly` 字段已在 schema 里保留，但没有本地代理去消费它们，所以目前
    只是记录。
-6. **没有残留清理表。** CC Switch 维护一份「自己下发过、且留下来有害」的（键，值）冻结
-   列表，每次投影时精确命中才删。本插件尚未移植这张表，所以历史遗留的窗口值不会被
-   自动清掉。
 
-### 已经对齐的两处
+### 已经对齐的四处
 
 - **活跃 provider 按 app 分组。** CC Switch 的 `is_current` 是 per-app 单例：它的
   `set_current_provider`（`database/dao/providers.rs`）先 `UPDATE ... WHERE app_type = ?`
@@ -181,6 +178,24 @@ cc-switch 的类型允许四个值：`anthropic`、`openai_chat`、`openai_respo
   没拖动过的排在拖过的后面；`created_at` 缺失时按 SQLite 的 NULL 语义排在最前。
   另外，编辑表单不带排序字段，而保存是整条替换，所以路由会把 `sortIndex` / `createdAt`
   从既有记录里带过来，否则每次编辑都会把位置重置掉。
+- **Codex 的 profile 覆盖检测。** Codex 在指名了顶层 `profile` 时优先生效，而该
+  profile 表里的键盖过顶层键——也就是说写了也不生效。所以写入前先检查，命中就**拒绝**
+  并指名是哪个 profile 的哪个键。只有三个键能造成这种情况（`CODEX_PROFILE_ROUTE_KEYS`），
+  其中 `model_provider` 特殊：profile 指的同一条路不算冲突，反而是同意。
+- **残留清理表。** CC Switch 维护一份「自己下发过、且留下来有害」的（键，值）冻结列表
+  （`live/residue.rs`，7 对），每次投影时精确命中才删。这里的理由是不能靠值比较推断
+  「这是上一个 provider 留的」：早期 Kimi / Codex-OAuth 行根本不带这些键，所以文件里
+  的值只能是 CC Switch 自己写的，而它**比下一个 provider 的窗口更大**，留着会静默超出。
+  每个值同时匹配字符串与数字两种拼写（预设写字符串，少数早期行写裸数字），但只有能
+  解析成无符号整数的值才生成数字拼写——裸 `parseInt` 会把 `1e6` 变成一个它从未是过的数。
+
+此外，**每次写外部文件前会留一份首次写入备份**（`live/engine.rs` 的
+`ensure_first_write_backup`）：每个文件一份**字节级**副本，在本插件第一次碰它之前取，
+之后再不取，所以副本里永远是用户原本的文件、而不是本插件写过的版本。文件名是
+`sha256(绝对路径)[:12]` 加 basename，旁边一个 `.source` 标记记录原路径；标记最后写，
+所以它存在就证明副本完整。首次写入时文件不存在的话只写标记。两份都是 0600——
+`settings.json` 和 `config.toml` 的备份里躺着和正本一样的密钥。备份失败会中止整次写入，
+与 cc-switch 一致：原文件存不下来，就不该动它。
 
 ## 模块地图
 
