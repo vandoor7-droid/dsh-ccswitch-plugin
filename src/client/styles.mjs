@@ -7,12 +7,94 @@ const CSS = "button[class*=\"navCell\"]:has(span[class*=\"navLabel\"]:empty){dis
 // A save that left newer edits behind is neither a success nor an error.
 const STATUS_CSS = ".dsh-reasoning-status--dirty{color:var(--dsw-alias-label-secondary);}\n";
 
+// The provider manager tab. A second constant rather than more of the string
+// above: that one is one long line and appending to it is how a stray quote
+// turns into a silent syntax error.
+const MANAGER_CSS = [
+  ".dsh-ccswitch-manager{display:flex;flex-direction:column;gap:14px;color:var(--dsw-alias-label-primary);}",
+  ".dsh-ccswitch-manager__header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;}",
+  ".dsh-ccswitch-manager__title{margin:0 0 4px;color:var(--dsw-alias-label-primary);font-size:16px;font-weight:500;line-height:24px;}",
+  ".dsh-ccswitch-manager__hint{margin:0;color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:20px;}",
+  ".dsh-ccswitch-manager__header-actions{display:flex;align-items:center;gap:8px;flex:none;flex-wrap:wrap;}",
+  ".dsh-ccswitch-manager__preset{display:flex;align-items:center;gap:6px;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;}",
+  ".dsh-ccswitch-manager__preset-select{box-sizing:border-box;min-height:28px;padding:0 8px;border:1px solid var(--dsw-alias-border-l2);border-radius:7px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-family:inherit;font-size:12px;line-height:18px;}",
+  ".dsh-ccswitch-manager__preset-select:focus-visible{outline:2px solid var(--dsw-alias-border-l3);outline-offset:1px;}",
+  ".dsh-ccswitch-manager__note{margin:0;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;overflow-wrap:anywhere;}",
+  ".dsh-ccswitch-manager__empty{margin:0;color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:20px;}",
+  ".dsh-ccswitch-manager__list{display:flex;flex-direction:column;gap:8px;}",
+  ".dsh-ccswitch-manager__row{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;min-width:0;padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-1);}",
+  // The active row is marked by its border rather than a fill, so the badge
+  // stays readable in both themes.
+  ".dsh-ccswitch-manager__row--current{border-color:var(--dsw-alias-brand-primary);}",
+  ".dsh-ccswitch-manager__content{display:flex;flex-direction:column;gap:3px;min-width:0;flex:1 1 auto;}",
+  ".dsh-ccswitch-manager__primary-line{display:flex;align-items:baseline;gap:8px;min-width:0;}",
+  ".dsh-ccswitch-manager__primary-line strong{min-width:0;color:var(--dsw-alias-label-primary);font-size:13px;font-weight:500;line-height:20px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}",
+  ".dsh-ccswitch-manager__meta-line{display:flex;align-items:baseline;flex-wrap:wrap;gap:8px;min-width:0;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;}",
+  ".dsh-ccswitch-manager__meta-line>*{min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}",
+  ".dsh-ccswitch-manager__provider-key,.dsh-ccswitch-manager__meta-line code{color:var(--dsw-alias-label-tertiary);font-family:var(--ds-font-family-code,monospace);font-size:11px;line-height:16px;}",
+  ".dsh-ccswitch-manager__failover{color:var(--dsw-alias-label-secondary);}",
+  ".dsh-ccswitch-manager__row-error{margin:2px 0 0;color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:18px;overflow-wrap:anywhere;}",
+  ".dsh-ccswitch-manager__row-actions{display:flex;align-items:center;gap:10px;flex:none;flex-wrap:wrap;justify-content:flex-end;}",
+  ".dsh-ccswitch-manager__danger{color:var(--dsw-alias-state-error-primary);}",
+  ".dsh-ccswitch-manager__danger[disabled]{color:var(--dsw-alias-label-dimmed);}",
+  ".dsh-ccswitch-manager__activation{padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-1);}",
+  ".dsh-ccswitch-manager__activation--warn{border-color:var(--dsw-alias-state-warn-primary);}",
+  ".dsh-ccswitch-manager__activation-head{display:flex;align-items:center;justify-content:space-between;gap:12px;}",
+  ".dsh-ccswitch-manager__activation-head strong{color:var(--dsw-alias-label-primary);font-size:12px;font-weight:500;line-height:18px;}",
+  ".dsh-ccswitch-manager__activation-title{margin:6px 0 0;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px;}",
+  ".dsh-ccswitch-manager__activation-list{margin:4px 0 0;padding-left:18px;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;}",
+  ".dsh-ccswitch-manager__activation-warning{margin:6px 0 0;color:var(--dsw-alias-state-warn-primary);font-size:12px;line-height:18px;overflow-wrap:anywhere;}",
+
+  // The edit dialog. It opens on top of the settings dialog, so it owns a
+  // full-viewport backdrop of its own rather than sitting inline in the tab.
+  ".dsh-ccswitch-modal__backdrop{position:fixed;inset:0;z-index:60;display:flex;align-items:center;justify-content:center;padding:24px;background:rgba(0,0,0,.32);}",
+  ".dsh-ccswitch-modal{display:flex;flex-direction:column;width:100%;max-width:720px;max-height:100%;box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);border-radius:12px;background:var(--dsw-alias-bg-layer-1);box-shadow:0 12px 40px rgba(0,0,0,.28);overflow:hidden;}",
+  ".dsh-ccswitch-modal__header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 16px;border-bottom:1px solid var(--dsw-alias-border-l2);}",
+  ".dsh-ccswitch-modal__title{margin:0;color:var(--dsw-alias-label-primary);font-size:14px;font-weight:500;line-height:22px;}",
+  ".dsh-ccswitch-modal__close{flex:none;display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;border:1px solid transparent;border-radius:7px;background:transparent;color:var(--dsw-alias-label-secondary);font-family:inherit;font-size:18px;line-height:1;cursor:pointer;}",
+  ".dsh-ccswitch-modal__close:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary);}",
+  ".dsh-ccswitch-modal__close:focus-visible{outline:2px solid var(--dsw-alias-border-l3);outline-offset:1px;}",
+  ".dsh-ccswitch-modal__errors{margin:12px 16px 0;padding:8px 10px;border:1px solid var(--dsw-alias-state-error-primary);border-radius:8px;}",
+  ".dsh-ccswitch-modal__error{margin:0 0 4px;color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:18px;overflow-wrap:anywhere;}",
+  ".dsh-ccswitch-modal__error-title{margin:0;color:var(--dsw-alias-state-error-primary);font-size:12px;font-weight:500;line-height:18px;}",
+  ".dsh-ccswitch-modal__error-list{margin:4px 0 0;padding-left:18px;color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:18px;overflow-wrap:anywhere;}",
+  ".dsh-ccswitch-modal__footer{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:12px 16px;border-top:1px solid var(--dsw-alias-border-l2);}",
+  // The form body scrolls, the header and footer do not: on a short window the
+  // Save button has to stay reachable without scrolling past every field.
+  ".dsh-ccswitch-form{display:flex;flex-direction:column;min-height:0;overflow-y:auto;}",
+  ".dsh-ccswitch-form__grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;padding:12px 16px 0;}",
+  ".dsh-ccswitch-form__field{display:flex;flex-direction:column;gap:4px;min-width:0;color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px;}",
+  ".dsh-ccswitch-form__field--check{flex-direction:row;align-items:center;gap:8px;}",
+  ".dsh-ccswitch-form__label{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px;}",
+  ".dsh-ccswitch-form__hint{color:var(--dsw-alias-label-dimmed);font-size:11px;line-height:16px;}",
+  ".dsh-ccswitch-form__input{box-sizing:border-box;width:100%;min-height:30px;padding:0 8px;border:1px solid var(--dsw-alias-border-l2);border-radius:7px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-family:inherit;font-size:12px;line-height:18px;}",
+  ".dsh-ccswitch-form__input:focus{border-color:var(--dsw-alias-brand-primary);outline:2px solid var(--dsw-alias-border-l3);outline-offset:1px;}",
+  ".dsh-ccswitch-form__input::placeholder{color:var(--dsw-alias-label-dimmed);}",
+  ".dsh-ccswitch-form__models{margin:14px 16px 16px;padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;min-width:0;}",
+  ".dsh-ccswitch-form__legend{padding:0 4px;color:var(--dsw-alias-label-secondary);font-size:12px;font-weight:500;line-height:18px;}",
+  ".dsh-ccswitch-form__model-row{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,1fr) minmax(0,.8fr) minmax(0,.8fr) auto;align-items:center;gap:6px;min-width:0;margin-bottom:6px;}",
+  ".dsh-ccswitch-form__model-remove{white-space:nowrap;}",
+
+  "@media (max-width:640px){",
+  ".dsh-ccswitch-manager__header{flex-direction:column;}",
+  ".dsh-ccswitch-manager__header-actions{width:100%;}",
+  ".dsh-ccswitch-manager__row{flex-direction:column;}",
+  ".dsh-ccswitch-manager__row-actions{width:100%;justify-content:flex-start;}",
+  ".dsh-ccswitch-modal__backdrop{padding:0;align-items:stretch;}",
+  ".dsh-ccswitch-modal{max-width:none;border-radius:0;max-height:none;height:100%;}",
+  ".dsh-ccswitch-form__grid{grid-template-columns:minmax(0,1fr);}",
+  // One model per row: five inputs side by side at phone width leaves each
+  // about 40px wide, which is unusable for an id or a token count.
+  ".dsh-ccswitch-form__model-row{grid-template-columns:minmax(0,1fr);}",
+  "}",
+].join("");
+
 export function installEmbedStyles() {
   if (typeof document === "undefined") return () => {};
   if (document.getElementById(STYLE_ID)) return () => {};
   const style = document.createElement("style");
   style.id = STYLE_ID;
-  style.textContent = CSS + STATUS_CSS;
+  style.textContent = CSS + STATUS_CSS + MANAGER_CSS;
   document.head.append(style);
   return () => style.remove();
 }

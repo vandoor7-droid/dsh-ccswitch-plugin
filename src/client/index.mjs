@@ -3,8 +3,10 @@
 // Reworked for DSH 0.2.0-rc.2. See NOTICE for the full attribution chain.
 import { createReasoningSettingsController } from "./controller.mjs";
 import { createCCSwitchImportController } from "./import-controller.mjs";
+import { createCCSwitchManagerController } from "./manager-controller.mjs";
 import { registerReasoningSettings } from "./registration.mjs";
 import { ModelsFooterPanel } from "../ui/ModelsFooterPanel.mjs";
+import { ProviderManagerSection } from "../ui/ProviderManagerSection.mjs";
 import { installEmbedStyles } from "./styles.mjs";
 
 export const name = "dsh-ccswitch-plugin";
@@ -30,11 +32,23 @@ export function apply(ctx) {
       await importer.scan({ keepResults: true });
     },
   });
+  const manager = createCCSwitchManagerController({
+    // A manager write lands in the same settings document the reasoning editor
+    // edits and the importer classifies against, so both have to re-read: a
+    // provider added here must show up in the reasoning panel immediately, and
+    // the manager's own table is refreshed by the controller itself.
+    onChanged: async () => {
+      controller.refresh();
+      await importer.scan({ keepResults: true });
+    },
+  });
   const t = ctx.locale.bind("dsh-ccswitch-plugin");
   const removeStyles = installEmbedStyles();
   const dispose = registerReasoningSettings(ctx, {
     controller,
     importer,
+    manager,
+    managerComponent: ProviderManagerSection,
     component: ModelsFooterPanel,
     t,
   });
