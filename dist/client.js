@@ -454,6 +454,7 @@ window.__ModuleLoader__.load({
 		var DELETE_PATH = `${PROVIDERS_PATH}/delete`;
 		var ACTIVATE_PATH = `${PROVIDERS_PATH}/activate`;
 		var PRESETS_PATH = `${MANAGER_API_BASE}/presets`;
+		var PROBE_PATH = "/api/dsh-ccswitch/probe";
 		var SAME_ORIGIN_HEADER2 = "x-dsh-ccswitch-origin";
 		var SAME_ORIGIN_VALUE2 = "same-origin";
 		var FALLBACK_PROTOCOLS = ["openai-completions", "openai-responses", "anthropic-messages"];
@@ -545,9 +546,52 @@ window.__ModuleLoader__.load({
 		    api: String(preset.api ?? ""),
 		    baseURL: String(preset.baseURL ?? ""),
 		    models: (Array.isArray(preset.models) ? preset.models : []).filter((id) => typeof id === "string" && id !== "").slice(0, 200),
+		    // The CC Switch fields the picker groups and labels by. They travel as
+		    // plain strings rather than being validated against the eight-category
+		    // list here: the Host is the authority on its own catalogue, and an
+		    // unrecognised category has to survive to `presetGroup` so it can fall
+		    // back to `thirdparty` instead of vanishing from the picker entirely.
+		    family: optionalText(preset.family),
+		    planKey: optionalText(preset.planKey),
+		    regionKey: optionalText(preset.regionKey),
+		    category: optionalText(preset.category),
+		    isPartner: preset.isPartner === true,
 		    icon: optionalText(preset.icon),
 		    iconColor: optionalText(preset.iconColor)
 		  })).filter((preset) => preset.key !== "" && preset.displayName !== "");
+		}
+		var PROBE_REASONS2 = /* @__PURE__ */ new Set(["ok", "empty", "http-error", "timeout", "network", "no-credentials"]);
+		var PROBE_CHECKS2 = /* @__PURE__ */ new Set(["models", "minimal", "none"]);
+		function isStaleHost2(message) {
+		  return /HTTP\s*40[14]\b/.test(message) || /unauthorized/i.test(message);
+		}
+		function probeNumber2(value) {
+		  return Number.isInteger(value) && value >= 0 ? Math.min(value, 6e5) : 0;
+		}
+		function sanitizeProbe2(result) {
+		  return {
+		    ok: result?.ok === true,
+		    reason: PROBE_REASONS2.has(result?.reason) ? result.reason : "network",
+		    check: PROBE_CHECKS2.has(result?.check) ? result.check : "none",
+		    httpStatus: Number.isInteger(result?.httpStatus) && result.httpStatus > 0 && result.httpStatus < 1e3 ? result.httpStatus : void 0,
+		    detail: typeof result?.detail === "string" ? result.detail.slice(0, 200) : void 0,
+		    latencyMs: probeNumber2(result?.latencyMs),
+		    modelCount: probeNumber2(result?.modelCount),
+		    message: typeof result?.message === "string" ? result.message.slice(0, 300) : ""
+		  };
+		}
+		function pruneProbes2(probes, providers) {
+		  const next = {};
+		  for (const [key, value] of Object.entries(probes ?? {})) {
+		    if (Object.hasOwn(providers ?? {}, key)) next[key] = value;
+		  }
+		  return next;
+		}
+		function withoutProbe(probes, key) {
+		  if (!Object.hasOwn(probes ?? {}, key)) return probes ?? {};
+		  const next = { ...probes };
+		  delete next[key];
+		  return next;
 		}
 		function sanitizeWarnings(value) {
 		  return (Array.isArray(value) ? value : []).filter((entry) => typeof entry === "string" && entry.trim() !== "").slice(0, 20);
@@ -573,7 +617,14 @@ window.__ModuleLoader__.load({
 		    /** The Host's own validation list from a rejected save, for the form. */
 		    saveErrors: [],
 		    /** `{key, applied, warnings}` from the last activation, until dismissed. */
-		    activation: void 0
+		    activation: void 0,
+		    /**
+		     * Per-row connection verdicts, keyed by provider key — the manager's
+		     * equivalent of the import tab's `probes`. Each value is
+		     * `{phase: 'testing'}`, `{phase: 'done', ...outcome}` or
+		     * `{phase: 'error', message, staleHost}`.
+		     */
+		    probes: {}
 		  };
 		  const listeners = /* @__PURE__ */ new Set();
 		  const publish = (next) => {
@@ -625,6 +676,10 @@ window.__ModuleLoader__.load({
 		        revision: Number.isInteger(body?.revision) ? body.revision : void 0,
 		        providers,
 		        order: sanitizeOrder(body?.order, providers),
+		        // Verdicts are dropped along with the rows they describe: a provider
+		        // deleted in another tab must not leave a green "connected" badge
+		        // behind for a row that is about to be re-created with the same key.
+		        probes: pruneProbes2(snapshot.probes, providers),
 		        current: optionalText(body?.current),
 		        apiProtocols: sanitizeProtocols(body?.apiProtocols)
 		      });
@@ -786,6 +841,64 @@ window.__ModuleLoader__.load({
 		      publish({ ...snapshot, activation: void 0 });
 		    },
 		    /**
+		     * Test one row's endpoint without changing anything.
+		     *
+		     * The probe route reads CC Switch's database and is addressed by the
+		     * `profileId` a scan produced, so only a provider that came through an
+		     * import can be probed: `sourceProfileId` is that id, written by the
+		     * importer. A provider added by hand or from a preset has no such row, and
+		     * inventing an id would silently probe whatever provider happened to share
+		     * it — so the absence is reported rather than guessed at.
+		     *
+		     * Resolves `undefined` for a row that cannot be probed or a second click
+		     * while one is in flight, matching the importer's `probeOne`: the caller is
+		     * an event handler with nothing useful to do about either.
+		     */
+		    probeOne: async (key) => {
+		      const target = optionalText(key);
+		      if (target === void 0) return void 0;
+		      const provider = snapshot.providers?.[target];
+		      if (provider === void 0) return void 0;
+		      if (snapshot.probes?.[target]?.phase === "testing") return void 0;
+		      const profileId = optionalText(provider.sourceProfileId);
+		      if (profileId === void 0) {
+		        publish({
+		          ...snapshot,
+		          probes: { ...snapshot.probes, [target]: { phase: "error", message: "", unprobeable: true } }
+		        });
+		        return void 0;
+		      }
+		      const setProbe = (value) => {
+		        publish({ ...snapshot, probes: { ...snapshot.probes, [target]: value } });
+		      };
+		      setProbe({ phase: "testing" });
+		      try {
+		        const body = await request(PROBE_PATH, {
+		          method: "POST",
+		          headers: writeHeaders2(),
+		          body: JSON.stringify({ profileIds: [profileId] })
+		        });
+		        const results = Array.isArray(body.results) ? body.results : [];
+		        const result = results.find((item) => item.profileId === profileId) ?? results[0];
+		        if (result === void 0) {
+		          setProbe({ phase: "error", message: "", staleHost: false });
+		          return void 0;
+		        }
+		        setProbe({ phase: "done", ...sanitizeProbe2(result) });
+		        return result;
+		      } catch (error) {
+		        const message = error instanceof Error ? error.message : String(error);
+		        setProbe({ phase: "error", message, staleHost: isStaleHost2(message) });
+		        return void 0;
+		      }
+		    },
+		    /** Drop one row's verdict, so a stale result cannot outlive its cause. */
+		    clearProbe: (key) => {
+		      const target = optionalText(key);
+		      if (target === void 0) return;
+		      publish({ ...snapshot, probes: withoutProbe(snapshot.probes, target) });
+		    },
+		    /**
 		     * Drop the previous attempt's failure before a new one begins.
 		     *
 		     * Without this, opening a second dialog after a rejected save greets the
@@ -930,6 +1043,32 @@ window.__ModuleLoader__.load({
 		    "manager.presetLabel": "\u9884\u8BBE",
 		    "manager.presetNone": "\u81EA\u5B9A\u4E49\uFF08\u7A7A\u767D\uFF09",
 		    "manager.presetsFailed": "\u9884\u8BBE\u5217\u8868\u52A0\u8F7D\u5931\u8D25\uFF1A{message}",
+		    "manager.probeUnprobeable": "\u65E0\u6CD5\u6D4B\u8BD5\uFF1A\u8BE5 provider \u4E0D\u662F\u4ECE CC Switch \u5BFC\u5165\u7684\uFF0C\u6CA1\u6709\u53EF\u63A2\u6D4B\u7684\u6E90\u8BB0\u5F55",
+		    "manager.searchPlaceholder": "\u6309\u540D\u79F0/\u5907\u6CE8/\u8BF7\u6C42\u5730\u5740\u641C\u7D22\u4F9B\u5E94\u5546\u2026",
+		    "manager.searchAriaLabel": "\u641C\u7D22\u4F9B\u5E94\u5546",
+		    "manager.searchClear": "\u6E05\u9664",
+		    "manager.noSearchResults": "\u6CA1\u6709\u7B26\u5408\u641C\u7D22\u6761\u4EF6\u7684\u4F9B\u5E94\u5546\u3002",
+		    // The five sections CC Switch's "add provider" list is grouped into
+		    // (`presetGroups.ts`, `PRESET_GROUP_ORDER`), and the two dimensions its
+		    // version control picks between (`presetVersionLabel`: plan · region).
+		    // Wording follows CC Switch's own zh/en catalogue so the two read alike.
+		    "manager.group.login": "\u8D26\u53F7\u767B\u5F55",
+		    "manager.group.vendor": "\u6A21\u578B\u5382\u5546",
+		    "manager.group.thirdparty": "\u7B2C\u4E09\u65B9\u5E73\u53F0",
+		    "manager.group.cloud": "\u4E91\u670D\u52A1\u5546",
+		    "manager.group.plugin": "\u63D2\u4EF6\u914D\u7F6E",
+		    "manager.plan.payg": "\u6309\u91CF\u4ED8\u8D39",
+		    "manager.plan.coding": "\u7F16\u7A0B\u8BA2\u9605",
+		    "manager.plan.codingPlan": "Coding Plan",
+		    "manager.plan.agentPlan": "Agent Plan",
+		    "manager.plan.tokenPlan": "Token Plan",
+		    "manager.plan.enterpriseLite": "\u4F01\u4E1A Lite",
+		    "manager.plan.enterprisePro": "\u4F01\u4E1A Pro",
+		    "manager.plan.stepPlan": "Step Plan",
+		    "manager.plan.aksk": "AKSK",
+		    "manager.plan.apiKey": "API Key",
+		    "manager.region.cn": "\u56FD\u5185",
+		    "manager.region.intl": "\u6D77\u5916",
 		    "manager.credentialFound": "\u51ED\u636E\u5DF2\u627E\u5230",
 		    "manager.credentialMissing": "\u7F3A\u5C11\u51ED\u636E",
 		    "manager.active": "\u5F53\u524D\u542F\u7528",
@@ -1111,6 +1250,28 @@ window.__ModuleLoader__.load({
 		    "manager.presetLabel": "Preset",
 		    "manager.presetNone": "Custom (blank)",
 		    "manager.presetsFailed": "Could not load presets: {message}",
+		    "manager.probeUnprobeable": "Cannot test: this provider was not imported from CC Switch, so it has no source record to probe",
+		    "manager.searchPlaceholder": "Search name, notes, or API address\u2026",
+		    "manager.searchAriaLabel": "Search providers",
+		    "manager.searchClear": "Clear",
+		    "manager.noSearchResults": "No providers match your search.",
+		    "manager.group.login": "Account sign-in",
+		    "manager.group.vendor": "Model vendors",
+		    "manager.group.thirdparty": "Third-party platforms",
+		    "manager.group.cloud": "Cloud providers",
+		    "manager.group.plugin": "Plugin configs",
+		    "manager.plan.payg": "Pay-as-you-go",
+		    "manager.plan.coding": "Coding subscription",
+		    "manager.plan.codingPlan": "Coding Plan",
+		    "manager.plan.agentPlan": "Agent Plan",
+		    "manager.plan.tokenPlan": "Token Plan",
+		    "manager.plan.enterpriseLite": "Enterprise Lite",
+		    "manager.plan.enterprisePro": "Enterprise Pro",
+		    "manager.plan.stepPlan": "Step Plan",
+		    "manager.plan.aksk": "AKSK",
+		    "manager.plan.apiKey": "API Key",
+		    "manager.region.cn": "China",
+		    "manager.region.intl": "Global",
 		    "manager.credentialFound": "credential found",
 		    "manager.credentialMissing": "credential missing",
 		    "manager.active": "active",
@@ -1178,6 +1339,7 @@ window.__ModuleLoader__.load({
 		    "manager.cancel": "Cancel"
 		  }
 		};
+		var DEFAULT_LOCALE = "zh";
 
 		// src/client/i18n.mjs
 		function makeTranslator(t) {
@@ -1193,6 +1355,9 @@ window.__ModuleLoader__.load({
 		    if (!params) return template;
 		    return template.replace(/\{(\w+)\}/g, (match, name2) => Object.hasOwn(params, name2) ? String(params[name2]) : match);
 		  };
+		}
+		function messagesFor(locale) {
+		  return MESSAGES[locale] ?? MESSAGES[DEFAULT_LOCALE];
 		}
 
 		// src/client/registration.mjs
@@ -2025,6 +2190,412 @@ window.__ModuleLoader__.load({
 		// src/ui/ProviderManagerSection.mjs
 		var import_react5 = __toESM(require("react"), 1);
 
+		// src/domain/presets.mjs
+		var PROVIDER_PRESETS = Object.freeze([
+		  {
+		    key: "deepseek-claude",
+		    displayName: "DeepSeek",
+		    appType: "claude",
+		    category: "cn_official",
+		    api: "anthropic-messages",
+		    baseURL: "https://api.deepseek.com/anthropic",
+		    models: ["deepseek-flash", "deepseek-v4-pro"],
+		    icon: "deepseek",
+		    iconColor: "#1E88E5"
+		  },
+		  {
+		    key: "kimi-claude",
+		    displayName: "Kimi",
+		    appType: "claude",
+		    family: "kimi",
+		    planKey: "payg",
+		    regionKey: "cn",
+		    category: "cn_official",
+		    api: "anthropic-messages",
+		    baseURL: "https://api.moonshot.cn/anthropic",
+		    models: ["kimi-k2.7-code"],
+		    icon: "kimi",
+		    iconColor: "#6366F1"
+		  },
+		  {
+		    key: "kimi-codex",
+		    displayName: "Kimi (Codex)",
+		    appType: "codex",
+		    family: "kimi",
+		    planKey: "payg",
+		    regionKey: "cn",
+		    category: "cn_official",
+		    api: "openai-responses",
+		    baseURL: "https://api.moonshot.cn/v1",
+		    models: ["kimi-k3"],
+		    icon: "kimi",
+		    iconColor: "#6366F1"
+		  },
+		  {
+		    key: "zhipu-glm-claude",
+		    displayName: "Zhipu GLM",
+		    appType: "claude",
+		    family: "zhipu",
+		    regionKey: "cn",
+		    category: "cn_official",
+		    api: "anthropic-messages",
+		    baseURL: "https://open.bigmodel.cn/api/anthropic",
+		    models: ["glm-5.3"],
+		    icon: "zhipu",
+		    iconColor: "#0F62FE"
+		  },
+		  {
+		    key: "zhipu-glm-codex",
+		    displayName: "Zhipu GLM (Codex)",
+		    appType: "codex",
+		    family: "zhipu",
+		    regionKey: "cn",
+		    category: "cn_official",
+		    api: "openai-responses",
+		    baseURL: "https://open.bigmodel.cn/api/v1",
+		    models: ["glm-5.3"],
+		    icon: "zhipu",
+		    iconColor: "#0F62FE"
+		  },
+		  {
+		    key: "siliconflow-claude",
+		    displayName: "SiliconFlow",
+		    appType: "claude",
+		    family: "siliconflow",
+		    regionKey: "cn",
+		    category: "aggregator",
+		    isPartner: true,
+		    api: "anthropic-messages",
+		    baseURL: "https://api.siliconflow.cn",
+		    models: ["Pro/MiniMaxAI/MiniMax-M2.5"],
+		    icon: "siliconflow",
+		    iconColor: "#6E29F6"
+		  },
+		  {
+		    key: "siliconflow-codex",
+		    displayName: "SiliconFlow (Codex)",
+		    appType: "codex",
+		    family: "siliconflow",
+		    regionKey: "cn",
+		    category: "aggregator",
+		    isPartner: true,
+		    api: "openai-responses",
+		    baseURL: "https://api.siliconflow.cn/v1",
+		    models: ["deepseek-ai/DeepSeek-V4-Flash"],
+		    icon: "siliconflow",
+		    iconColor: "#6E29F6"
+		  },
+		  {
+		    key: "modelscope-claude",
+		    displayName: "ModelScope",
+		    appType: "claude",
+		    category: "aggregator",
+		    api: "anthropic-messages",
+		    baseURL: "https://api-inference.modelscope.cn",
+		    models: ["ZhipuAI/GLM-5.2"],
+		    icon: "modelscope",
+		    iconColor: "#624AFF"
+		  },
+		  {
+		    key: "modelscope-codex",
+		    displayName: "ModelScope (Codex)",
+		    appType: "codex",
+		    category: "aggregator",
+		    api: "openai-responses",
+		    baseURL: "https://api-inference.modelscope.cn/v1",
+		    models: ["ZhipuAI/GLM-5.2"],
+		    icon: "modelscope",
+		    iconColor: "#624AFF"
+		  },
+		  {
+		    key: "minimax-claude",
+		    displayName: "MiniMax",
+		    appType: "claude",
+		    family: "minimax",
+		    regionKey: "cn",
+		    category: "cn_official",
+		    api: "anthropic-messages",
+		    baseURL: "https://api.minimax.cn/anthropic",
+		    models: ["MiniMax-M3"],
+		    icon: "minimax",
+		    iconColor: "#FF6B6B"
+		  },
+		  {
+		    key: "minimax-codex",
+		    displayName: "MiniMax (Codex)",
+		    appType: "codex",
+		    family: "minimax",
+		    regionKey: "cn",
+		    category: "cn_official",
+		    api: "openai-responses",
+		    baseURL: "https://api.minimax.cn/v1",
+		    models: ["MiniMax-M3"],
+		    icon: "minimax",
+		    iconColor: "#FF6B6B"
+		  },
+		  {
+		    key: "openrouter-claude",
+		    displayName: "OpenRouter",
+		    appType: "claude",
+		    category: "aggregator",
+		    api: "anthropic-messages",
+		    baseURL: "https://openrouter.ai/api",
+		    models: ["anthropic/claude-haiku-4.5", "anthropic/claude-opus-5", "anthropic/claude-sonnet-5"],
+		    icon: "openrouter",
+		    iconColor: "#6566F1"
+		  },
+		  {
+		    key: "nvidia-claude",
+		    displayName: "Nvidia",
+		    appType: "claude",
+		    category: "aggregator",
+		    api: "anthropic-messages",
+		    baseURL: "https://integrate.api.nvidia.com",
+		    models: ["moonshotai/kimi-k3"],
+		    icon: "nvidia",
+		    iconColor: "#000000"
+		  },
+		  {
+		    key: "nvidia-codex",
+		    displayName: "Nvidia (Codex)",
+		    appType: "codex",
+		    category: "aggregator",
+		    api: "openai-responses",
+		    baseURL: "https://integrate.api.nvidia.com/v1",
+		    models: ["moonshotai/kimi-k3"],
+		    icon: "nvidia",
+		    iconColor: "#000000"
+		  },
+		  {
+		    key: "xiaomi-mimo-claude",
+		    displayName: "Xiaomi MiMo",
+		    appType: "claude",
+		    family: "xiaomi-mimo",
+		    planKey: "payg",
+		    category: "cn_official",
+		    api: "anthropic-messages",
+		    baseURL: "https://api.xiaomimimo.com/anthropic",
+		    models: ["mimo-v2.6-pro"],
+		    icon: "xiaomimimo",
+		    iconColor: "#000000"
+		  },
+		  {
+		    key: "xiaomi-mimo-codex",
+		    displayName: "Xiaomi MiMo (Codex)",
+		    appType: "codex",
+		    family: "xiaomi-mimo",
+		    planKey: "payg",
+		    category: "cn_official",
+		    api: "openai-responses",
+		    baseURL: "https://api.xiaomimimo.com/v1",
+		    models: ["mimo-v2.6-pro"],
+		    icon: "xiaomimimo",
+		    iconColor: "#000000"
+		  },
+		  {
+		    key: "longcat-claude",
+		    displayName: "Longcat",
+		    appType: "claude",
+		    category: "cn_official",
+		    api: "anthropic-messages",
+		    baseURL: "https://api.longcat.chat/anthropic",
+		    models: ["LongCat-2.0"],
+		    icon: "longcat",
+		    iconColor: "#29E154"
+		  },
+		  {
+		    key: "longcat-codex",
+		    displayName: "Longcat (Codex)",
+		    appType: "codex",
+		    category: "cn_official",
+		    api: "openai-responses",
+		    baseURL: "https://api.longcat.chat/openai/v1",
+		    models: ["LongCat-2.0"],
+		    icon: "longcat",
+		    iconColor: "#29E154"
+		  },
+		  {
+		    key: "packycode-codex",
+		    displayName: "PackyCode (Codex)",
+		    appType: "codex",
+		    category: "third_party",
+		    isPartner: true,
+		    api: "openai-responses",
+		    baseURL: "https://www.packyapi.ai/v1",
+		    models: ["gpt-5.6-sol"],
+		    icon: "packycode"
+		  },
+		  {
+		    key: "aihubmix-codex",
+		    displayName: "AiHubMix (Codex)",
+		    appType: "codex",
+		    category: "aggregator",
+		    api: "openai-responses",
+		    baseURL: "https://aihubmix.com/v1",
+		    models: ["gpt-5.6-sol"],
+		    icon: "aihubmix",
+		    iconColor: "#006FFB"
+		  },
+		  {
+		    key: "ppio-claude",
+		    displayName: "PPIO",
+		    appType: "claude",
+		    category: "aggregator",
+		    isPartner: true,
+		    api: "anthropic-messages",
+		    baseURL: "https://api.ppio.com/anthropic",
+		    models: ["deepseek/deepseek-v4-flash-0731"],
+		    icon: "ppio",
+		    iconColor: "#2874FF"
+		  },
+		  {
+		    key: "ppio-codex",
+		    displayName: "PPIO (Codex)",
+		    appType: "codex",
+		    category: "aggregator",
+		    isPartner: true,
+		    api: "openai-responses",
+		    baseURL: "https://api.ppio.com/openai/v1",
+		    models: ["deepseek/deepseek-v4-flash-0731"],
+		    icon: "ppio",
+		    iconColor: "#2874FF"
+		  },
+		  {
+		    key: "stepfun-claude",
+		    displayName: "StepFun",
+		    appType: "claude",
+		    family: "stepfun",
+		    regionKey: "cn",
+		    category: "cn_official",
+		    api: "anthropic-messages",
+		    baseURL: "https://api.stepfun.com/step_plan",
+		    models: ["step-3.5-flash-2603"],
+		    icon: "stepfun",
+		    iconColor: "#16D6D2"
+		  },
+		  {
+		    key: "stepfun-codex",
+		    displayName: "StepFun (Codex)",
+		    appType: "codex",
+		    family: "stepfun",
+		    planKey: "stepPlan",
+		    regionKey: "cn",
+		    category: "cn_official",
+		    api: "openai-responses",
+		    baseURL: "https://api.stepfun.com/step_plan/v1",
+		    models: ["step-3.7-flash"],
+		    icon: "stepfun",
+		    iconColor: "#16D6D2"
+		  },
+		  {
+		    key: "bailing-claude",
+		    displayName: "BaiLing",
+		    appType: "claude",
+		    category: "cn_official",
+		    api: "anthropic-messages",
+		    baseURL: "https://api.ant-ling.com/anthropic",
+		    models: ["Ling-2.6-1T"],
+		    icon: "bailing"
+		  },
+		  {
+		    key: "bailing-codex",
+		    displayName: "BaiLing (Codex)",
+		    appType: "codex",
+		    category: "cn_official",
+		    api: "openai-responses",
+		    baseURL: "https://api.ant-ling.com/v1",
+		    models: ["Ling-2.6-1T"],
+		    icon: "bailing"
+		  },
+		  {
+		    key: "volcengine-doubao-claude",
+		    displayName: "Volcengine Doubao",
+		    appType: "claude",
+		    family: "volcengine",
+		    planKey: "payg",
+		    category: "cn_official",
+		    isPartner: true,
+		    api: "anthropic-messages",
+		    baseURL: "https://ark.cn-beijing.volces.com/api/compatible",
+		    models: ["doubao-seed-2-1-pro-260628"],
+		    icon: "doubao",
+		    iconColor: "#3370FF"
+		  },
+		  {
+		    key: "volcengine-doubao-codex",
+		    displayName: "Volcengine Doubao (Codex)",
+		    appType: "codex",
+		    family: "volcengine",
+		    planKey: "payg",
+		    category: "cn_official",
+		    isPartner: true,
+		    api: "openai-responses",
+		    baseURL: "https://ark.cn-beijing.volces.com/api/v3",
+		    models: ["doubao-seed-2-1-pro-260628"],
+		    icon: "doubao",
+		    iconColor: "#3370FF"
+		  }
+		]);
+		var CCS_PROVIDER_CATEGORIES = Object.freeze([
+		  "official",
+		  "cn_official",
+		  "cloud_provider",
+		  "aggregator",
+		  "third_party",
+		  "custom",
+		  "omo",
+		  "omo-slim"
+		]);
+		var PRESET_GROUP_ORDER = Object.freeze([
+		  "login",
+		  "vendor",
+		  "thirdparty",
+		  "cloud",
+		  "plugin"
+		]);
+		var PRESET_PLAN_KEYS = Object.freeze([
+		  "payg",
+		  "coding",
+		  "codingPlan",
+		  "agentPlan",
+		  "tokenPlan",
+		  "enterpriseLite",
+		  "enterprisePro",
+		  "stepPlan",
+		  "aksk",
+		  "apiKey"
+		]);
+		var PRESET_REGION_KEYS = Object.freeze(["cn", "intl"]);
+		function presetGroup(preset) {
+		  switch (preset?.category) {
+		    case "official":
+		      return "login";
+		    case "cn_official":
+		      return "vendor";
+		    case "cloud_provider":
+		      return "cloud";
+		    case "omo":
+		    case "omo-slim":
+		      return "plugin";
+		    default:
+		      return "thirdparty";
+		  }
+		}
+		function presetVersionKeys(preset) {
+		  const keys = [];
+		  if (typeof preset?.planKey === "string" && preset.planKey !== "") {
+		    keys.push(`manager.plan.${preset.planKey}`);
+		  }
+		  if (typeof preset?.regionKey === "string" && preset.regionKey !== "") {
+		    keys.push(`manager.region.${preset.regionKey}`);
+		  }
+		  return keys;
+		}
+		function groupPresetsByCategory(presets) {
+		  const list = Array.isArray(presets) ? presets : [];
+		  return PRESET_GROUP_ORDER.map((group) => ({ group, presets: list.filter((preset) => presetGroup(preset) === group) })).filter((section) => section.presets.length > 0);
+		}
+
 		// src/ui/ProviderEditModal.mjs
 		var import_react4 = __toESM(require("react"), 1);
 		var h4 = import_react4.default.createElement;
@@ -2500,6 +3071,11 @@ window.__ModuleLoader__.load({
 
 		// src/ui/ProviderManagerSection.mjs
 		var h5 = import_react5.default.createElement;
+		var FALLBACK = messagesFor(DEFAULT_LOCALE);
+		function presetOptionLabel(preset, tr) {
+		  const parts = presetVersionKeys(preset).map((key) => tr(key, FALLBACK[key]));
+		  return parts.length === 0 ? String(preset?.displayName ?? "") : `${preset.displayName} \xB7 ${parts.join(" \xB7 ")}`;
+		}
 		var FAILURE_TEXT = {
 		  activate: ["manager.activateFailed", "\u542F\u7528\u5931\u8D25\uFF1A{message}"],
 		  delete: ["manager.deleteFailed", "\u5220\u9664\u5931\u8D25\uFF1A{message}"],
@@ -2524,10 +3100,50 @@ window.__ModuleLoader__.load({
 		    credentialFound: provider?.credential === "found",
 		    modelCount: Array.isArray(provider?.models) ? provider.models.length : 0,
 		    inFailoverQueue: provider?.inFailoverQueue === true,
+		    // Whether this row can be probed at all. The probe route reads CC Switch's
+		    // database and is addressed by the `profileId` a scan produced, so a
+		    // provider the user added by hand or from a preset has no row to probe.
+		    // The button is hidden rather than shown-and-failing: there is no action
+		    // the user could take to make it work, and offering it would read as a
+		    // broken feature rather than a limit of what was imported.
+		    probeable: typeof provider?.sourceProfileId === "string" && provider.sourceProfileId !== "",
 		    pending,
 		    action: pending ? snapshot?.pendingAction : void 0,
 		    disabled: snapshot?.status === "busy" || snapshot?.status === "loading"
 		  };
+		}
+		function providerMatches(provider, query) {
+		  const needle = String(query ?? "").trim().toLowerCase();
+		  if (needle === "") return true;
+		  return [provider?.displayName, provider?.notes, provider?.baseURL].filter((value) => typeof value === "string" && value !== "").join("\n").toLowerCase().includes(needle);
+		}
+		var PROBE_FALLBACK2 = {
+		  ok: "\u8FDE\u901A \xB7 {count} \u4E2A\u6A21\u578B \xB7 {ms}ms",
+		  "ok-minimal": "\u8FDE\u901A \xB7 \u6700\u5C0F\u8BF7\u6C42 \xB7 {ms}ms",
+		  empty: "\u8FDE\u901A \xB7 \u4E0A\u6E38\u6CA1\u8FD4\u56DE\u6A21\u578B",
+		  "http-error": "\u5931\u8D25 \xB7 HTTP {status}",
+		  "no-credentials": "\u65E0\u6CD5\u6D4B\u8BD5\uFF1A\u7F3A\u5C11\u51ED\u636E\u6216 base URL",
+		  timeout: "\u5931\u8D25 \xB7 \u8D85\u65F6",
+		  network: "\u5931\u8D25 \xB7 \u7F51\u7EDC\u9519\u8BEF"
+		};
+		function probeLabel2(probe, tr) {
+		  if (probe?.phase === "error") {
+		    if (probe.unprobeable === true) {
+		      return tr("manager.probeUnprobeable", "\u65E0\u6CD5\u6D4B\u8BD5\uFF1A\u8BE5 provider \u4E0D\u662F\u4ECE CC Switch \u5BFC\u5165\u7684\uFF0C\u6CA1\u6709\u53EF\u63A2\u6D4B\u7684\u6E90\u8BB0\u5F55");
+		    }
+		    const base2 = tr("importer.probe.requestFailed", "\u5931\u8D25 \xB7 {message}", { message: probe.message ?? "" });
+		    return probe.staleHost ? `${base2} \xB7 ${tr("importer.probe.hostStale", "\u5BBF\u4E3B\u672A\u52A0\u8F7D\u8BE5\u63A5\u53E3\uFF0C\u91CD\u542F DSH \u540E\u91CD\u8BD5")}` : base2;
+		  }
+		  const reason = probe?.check === "minimal" && probe?.ok === true ? "ok-minimal" : typeof probe?.reason === "string" && PROBE_FALLBACK2[probe.reason] ? probe.reason : "network";
+		  const base = tr(`importer.probe.${reason}`, PROBE_FALLBACK2[reason], {
+		    count: probe?.modelCount ?? 0,
+		    ms: probe?.latencyMs ?? 0,
+		    status: probe?.httpStatus ?? 0
+		  });
+		  return typeof probe?.detail === "string" && probe.detail.length > 0 ? `${base} \xB7 ${probe.detail}` : base;
+		}
+		function probeKind2(probe) {
+		  return probe?.phase !== "error" && probe?.ok === true ? "ok" : "error";
 		}
 		function useDialog(revision, onOpen) {
 		  const [dialog, setDialog] = (0, import_react5.useState)(null);
@@ -2557,6 +3173,7 @@ window.__ModuleLoader__.load({
 		    () => controller.clearSaveFeedback?.()
 		  );
 		  const [presetKey, setPresetKey] = (0, import_react5.useState)("");
+		  const [query, setQuery] = (0, import_react5.useState)("");
 		  const [rowError, setRowError] = (0, import_react5.useState)(null);
 		  const loadedPresets = (0, import_react5.useRef)(false);
 		  (0, import_react5.useEffect)(() => {
@@ -2609,6 +3226,7 @@ window.__ModuleLoader__.load({
 		    setPresetKey("");
 		  };
 		  const rows = order.map((key) => providers[key]).filter(Boolean);
+		  const visibleRows = rows.filter((provider) => providerMatches(provider, query));
 		  return h5(
 		    "section",
 		    { className: "dsh-ccswitch-manager", "aria-labelledby": "dsh-ccswitch-manager-title" },
@@ -2636,7 +3254,19 @@ window.__ModuleLoader__.load({
 		              onChange: (event) => applyPreset(event.target.value)
 		            },
 		            h5("option", { value: "" }, tr("manager.presetNone", "\u81EA\u5B9A\u4E49\uFF08\u7A7A\u767D\uFF09")),
-		            ...presets.map((preset) => h5("option", { key: preset.key, value: preset.key }, preset.displayName))
+		            ...groupPresetsByCategory(presets).map((section) => h5(
+		              "optgroup",
+		              {
+		                key: section.group,
+		                // `optgroup` takes a `label` attribute, not children.
+		                label: tr(`manager.group.${section.group}`, FALLBACK[`manager.group.${section.group}`])
+		              },
+		              ...section.presets.map((preset) => h5(
+		                "option",
+		                { key: preset.key, value: preset.key },
+		                presetOptionLabel(preset, tr)
+		              ))
+		            ))
 		          )
 		        ) : null,
 		        h5("button", {
@@ -2700,6 +3330,42 @@ window.__ModuleLoader__.load({
 		        )
 		      ) : null
 		    ) : null,
+		    // The field only appears once there is something to narrow. On a tab with
+		    // no providers it would be a control that cannot do anything, and it would
+		    // sit above the empty state that is trying to explain how to get one.
+		    rows.length > 0 ? h5(
+		      "div",
+		      {
+		        // Laid out inline rather than through a stylesheet rule: every other
+		        // class this tab uses lives in `src/client/styles.mjs`, which this
+		        // change does not own. Hoisting these three declarations into a
+		        // `.dsh-ccswitch-manager__search` rule there is the tidier home and is
+		        // worth doing the next time that file is open.
+		        style: { display: "flex", alignItems: "center", gap: "8px", minWidth: 0 }
+		      },
+		      h5("input", {
+		        // `text`, not `search`: the latter draws the browser's own clear
+		        // affordance, which would sit beside the button below and clear the
+		        // field twice.
+		        type: "text",
+		        // The edit form's own input class, so the two controls cannot drift
+		        // apart in border, focus ring or font. Its `width:100%` is overridden
+		        // below, because in a flex row it would push the clear button onto a
+		        // second line.
+		        className: "dsh-ccswitch-form__input",
+		        style: { flex: "1 1 auto", width: "auto", minWidth: 0, maxWidth: "360px" },
+		        value: query,
+		        placeholder: tr("manager.searchPlaceholder", "\u6309\u540D\u79F0/\u5907\u6CE8/\u8BF7\u6C42\u5730\u5740\u641C\u7D22\u4F9B\u5E94\u5546\u2026"),
+		        "aria-label": tr("manager.searchAriaLabel", "\u641C\u7D22\u4F9B\u5E94\u5546"),
+		        disabled: busy,
+		        onChange: (event) => setQuery(event.target.value)
+		      }),
+		      query === "" ? null : h5("button", {
+		        type: "button",
+		        className: "dsh-ccswitch-import__link",
+		        onClick: () => setQuery("")
+		      }, tr("manager.searchClear", "\u6E05\u9664"))
+		    ) : null,
 		    rows.length === 0 ? (() => {
 		      const state = emptyState(snapshot);
 		      if (state === null) return null;
@@ -2707,12 +3373,18 @@ window.__ModuleLoader__.load({
 		        return h5("p", { className: "dsh-ccswitch-manager__empty" }, tr("manager.loading", "\u6B63\u5728\u8BFB\u53D6 provider \u5217\u8868\u2026"));
 		      }
 		      return h5("p", { className: "dsh-ccswitch-manager__empty" }, state === "empty" ? tr("manager.empty", "\u8FD8\u6CA1\u6709 provider\uFF0C\u70B9\u51FB\u300C\u65B0\u589E provider\u300D\u5F00\u59CB\u3002") : tr("manager.emptyNoNamespace", "\u672C\u63D2\u4EF6\u5C1A\u672A\u521B\u5EFA\u8BBE\u7F6E\u547D\u540D\u7A7A\u95F4\uFF1B\u6DFB\u52A0\u7B2C\u4E00\u4E2A provider \u65F6\u4F1A\u4E00\u5E76\u521B\u5EFA\u3002"));
-		    })() : h5(
+		    })() : visibleRows.length === 0 ? h5(
+		      "p",
+		      { role: "status", className: "dsh-ccswitch-manager__empty" },
+		      tr("manager.noSearchResults", "\u6CA1\u6709\u7B26\u5408\u641C\u7D22\u6761\u4EF6\u7684\u4F9B\u5E94\u5546\u3002")
+		    ) : h5(
 		      "div",
 		      { className: "dsh-ccswitch-manager__list" },
-		      ...rows.map((provider) => {
+		      ...visibleRows.map((provider) => {
 		        const view = providerRowView(provider, snapshot);
 		        const { name: name2, pending, action } = view;
+		        const probe = snapshot.probes?.[view.key];
+		        const testing = probe?.phase === "testing";
 		        return h5(
 		          "div",
 		          {
@@ -2749,6 +3421,27 @@ window.__ModuleLoader__.load({
 		          h5(
 		            "div",
 		            { className: "dsh-ccswitch-manager__row-actions", role: "group", "aria-label": tr("manager.rowActionsAria", "{name} \u7684\u64CD\u4F5C", { name: name2 }) },
+		            // Only a provider that came through an import has a CC Switch row
+		            // behind it, so only one of those can be probed — see
+		            // `providerRowView.probeable`. The button is hidden rather than
+		            // shown-and-disabled: there is nothing the user could do to make
+		            // it work, and a permanently dead control reads as a bug.
+		            view.probeable ? h5("button", {
+		              type: "button",
+		              className: "dsh-ccswitch-import__link dsh-ccswitch-import__probe-btn",
+		              disabled: testing || view.disabled,
+		              "aria-label": tr("importer.probe.testAria", "\u6D4B\u8BD5 {name} \u7684\u8FDE\u63A5", { name: name2 }),
+		              onClick: () => {
+		                Promise.resolve(controller.probeOne(view.key)).catch(() => {
+		                });
+		              }
+		            }, testing ? tr("importer.probe.testing", "\u6D4B\u8BD5\u4E2D\u2026") : tr("importer.probe.test", "\u6D4B\u8BD5\u8FDE\u63A5")) : null,
+		            // Sitting beside the button rather than under the row, so the
+		            // verdict reads as the answer to the click that asked for it.
+		            probe && !testing ? h5("span", {
+		              role: "status",
+		              className: `dsh-ccswitch-import__probe dsh-ccswitch-import__probe--${probeKind2(probe)}`
+		            }, probeLabel2(probe, tr)) : null,
 		            h5("button", {
 		              type: "button",
 		              className: "dsh-ccswitch-import__link",

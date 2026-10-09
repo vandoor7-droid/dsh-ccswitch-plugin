@@ -2265,6 +2265,7 @@ var API_BASE = "/api/dsh-ccswitch";
 var MAX_JSON_BODY_BYTES = 64 * 1024;
 var MAX_PROBE_TARGETS = 50;
 var SAFE_STATUSES = /* @__PURE__ */ new Set(["new", "update", "updated", "unchanged", "blocked", "failed", "skipped"]);
+var SAFE_FAILURE_CODES = new Set(Object.values(IMPORT_FAILURE));
 var SAFE_REASONING = /* @__PURE__ */ new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 var SAFE_SCAN_REASONS = new Set(Object.values(SCAN_REASON));
 function isLoopbackRequest(request) {
@@ -2349,7 +2350,10 @@ function publicResult(result, secrets = []) {
     status,
     warnings: publicWarnings(result?.warnings)
   };
-  if (status === "failed") output.error = publicErrorDetail(result?.error, secrets);
+  if (status === "failed") {
+    output.error = publicErrorDetail(result?.error, secrets);
+    if (SAFE_FAILURE_CODES.has(result?.errorCode)) output.errorCode = result.errorCode;
+  }
   if (status === "blocked") {
     output.error = "profile blocked";
     output.blockedCode = BLOCKED_CODES.has(result?.blockedCode) ? result.blockedCode : BLOCKED.UNKNOWN;
@@ -2438,6 +2442,7 @@ function makeRoutes(deps = {}) {
   const scan = deps.scan ?? defaultScan;
   const getProviders = deps.getProviders ?? (async () => ({}));
   const importProfiles2 = deps.importProfiles ?? importProfiles;
+  const getCatalogue = deps.getCatalogue ?? (async () => void 0);
   const probe = deps.probe ?? probeConnection;
   const isLoopback = deps.isLoopback ?? isLoopbackRequest;
   const settings = deps.settings;
@@ -2450,7 +2455,8 @@ function makeRoutes(deps = {}) {
         if (!methodFence(request, response, isLoopback, "GET")) return;
         try {
           const { profiles, reason, dbPath } = normalizeScanResult(await scan());
-          const classified = classifyProfiles(profiles, await getProviders());
+          const [route, catalogue] = await Promise.all([getProviders(), getCatalogue()]);
+          const classified = catalogue === void 0 ? classifyProfiles(profiles, route) : classifyProfiles(profiles, route, catalogue);
           const body = { profiles: classified.map((item) => publicSummary(item.summary)) };
           if (SAFE_SCAN_REASONS.has(reason)) {
             body.source = reason;
@@ -3928,13 +3934,16 @@ function apply(ctx) {
   ctx.inject(["settings"], (child) => {
     child.effect(() => child.settings.configure({ auto: false }, ctx.fiber));
   });
+  const providersOf = (ns) => async () => {
+    const namespaces = await ctx.settings.describe();
+    const namespace = (Array.isArray(namespaces) ? namespaces : []).find((entry) => entry.ns === ns);
+    return namespace?.value?.providers ?? {};
+  };
   const routes = makeRoutes({
-    // 0.2.0 SettingsForms has no get(); describe() returns per-namespace views.
-    getProviders: async () => {
-      const namespaces = ctx.settings.describe();
-      const namespace = namespaces.find((entry) => entry.ns === "llm-pi-ai");
-      return namespace?.value?.providers ?? {};
-    },
+    getProviders: providersOf("llm-pi-ai"),
+    // The importer writes this namespace too, so the scan preview has to
+    // classify against it — see the note in routes.mjs.
+    getCatalogue: providersOf(MANAGER_NAMESPACE),
     settings: ctx.settings,
     credentials: ctx.credentials,
     importProfiles

@@ -41,6 +41,13 @@ function defineCCSProvider(z) {
     iconColor: z.string(),
     appType: z.string(),
     sourceProfileId: z.string(),
+    // CC Switch orders a provider list by `COALESCE(sort_index, 999999),
+    // created_at ASC, id ASC`. Both columns are nullable there, so both fields
+    // are optional here: a provider the user has never reordered has no index,
+    // and a row imported from a database that predates the column has no
+    // creation time.
+    sortIndex: z.number().step(1).min(0),
+    createdAt: z.number(),
     isCurrent: z.boolean().default(false),
     inFailoverQueue: z.boolean().default(false),
     costMultiplier: z.number().min(0),
@@ -120,7 +127,23 @@ function normalizeCCSProvider(value) {
     const amount = finiteNumber(source[field]);
     if (amount !== void 0 && amount >= 0) provider[field] = amount;
   }
+  const sortIndex = finiteNumber(source.sortIndex);
+  if (sortIndex !== void 0 && sortIndex >= 0) provider.sortIndex = truncate(sortIndex);
+  const createdAt = finiteNumber(source.createdAt);
+  if (createdAt !== void 0) provider.createdAt = createdAt;
   return provider;
+}
+function orderProviders(providers) {
+  const UNSORTED = 999999;
+  return Object.entries(providers ?? {}).map(([key, provider]) => ({ key, provider })).sort((a, b) => {
+    const aIndex = Number.isInteger(a.provider?.sortIndex) ? a.provider.sortIndex : UNSORTED;
+    const bIndex = Number.isInteger(b.provider?.sortIndex) ? b.provider.sortIndex : UNSORTED;
+    if (aIndex !== bIndex) return aIndex - bIndex;
+    const aCreated = Number.isFinite(a.provider?.createdAt) ? a.provider.createdAt : Number.NEGATIVE_INFINITY;
+    const bCreated = Number.isFinite(b.provider?.createdAt) ? b.provider.createdAt : Number.NEGATIVE_INFINITY;
+    if (aCreated !== bCreated) return aCreated - bCreated;
+    return a.key < b.key ? -1 : a.key > b.key ? 1 : 0;
+  }).map((entry) => entry.key);
 }
 function truncate(value) {
   return Number.isInteger(value) ? value : Math.trunc(value);
@@ -168,27 +191,46 @@ function validateCCSProvider(value) {
   }
   return { ok: true };
 }
+var DEFAULT_APP_TYPE = "claude";
+function effectiveAppType(provider) {
+  const own = provider?.appType;
+  return typeof own === "string" && own !== "" ? own : DEFAULT_APP_TYPE;
+}
 function activateCCSProvider(providers, key) {
   if (!providers || typeof providers !== "object" || Array.isArray(providers)) {
     throw new Error("providers must be an object");
   }
   if (!Object.hasOwn(providers, key)) throw new Error(`unknown provider: ${key}`);
+  const appType = effectiveAppType(providers[key]);
   return Object.fromEntries(
     Object.entries(providers).map(([entryKey, provider]) => [
       entryKey,
-      { ...provider, isCurrent: entryKey === key }
+      effectiveAppType(provider) === appType ? { ...provider, isCurrent: entryKey === key } : provider
     ])
   );
+}
+function currentKeysByApp(providers) {
+  const current = {};
+  for (const [key, provider] of Object.entries(providers ?? {})) {
+    if (provider?.isCurrent !== true) continue;
+    const appType = effectiveAppType(provider);
+    if (!Object.hasOwn(current, appType)) current[appType] = key;
+  }
+  return current;
 }
 export {
   CCS_API_PROTOCOLS,
   CCS_REASONING_LEVELS,
+  DEFAULT_APP_TYPE,
   activateCCSProvider,
+  currentKeysByApp,
   defineCCSConfig,
   defineCCSModel,
   defineCCSProvider,
+  effectiveAppType,
   emptyCCSProvider,
   normalizeBaseUrl,
   normalizeCCSProvider,
+  orderProviders,
   validateCCSProvider
 };
