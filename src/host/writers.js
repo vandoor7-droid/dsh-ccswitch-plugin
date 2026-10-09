@@ -204,8 +204,12 @@ async function readBytesIfExists(path) {
 
 /**
  * Replace a file's bytes. `mode` is explicit because the atomic writer refuses
- * to guess: `auth.json` holds a secret and is written 0600, the rest 0644,
- * matching cc-switch's private `auth.json`.
+ * to guess, and every file this module writes turns out to hold a credential:
+ * Claude Code keeps `ANTHROPIC_AUTH_TOKEN` in `settings.json`, and Codex keeps
+ * the key in the route table's `experimental_bearer_token` inside `config.toml`
+ * since 0.149. Both are therefore written 0600 — cc-switch marks exactly these
+ * two paths `LiveFile::private` (`claude_direct.rs`, `codex_direct.rs`), and a
+ * wider mode would hand the key to every other account on the machine.
  */
 async function replaceFile(path, content, mode) {
   const atomic = await loadAtomicWrite()
@@ -960,7 +964,7 @@ export async function writeClaudeConfig({ provider, apiKey, home, io } = {}) {
     const { doc, style } = parseJsonDocument(raw, path)
     const { top, env } = claudeProjection(provider, key)
     const removed = applyClaudePatch(doc, top, env, path)
-    await fileIo.write(path, serializeJson(doc, style), 0o644)
+    await fileIo.write(path, serializeJson(doc, style), 0o600)
     return {
       files: [{
         path,
@@ -1042,7 +1046,7 @@ export async function writeCodexConfig({ provider, apiKey, home, io } = {}) {
 
     await fileIo.write(authPath, authNext, 0o600)
     try {
-      await fileIo.write(configPath, patched.text, 0o644)
+      await fileIo.write(configPath, patched.text, 0o600)
     } catch (err) {
       await restoreBytes(authPath, authRaw, fileIo)
       throw err

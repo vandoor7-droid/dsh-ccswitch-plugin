@@ -216,6 +216,26 @@ test('a 409 marks a conflict, re-reads the document, and does not wedge the snap
   assert.equal(snapshot.pendingAction, undefined)
 })
 
+test('refusing to delete the active provider is not reported as a conflict', async () => {
+  // Both answers are 409, but they mean opposite things: a conflict says the
+  // document moved and a retry may succeed, while this says the provider is in
+  // use and no retry ever will. Folding them together would show the "reload
+  // and retry" banner and hide the row error that names the real problem.
+  const fetchImpl = stubFetch({
+    [PROVIDERS]: providersBody(),
+    [`${PROVIDERS}/delete`]: {
+      status: 409,
+      body: { reason: 'active-provider', error: 'this provider is active; activate another one before deleting it' },
+    },
+  })
+  const controller = createCCSwitchManagerController({ fetchImpl })
+  await controller.refresh()
+  await assert.rejects(() => controller.remove('k'), /active/)
+  const snapshot = controller.getSnapshot()
+  assert.equal(snapshot.conflict, false, 'a fact about the provider is not a stale document')
+  assert.equal(snapshot.status, 'error')
+})
+
 test('a rejected save surfaces the Host validation list and clears the busy state', async () => {
   const fetchImpl = stubFetch({
     [PROVIDERS]: providersBody(),

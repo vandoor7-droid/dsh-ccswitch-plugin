@@ -235,6 +235,7 @@ export function createCCSwitchManagerController({ fetchImpl = defaultFetch, onCh
       // The status and the Host's own list are what let a caller tell a failed
       // validation from a revision conflict from a Host that is simply older.
       error.status = response.status
+      error.reason = optionalText(body?.reason)
       error.errors = Array.isArray(body?.errors)
         ? body.errors.filter((entry) => typeof entry === 'string').slice(0, 50)
         : undefined
@@ -349,7 +350,13 @@ export function createCCSwitchManagerController({ fetchImpl = defaultFetch, onCh
       return snapshot
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      const conflict = error?.status === 409
+      // 409 is the Host's staleness signal, with one exception: refusing to
+      // delete the active provider is also a 409, but it is a statement about
+      // the row rather than about the document. Calling that a conflict would
+      // hide it behind the stale-document banner and invite a retry that can
+      // never succeed.
+      const conflict = error?.status === 409 && error?.reason !== 'active-provider'
+      error.conflict = conflict
       if (conflict) {
         // Re-read first, then publish: performRefresh clears `error`, so doing
         // it the other way round would erase the message being reported.

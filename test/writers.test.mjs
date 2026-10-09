@@ -280,6 +280,37 @@ test('claude: the key is written under ANTHROPIC_AUTH_TOKEN only', async () => {
   }
 })
 
+test('both writers write every secret-bearing file owner-only', async () => {
+  // Each path these writers touch holds a credential: Claude Code keeps
+  // ANTHROPIC_AUTH_TOKEN in settings.json, and Codex keeps the key in the route
+  // table's `experimental_bearer_token` inside config.toml. cc-switch marks
+  // exactly those paths `LiveFile::private`, so 0644 would hand the key to
+  // every other account on the machine. The mode is recorded rather than
+  // stat'd because a temp dir ignores permission bits on some platforms.
+  const fixture = makeHome()
+  try {
+    const modes = []
+    const recording = {
+      read: async (path) => {
+        try { return readFileSync(path) } catch (err) { if (err.code === 'ENOENT') return undefined; throw err }
+      },
+      write: async (path, _content, mode) => { modes.push([path, mode]) },
+    }
+    await writeClaudeConfig({ provider: CLAUDE_PROVIDER, apiKey: 'sk-new', home: fixture.home, io: recording })
+    await writeCodexConfig({ provider: CODEX_PROVIDER, apiKey: 'sk-new', home: fixture.home, io: recording })
+
+    const written = modes.map(([path]) => path.split(String.fromCharCode(92)).join('/'))
+    assert.ok(written.some((path) => path.endsWith('.claude/settings.json')), `claude settings.json was not written: ${written}`)
+    assert.ok(written.some((path) => path.endsWith('.codex/auth.json')), `codex auth.json was not written: ${written}`)
+    assert.ok(written.some((path) => path.endsWith('.codex/config.toml')), `codex config.toml was not written: ${written}`)
+    for (const [path, mode] of modes) {
+      assert.equal(mode, 0o600, `${path} must be owner-only, got 0o${Number(mode).toString(8)}`)
+    }
+  } finally {
+    fixture.cleanup()
+  }
+})
+
 // --- Codex: two files, one unit ---------------------------------------------
 
 test('codex: auth.json keeps the official login and never gains the key', async () => {

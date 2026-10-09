@@ -162,7 +162,14 @@ export function ProviderManagerSection({ controller, t }) {
       // The controller has already published the failure; this only decides
       // where it is shown. A conflict is reported once, at the top, because the
       // whole table it was attempted against is now stale.
-      if (error?.status === 409) return;
+      if (error?.conflict) return;
+      // The Host refuses to delete the active provider. That is worth saying on
+      // the row itself, and its own sentence is not translated, so the reason
+      // code selects the localized one.
+      if (error?.reason === "active-provider") {
+        setRowError({ key, message: tr("manager.deleteActive", "该 provider 正在使用中，请先启用其他 provider 再删除。") });
+        return;
+      }
       const message = error instanceof Error ? error.message : String(error);
       const [fallbackKey, fallback] = FAILURE_TEXT[kind] ?? FAILURE_TEXT.delete;
       setRowError({ key, message: tr(fallbackKey, fallback, { message }) });

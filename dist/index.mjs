@@ -2909,7 +2909,7 @@ async function writeClaudeConfig({ provider, apiKey, home, io } = {}) {
     const { doc, style } = parseJsonDocument(raw, path);
     const { top, env } = claudeProjection(provider, key);
     const removed = applyClaudePatch(doc, top, env, path);
-    await fileIo.write(path, serializeJson(doc, style), 420);
+    await fileIo.write(path, serializeJson(doc, style), 384);
     return {
       files: [{
         path,
@@ -2945,7 +2945,7 @@ async function writeCodexConfig({ provider, apiKey, home, io } = {}) {
     );
     await fileIo.write(authPath, authNext, 384);
     try {
-      await fileIo.write(configPath, patched.text, 420);
+      await fileIo.write(configPath, patched.text, 384);
     } catch (err) {
       await restoreBytes(authPath, authRaw, fileIo);
       throw err;
@@ -3197,6 +3197,7 @@ function makeManagerRoutes(deps = {}) {
           const outcome = await serialize(async () => {
             const { providers, revision } = await readCatalogue(settings);
             if (!Object.hasOwn(providers, body.key)) return { missing: true };
+            if (currentKeyOf(providers) === body.key) return { active: true };
             const ref = providers[body.key]?.apiKeyEnv;
             await settings.mutate(
               MANAGER_NAMESPACE,
@@ -3214,6 +3215,13 @@ function makeManagerRoutes(deps = {}) {
           });
           if (outcome.missing) {
             writeJson(response, 404, { error: "no such provider" });
+            return;
+          }
+          if (outcome.active) {
+            writeJson(response, 409, {
+              reason: "active-provider",
+              error: "this provider is active; activate another one before deleting it"
+            });
             return;
           }
           writeJson(response, 200, { key: body.key, status: "removed" });

@@ -356,6 +356,16 @@ export function makeManagerRoutes(deps = {}) {
           const outcome = await serialize(async () => {
             const { providers, revision } = await readCatalogue(settings)
             if (!Object.hasOwn(providers, body.key)) return { missing: true }
+            // CC Switch refuses to delete the provider that is in use —
+            // `services/provider/mod.rs` rejects it with "无法删除当前正在使用的
+            // 供应商" whenever the local record, the database or the proxy route
+            // still points at the row. Here the catalogue is the only pointer,
+            // but the reason carries over: the provider's live configuration is
+            // already written into the other tool, and activation is the only
+            // thing that rewrites it, so removing the row would leave those
+            // files naming a provider this plugin can no longer switch away
+            // from.
+            if (currentKeyOf(providers) === body.key) return { active: true }
             const ref = providers[body.key]?.apiKeyEnv
             await settings.mutate(
               MANAGER_NAMESPACE,
@@ -377,6 +387,17 @@ export function makeManagerRoutes(deps = {}) {
           })
           if (outcome.missing) {
             writeJson(response, 404, { error: 'no such provider' })
+            return
+          }
+          if (outcome.active) {
+            // 409 because the request conflicts with the row's current state,
+            // but `reason` separates it from the stale-revision 409 the client
+            // already reserves for "the document moved": this one is a fact
+            // about the provider, and retrying it can never succeed.
+            writeJson(response, 409, {
+              reason: 'active-provider',
+              error: 'this provider is active; activate another one before deleting it',
+            })
             return
           }
           writeJson(response, 200, { key: body.key, status: 'removed' })

@@ -597,6 +597,7 @@ window.__ModuleLoader__.load({
 		    if (!response.ok) {
 		      const error = new Error(optionalText(body?.error) ?? `HTTP ${response.status}`);
 		      error.status = response.status;
+		      error.reason = optionalText(body?.reason);
 		      error.errors = Array.isArray(body?.errors) ? body.errors.filter((entry) => typeof entry === "string").slice(0, 50) : void 0;
 		      throw error;
 		    }
@@ -687,7 +688,8 @@ window.__ModuleLoader__.load({
 		      return snapshot;
 		    } catch (error) {
 		      const message = error instanceof Error ? error.message : String(error);
-		      const conflict = error?.status === 409;
+		      const conflict = error?.status === 409 && error?.reason !== "active-provider";
+		      error.conflict = conflict;
 		      if (conflict) {
 		        try {
 		          await performRefresh({ quiet: true });
@@ -954,6 +956,7 @@ window.__ModuleLoader__.load({
 		    "manager.conflict": "\u8BBE\u7F6E\u6587\u6863\u5DF2\u88AB\u5176\u4ED6\u5730\u65B9\u6539\u52A8\uFF0C\u5217\u8868\u5DF2\u5237\u65B0\uFF0C\u8BF7\u91CD\u8BD5\u3002",
 		    "manager.saveFailed": "\u4FDD\u5B58\u5931\u8D25\uFF1A{message}",
 		    "manager.deleteFailed": "\u5220\u9664\u5931\u8D25\uFF1A{message}",
+		    "manager.deleteActive": "\u8BE5 provider \u6B63\u5728\u4F7F\u7528\u4E2D\uFF0C\u8BF7\u5148\u542F\u7528\u5176\u4ED6 provider \u518D\u5220\u9664\u3002",
 		    "manager.activateFailed": "\u542F\u7528\u5931\u8D25\uFF1A{message}",
 		    "manager.createTitle": "\u65B0\u589E provider",
 		    "manager.editTitle": "\u7F16\u8F91 provider",
@@ -1134,6 +1137,7 @@ window.__ModuleLoader__.load({
 		    "manager.conflict": "The settings document changed elsewhere. The list has been reloaded \u2014 please retry.",
 		    "manager.saveFailed": "Save failed: {message}",
 		    "manager.deleteFailed": "Delete failed: {message}",
+		    "manager.deleteActive": "This provider is active. Activate another one before deleting it.",
 		    "manager.activateFailed": "Activate failed: {message}",
 		    "manager.createTitle": "Add provider",
 		    "manager.editTitle": "Edit provider",
@@ -2575,7 +2579,11 @@ window.__ModuleLoader__.load({
 		    try {
 		      await action();
 		    } catch (error) {
-		      if (error?.status === 409) return;
+		      if (error?.conflict) return;
+		      if (error?.reason === "active-provider") {
+		        setRowError({ key, message: tr("manager.deleteActive", "\u8BE5 provider \u6B63\u5728\u4F7F\u7528\u4E2D\uFF0C\u8BF7\u5148\u542F\u7528\u5176\u4ED6 provider \u518D\u5220\u9664\u3002") });
+		        return;
+		      }
 		      const message = error instanceof Error ? error.message : String(error);
 		      const [fallbackKey, fallback] = FAILURE_TEXT[kind] ?? FAILURE_TEXT.delete;
 		      setRowError({ key, message: tr(fallbackKey, fallback, { message }) });

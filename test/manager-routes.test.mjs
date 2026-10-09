@@ -290,6 +290,55 @@ test('deleting an unknown provider is a 404, not a silent success', async () => 
   assert.equal(statusOf(res), 404)
 })
 
+test('deleting the active provider is refused, and its secret survives', async () => {
+  // CC Switch refuses this too ("无法删除当前正在使用的供应商"): the provider's
+  // configuration is already written into the other tool's files, and only
+  // activation rewrites them, so dropping the row would strand those files on a
+  // provider the plugin can no longer switch away from.
+  const settings = fakeSettings({
+    'ccs-a-11111111': { ...SAMPLE, isCurrent: true, apiKeyEnv: 'DSH_CCSWITCH_11111111_API_KEY' },
+    'ccs-b-22222222': { ...SAMPLE, displayName: 'B' },
+  })
+  const credentials = fakeCredentials({ DSH_CCSWITCH_11111111_API_KEY: 'sk-live' })
+  const routes = makeManagerRoutes({ settings, credentials, isLoopback: () => true })
+  const res = fakeRes()
+  await routeOf(routes, `${MANAGER_API_BASE}/providers/delete`).handler(
+    withBody(fakeReq({ method: 'POST', headers: { host: '127.0.0.1:5624', ...POST_HEADERS } }), { key: 'ccs-a-11111111' }),
+    res,
+  )
+  assert.equal(statusOf(res), 409)
+  // The reason code is what keeps this 409 from reading as a stale document:
+  // the client shows its own localized sentence for the row instead of the
+  // "reload and retry" banner, because retrying cannot help.
+  assert.equal(bodyOf(res).reason, 'active-provider')
+  assert.ok(settings.providers['ccs-a-11111111'], 'the active row is still there')
+  assert.deepEqual(credentials.calls, [], 'and its secret was not touched')
+})
+
+test('the active provider can be deleted once it is no longer active', async () => {
+  // The guard follows the pointer, not the row: activating another provider
+  // releases the old one, which is what makes the refusal above actionable.
+  const settings = fakeSettings({
+    'ccs-a-11111111': { ...SAMPLE, isCurrent: true, apiKeyEnv: 'DSH_CCSWITCH_11111111_API_KEY' },
+    'ccs-b-22222222': { ...SAMPLE, displayName: 'B' },
+  })
+  const credentials = fakeCredentials({ DSH_CCSWITCH_11111111_API_KEY: 'sk-old' })
+  const routes = makeManagerRoutes({ settings, credentials, isLoopback: () => true })
+  const headers = { host: '127.0.0.1:5624', ...POST_HEADERS }
+
+  await routeOf(routes, `${MANAGER_API_BASE}/providers/activate`).handler(
+    withBody(fakeReq({ method: 'POST', headers }), { key: 'ccs-b-22222222' }),
+    fakeRes(),
+  )
+  const res = fakeRes()
+  await routeOf(routes, `${MANAGER_API_BASE}/providers/delete`).handler(
+    withBody(fakeReq({ method: 'POST', headers }), { key: 'ccs-a-11111111' }),
+    res,
+  )
+  assert.equal(statusOf(res), 200)
+  assert.equal(settings.providers['ccs-a-11111111'], undefined)
+})
+
 // --- activate --------------------------------------------------------------
 
 test('activating one provider clears every other one', async () => {
