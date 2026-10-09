@@ -3,22 +3,26 @@
 // Reworked for DSH 0.2.0-rc.2. See NOTICE for the full attribution chain.
 //
 // The schema module takes `z` as an argument so these tests can run without a
-// DSH runtime. A minimal stand-in is used rather than the real schemastery:
-// the repo's transitive copy is 3.18.1, which predates `.volatile()` entirely,
-// and the only build that implements it (DSH's own 3.18.4) is not a dependency
-// here. What is worth testing is the shape this module asks for and the
-// normalisation it does, neither of which depends on schemastery's internals.
+// DSH runtime, and so the stand-in below can *record* what was declared — which
+// node carries `.volatile()`, which fields carry a default — instead of
+// rebuilding a schema and inspecting it afterwards. What is worth testing here
+// is the shape this module asks for and the normalisation it does; that the
+// real schemastery turns `.volatile()` into a cosmokit reference the Loader can
+// commit is DSH's contract, verified once in test/host.test.mjs.
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   CCS_API_PROTOCOLS,
   CCS_REASONING_LEVELS,
   activateCCSProvider,
+  currentKeysByApp,
   defineCCSConfig,
+  effectiveAppType,
   defineCCSProvider,
   emptyCCSProvider,
   normalizeBaseUrl,
   normalizeCCSProvider,
+  orderProviders,
   validateCCSProvider,
 } from '../src/domain/ccs-provider.mjs'
 
@@ -70,6 +74,7 @@ test('the provider schema declares exactly the CC Switch fields', () => {
     'appType',
     'baseURL',
     'costMultiplier',
+    'createdAt',
     'displayName',
     'icon',
     'iconColor',
@@ -79,6 +84,7 @@ test('the provider schema declares exactly the CC Switch fields', () => {
     'limitMonthlyUsd',
     'models',
     'notes',
+    'sortIndex',
     'sourceProfileId',
   ])
   // The three booleans/numbers that a form toggles carry a default so an
@@ -252,4 +258,95 @@ test('activating one provider clears every other one', () => {
   })
   assert.equal(providers.a.isCurrent, true, 'the input must not be mutated')
   assert.throws(() => activateCCSProvider(providers, 'missing'), /unknown provider: missing/)
+})
+
+test('activating within one app type leaves every other app type alone', () => {
+  // CC Switch's `set_current_provider` clears the flag `WHERE app_type = ?`, so
+  // the active Claude provider and the active Codex provider coexist. One
+  // global flag would mean activating a Codex provider silently deactivated the
+  // Claude provider the user's other tool is still pointed at.
+  const providers = {
+    'ccs-claude-1': { displayName: 'Claude', appType: 'claude', isCurrent: true },
+    'ccs-codex-1': { displayName: 'Codex', appType: 'codex', isCurrent: true },
+    'ccs-codex-2': { displayName: 'Codex 2', appType: 'codex', isCurrent: false },
+  }
+  const next = activateCCSProvider(providers, 'ccs-codex-2')
+  assert.equal(next['ccs-claude-1'].isCurrent, true, 'the claude pointer is untouched')
+  assert.equal(next['ccs-codex-1'].isCurrent, false)
+  assert.equal(next['ccs-codex-2'].isCurrent, true)
+  // A row of another app type comes back by reference: one this call has no
+  // opinion about must not read as a settings diff on every activation.
+  assert.equal(next['ccs-claude-1'], providers['ccs-claude-1'])
+})
+
+test('the current pointer is reported per app type', () => {
+  assert.deepEqual(
+    currentKeysByApp({
+      a: { displayName: 'A', appType: 'claude', isCurrent: true },
+      b: { displayName: 'B', appType: 'codex', isCurrent: true },
+      c: { displayName: 'C', appType: 'codex' },
+    }),
+    { claude: 'a', codex: 'b' },
+  )
+  assert.deepEqual(currentKeysByApp({}), {})
+})
+
+test('a record with no appType counts as claude', () => {
+  // Records written before appType was captured can only be Claude Code
+  // providers, and the manager route resolves an unspecified app type the same
+  // way — if the two disagreed, a badge would land on two providers at once.
+  assert.equal(effectiveAppType({}), 'claude')
+  assert.equal(effectiveAppType({ appType: '' }), 'claude')
+  assert.equal(effectiveAppType({ appType: 'codex' }), 'codex')
+  const next = activateCCSProvider({
+    legacy: { displayName: 'Legacy', isCurrent: true },
+    codex: { displayName: 'Codex', appType: 'codex', isCurrent: true },
+  }, 'legacy')
+  assert.equal(next.legacy.isCurrent, true)
+  assert.equal(next.codex.isCurrent, true, 'codex is a different app type')
+})
+
+test('providers come back in CC Switch order', () => {
+  // Mirrors `ORDER BY COALESCE(sort_index, 999999), created_at ASC, id ASC`
+  // (database/dao/providers.rs). The index is a sparse ordinal the user sets by
+  // reordering: a provider that was never moved sorts after every one that was,
+  // and a tie on the index falls back to creation time.
+  const providers = {
+    b: { displayName: 'B', sortIndex: 1, createdAt: 300 },
+    z: { displayName: 'Z', sortIndex: 5, createdAt: 100 },
+    a: { displayName: 'A', sortIndex: 1, createdAt: 200 },
+    n: { displayName: 'N', createdAt: 50 },
+  }
+  assert.deepEqual(orderProviders(providers), ['a', 'b', 'z', 'n'])
+})
+
+test('the key breaks a tie on both index and creation time', () => {
+  // The tiebreak has to be total, or the order would depend on the document's
+  // insertion order and two reads could disagree.
+  const providers = {
+    c: { displayName: 'C', sortIndex: 1, createdAt: 100 },
+    a: { displayName: 'A', sortIndex: 1, createdAt: 100 },
+    b: { displayName: 'B', sortIndex: 1, createdAt: 100 },
+  }
+  assert.deepEqual(orderProviders(providers), ['a', 'b', 'c'])
+})
+
+test('a provider with no creation time sorts before one that has it', () => {
+  // SQLite puts NULL first in an ascending sort, which is what a database
+  // written before the column existed produces.
+  const providers = {
+    dated: { displayName: 'Dated', sortIndex: 0, createdAt: 100 },
+    undated: { displayName: 'Undated', sortIndex: 0 },
+  }
+  assert.deepEqual(orderProviders(providers), ['undated', 'dated'])
+  assert.deepEqual(orderProviders({}), [])
+})
+
+test('ordering metadata survives normalisation and round-trips', () => {
+  const normalized = normalizeCCSProvider({ displayName: 'A', sortIndex: 2, createdAt: 1 })
+  assert.equal(normalized.sortIndex, 2)
+  assert.equal(normalized.createdAt, 1)
+  // A negative ordinals is a data error, not something to clamp.
+  assert.equal(normalizeCCSProvider({ displayName: 'A', sortIndex: -1 }).sortIndex, undefined)
+  assert.equal(normalizeCCSProvider({ displayName: 'A', createdAt: 'nope' }).createdAt, undefined)
 })

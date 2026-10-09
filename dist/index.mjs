@@ -31,7 +31,7 @@ async function renameAtomicTemp(temp, filename) {
       if (!isTransientWindowsRenameError(error)) throw error;
       if (retries >= WINDOWS_RENAME_RETRY_LIMIT) throw error;
     }
-    await new Promise((resolve) => setTimeout(resolve, delay));
+    await new Promise((resolve2) => setTimeout(resolve2, delay));
     delay = Math.min(delay * 2, WINDOWS_RENAME_RETRY_MAX_MS);
   }
 }
@@ -130,7 +130,7 @@ async function withFileLock(filename, operation, options) {
       } else if (await takeOverExitedLock(lockPath)) continue;
     }
     if (Date.now() >= deadline) throw new Error(`atomic-write: timed out waiting for the writer lock at ${lockPath}`);
-    await new Promise((resolve) => setTimeout(resolve, delay));
+    await new Promise((resolve2) => setTimeout(resolve2, delay));
     delay = Math.min(delay * 2, LOCK_RETRY_MAX_MS);
   }
   try {
@@ -318,6 +318,227 @@ function isThinkingModel(modelId) {
   return THINKING_ID_PATTERN.test(key) || THINKING_FAMILY_PATTERN.test(key);
 }
 
+// src/domain/ccs-provider.mjs
+var CCS_API_PROTOCOLS = Object.freeze([
+  "openai-completions",
+  "openai-responses",
+  "anthropic-messages"
+]);
+var CCS_REASONING_LEVELS = Object.freeze([
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max"
+]);
+var PROTOCOL_SET = new Set(CCS_API_PROTOCOLS);
+var LEVEL_SET = new Set(CCS_REASONING_LEVELS);
+function defineCCSModel(z2) {
+  return z2.object({
+    id: z2.string().required(),
+    name: z2.string(),
+    contextWindow: z2.number().step(1).min(1),
+    maxTokens: z2.number().step(1).min(1),
+    // `false` disables reasoning for this model; a dict maps each level to the
+    // wire spelling the endpoint expects, or null for "send nothing".
+    reasoningEfforts: z2.union([
+      z2.const(false),
+      z2.dict(z2.union([z2.string(), z2.const(null)]))
+    ])
+  });
+}
+function defineCCSProvider(z2) {
+  return z2.object({
+    displayName: z2.string(),
+    api: z2.union([...CCS_API_PROTOCOLS]),
+    baseURL: z2.string(),
+    apiKeyEnv: z2.string().role("credential-ref"),
+    models: z2.array(defineCCSModel(z2)).default([]),
+    notes: z2.string(),
+    icon: z2.string(),
+    iconColor: z2.string(),
+    appType: z2.string(),
+    sourceProfileId: z2.string(),
+    // CC Switch orders a provider list by `COALESCE(sort_index, 999999),
+    // created_at ASC, id ASC`. Both columns are nullable there, so both fields
+    // are optional here: a provider the user has never reordered has no index,
+    // and a row imported from a database that predates the column has no
+    // creation time.
+    sortIndex: z2.number().step(1).min(0),
+    createdAt: z2.number(),
+    isCurrent: z2.boolean().default(false),
+    inFailoverQueue: z2.boolean().default(false),
+    costMultiplier: z2.number().min(0),
+    limitDailyUsd: z2.number().min(0),
+    limitMonthlyUsd: z2.number().min(0)
+  });
+}
+function defineCCSConfig(z2) {
+  return z2.object({
+    providers: z2.dict(defineCCSProvider(z2)).default({}).volatile()
+  });
+}
+function emptyCCSProvider(overrides = {}) {
+  return {
+    displayName: "",
+    api: CCS_API_PROTOCOLS[0],
+    baseURL: "",
+    apiKeyEnv: "",
+    models: [],
+    isCurrent: false,
+    inFailoverQueue: false,
+    ...overrides
+  };
+}
+function normalizeBaseUrl(value) {
+  return String(value ?? "").trim().replace(/\/+$/, "");
+}
+function finiteNumber(value) {
+  if (typeof value === "number") return Number.isFinite(value) ? value : void 0;
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : void 0;
+  }
+  return void 0;
+}
+function nonEmptyText(value) {
+  const text = String(value ?? "").trim();
+  return text === "" ? void 0 : text;
+}
+function normalizeCCSProvider(value) {
+  const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const models = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const entry of Array.isArray(source.models) ? source.models : []) {
+    const model = entry && typeof entry === "object" && !Array.isArray(entry) ? entry : typeof entry === "string" ? { id: entry } : void 0;
+    if (model === void 0) continue;
+    const id = nonEmptyText(model.id);
+    if (id === void 0 || seen.has(id)) continue;
+    seen.add(id);
+    const next = { id };
+    const name2 = nonEmptyText(model.name);
+    if (name2 !== void 0) next.name = name2;
+    const contextWindow = finiteNumber(model.contextWindow);
+    if (contextWindow !== void 0 && contextWindow >= 1) next.contextWindow = truncate(contextWindow);
+    const maxTokens = finiteNumber(model.maxTokens);
+    if (maxTokens !== void 0 && maxTokens >= 1) next.maxTokens = truncate(maxTokens);
+    if (model.reasoningEfforts === false) next.reasoningEfforts = false;
+    else if (model.reasoningEfforts && typeof model.reasoningEfforts === "object") {
+      next.reasoningEfforts = { ...model.reasoningEfforts };
+    }
+    models.push(next);
+  }
+  const provider = {
+    displayName: String(source.displayName ?? "").trim(),
+    api: String(source.api ?? "").trim(),
+    baseURL: normalizeBaseUrl(source.baseURL),
+    apiKeyEnv: String(source.apiKeyEnv ?? "").trim(),
+    models
+  };
+  for (const field of ["notes", "icon", "iconColor", "appType", "sourceProfileId"]) {
+    const text = nonEmptyText(source[field]);
+    if (text !== void 0) provider[field] = text;
+  }
+  if (source.isCurrent === true) provider.isCurrent = true;
+  if (source.inFailoverQueue === true) provider.inFailoverQueue = true;
+  for (const field of ["costMultiplier", "limitDailyUsd", "limitMonthlyUsd"]) {
+    const amount = finiteNumber(source[field]);
+    if (amount !== void 0 && amount >= 0) provider[field] = amount;
+  }
+  const sortIndex = finiteNumber(source.sortIndex);
+  if (sortIndex !== void 0 && sortIndex >= 0) provider.sortIndex = truncate(sortIndex);
+  const createdAt = finiteNumber(source.createdAt);
+  if (createdAt !== void 0) provider.createdAt = createdAt;
+  return provider;
+}
+function orderProviders(providers) {
+  const UNSORTED = 999999;
+  return Object.entries(providers ?? {}).map(([key, provider]) => ({ key, provider })).sort((a, b) => {
+    const aIndex = Number.isInteger(a.provider?.sortIndex) ? a.provider.sortIndex : UNSORTED;
+    const bIndex = Number.isInteger(b.provider?.sortIndex) ? b.provider.sortIndex : UNSORTED;
+    if (aIndex !== bIndex) return aIndex - bIndex;
+    const aCreated = Number.isFinite(a.provider?.createdAt) ? a.provider.createdAt : Number.NEGATIVE_INFINITY;
+    const bCreated = Number.isFinite(b.provider?.createdAt) ? b.provider.createdAt : Number.NEGATIVE_INFINITY;
+    if (aCreated !== bCreated) return aCreated - bCreated;
+    return a.key < b.key ? -1 : a.key > b.key ? 1 : 0;
+  }).map((entry) => entry.key);
+}
+function truncate(value) {
+  return Number.isInteger(value) ? value : Math.trunc(value);
+}
+function validateCCSProvider(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { ok: false, message: "provider must be an object" };
+  }
+  if (String(value.displayName ?? "").trim() === "") {
+    return { ok: false, message: "displayName is required" };
+  }
+  const api = String(value.api ?? "").trim();
+  if (api === "") return { ok: false, message: "api is required" };
+  if (!PROTOCOL_SET.has(api)) {
+    return { ok: false, message: `api "${api}" is not one of ${CCS_API_PROTOCOLS.join(", ")}` };
+  }
+  const baseURL = String(value.baseURL ?? "").trim();
+  if (baseURL === "") return { ok: false, message: "baseURL is required" };
+  try {
+    new URL(baseURL);
+  } catch {
+    return { ok: false, message: `baseURL "${baseURL}" is not a URL` };
+  }
+  const models = Array.isArray(value.models) ? value.models : [];
+  if (models.length === 0) return { ok: false, message: "at least one model is required" };
+  for (const model of models) {
+    const id = model && typeof model === "object" ? String(model.id ?? "").trim() : "";
+    if (id === "") return { ok: false, message: "every model needs an id" };
+    const efforts = model.reasoningEfforts;
+    if (efforts === void 0 || efforts === false) continue;
+    if (typeof efforts !== "object" || efforts === null || Array.isArray(efforts)) {
+      return { ok: false, message: `model "${id}" reasoningEfforts must be false or an object` };
+    }
+    for (const [level, wire] of Object.entries(efforts)) {
+      if (!LEVEL_SET.has(level)) {
+        return { ok: false, message: `model "${id}" has an unknown reasoning level "${level}"` };
+      }
+      if (wire !== null && typeof wire !== "string") {
+        return { ok: false, message: `model "${id}" level "${level}" must be a string or null` };
+      }
+      if (level !== "off" && (wire === null || wire.trim() === "")) {
+        return { ok: false, message: `model "${id}" level "${level}" needs a wire value` };
+      }
+    }
+  }
+  return { ok: true };
+}
+var DEFAULT_APP_TYPE = "claude";
+function effectiveAppType(provider) {
+  const own = provider?.appType;
+  return typeof own === "string" && own !== "" ? own : DEFAULT_APP_TYPE;
+}
+function activateCCSProvider(providers, key) {
+  if (!providers || typeof providers !== "object" || Array.isArray(providers)) {
+    throw new Error("providers must be an object");
+  }
+  if (!Object.hasOwn(providers, key)) throw new Error(`unknown provider: ${key}`);
+  const appType = effectiveAppType(providers[key]);
+  return Object.fromEntries(
+    Object.entries(providers).map(([entryKey, provider]) => [
+      entryKey,
+      effectiveAppType(provider) === appType ? { ...provider, isCurrent: entryKey === key } : provider
+    ])
+  );
+}
+function currentKeysByApp(providers) {
+  const current = {};
+  for (const [key, provider] of Object.entries(providers ?? {})) {
+    if (provider?.isCurrent !== true) continue;
+    const appType = effectiveAppType(provider);
+    if (!Object.hasOwn(current, appType)) current[appType] = key;
+  }
+  return current;
+}
+
 // lib/core/json-equal.js
 function jsonEqual(a, b) {
   if (a === b) return true;
@@ -378,18 +599,18 @@ function preservationWarnings(profile, existing) {
   }
   return warnings;
 }
-function normalizeBaseUrl(url) {
+function normalizeBaseUrl2(url) {
   return String(url ?? "").replace(/\/+$/, "");
 }
-function toProviderProfile(profile, existing, providerKeyValue) {
-  const previous = isObject(existing) ? existing : {};
-  const resolvedKey = providerKeyValue ?? providerKey(profile.profileId, profile.profileName);
-  const key = credentialRefForProviderKey(resolvedKey);
-  const existingModels = Array.isArray(previous.models) ? previous.models : [];
-  const sourceModels = (profile.models ?? []).map((model) => typeof model === "string" ? { id: model } : model).filter((model) => typeof model?.id === "string" && model.id.length > 0);
+function sourceModelsOf(profile) {
+  return (profile.models ?? []).map((model) => typeof model === "string" ? { id: model } : model).filter((model) => typeof model?.id === "string" && model.id.length > 0);
+}
+function buildModels(profile, existingModels) {
+  const existing = Array.isArray(existingModels) ? existingModels : [];
+  const sourceModels = sourceModelsOf(profile);
   const sourceIds = new Set(sourceModels.map((model) => model.id));
   const models = sourceModels.map((sourceModel) => {
-    const current = existingModels.find((model) => model?.id === sourceModel.id);
+    const current = existing.find((model) => model?.id === sourceModel.id);
     const enriched = enrichModel(sourceModel, profile);
     const { fallbackThinking: _flag, ...source } = sourceModel;
     const next = { ...enriched, ...isObject(current) ? current : {}, ...source };
@@ -402,13 +623,20 @@ function toProviderProfile(profile, existing, providerKeyValue) {
     }
     return next;
   });
-  for (const model of existingModels) {
+  for (const model of existing) {
     if (isObject(model) && typeof model.id === "string" && !sourceIds.has(model.id)) models.push({ ...model });
   }
+  return { models, sourceModels };
+}
+function toProviderProfile(profile, existing, providerKeyValue) {
+  const previous = isObject(existing) ? existing : {};
+  const resolvedKey = providerKeyValue ?? providerKey(profile.profileId, profile.profileName);
+  const key = credentialRefForProviderKey(resolvedKey);
+  const { models, sourceModels } = buildModels(profile, previous.models);
   const mapped = {
     ...previous,
     displayName: profile.profileName,
-    baseURL: normalizeBaseUrl(profile.baseURL),
+    baseURL: normalizeBaseUrl2(profile.baseURL),
     api: profile.api,
     apiKeyEnv: key,
     models
@@ -420,13 +648,30 @@ function toProviderProfile(profile, existing, providerKeyValue) {
   }
   return mapped;
 }
+function toCCSProvider(profile, existing, providerKeyValue) {
+  const previous = isObject(existing) ? existing : {};
+  const resolvedKey = providerKeyValue ?? providerKey(profile.profileId, profile.profileName);
+  return normalizeCCSProvider({
+    ...previous,
+    displayName: profile.profileName,
+    api: profile.api,
+    baseURL: normalizeBaseUrl2(profile.baseURL),
+    apiKeyEnv: credentialRefForProviderKey(resolvedKey),
+    models: buildModels(profile, previous.models).models,
+    ...profile.appType === void 0 ? {} : { appType: profile.appType },
+    ...profile.profileId === void 0 ? {} : { sourceProfileId: profile.profileId },
+    ...profile.notes === void 0 ? {} : { notes: profile.notes },
+    ...profile.icon === void 0 ? {} : { icon: profile.icon },
+    ...profile.iconColor === void 0 ? {} : { iconColor: profile.iconColor }
+  });
+}
 function redactSummary(profile, key, status, extraWarnings = []) {
   return {
     profileId: profile.profileId,
     profileName: profile.profileName,
     sourceLabel: "CCSwitch",
     providerKey: key,
-    baseURL: normalizeBaseUrl(profile.baseURL),
+    baseURL: normalizeBaseUrl2(profile.baseURL),
     api: profile.api,
     modelCount: (profile.models ?? []).length,
     modelIds: (profile.models ?? []).map((m) => m.id),
@@ -445,7 +690,7 @@ function resolveProviderKey(profile, existingProviders) {
   const existing = existingProviders ?? {};
   const baseKey = providerKey(profile.profileId, profile.profileName);
   let key = baseKey;
-  const sameRoute = (entry) => entry?.displayName === profile.profileName && entry?.baseURL === normalizeBaseUrl(profile.baseURL);
+  const sameRoute = (entry) => entry?.displayName === profile.profileName && entry?.baseURL === normalizeBaseUrl2(profile.baseURL);
   let collisionWarning;
   if (existing[key] !== void 0 && !sameRoute(existing[key])) {
     let index = 1;
@@ -466,8 +711,10 @@ function resolveProviderKey(profile, existingProviders) {
   ]);
   return { key, warnings };
 }
-function classifyProfiles(profiles, existingProviders) {
+function classifyProfiles(profiles, existingProviders, existingCatalogue) {
   const existing = existingProviders ?? {};
+  const catalogue = existingCatalogue ?? {};
+  const checkCatalogue = existingCatalogue !== void 0;
   const seen = /* @__PURE__ */ new Map();
   return profiles.map((profile) => {
     if (profile.skipped || profile.blocked) {
@@ -493,7 +740,10 @@ function classifyProfiles(profiles, existingProviders) {
     seen.set(key, true);
     const existingEntry = existing[key];
     const mapped = toProviderProfile(profile, existingEntry, key);
-    const status = existingEntry === void 0 ? "new" : jsonEqual(existingEntry, mapped) ? "unchanged" : "update";
+    const catalogueEntry = catalogue[key];
+    const catalogueRecord = checkCatalogue ? toCCSProvider(profile, catalogueEntry, key) : void 0;
+    const catalogueSettled = !checkCatalogue || !validateCCSProvider(catalogueRecord).ok || catalogueEntry !== void 0 && jsonEqual(normalizeCCSProvider(catalogueEntry), catalogueRecord);
+    const status = existingEntry === void 0 && (!checkCatalogue || catalogueEntry === void 0) ? "new" : jsonEqual(existingEntry, mapped) && catalogueSettled ? "unchanged" : "update";
     return {
       profileId: profile.profileId,
       profileName: profile.profileName,
@@ -520,7 +770,16 @@ var IMPORT_FAILURE = {
   CREDENTIAL: "credential-write-failed",
   SETTINGS: "settings-write-failed",
   CONFLICT: "settings-conflict",
-  ROLLBACK: "credential-rollback-failed"
+  ROLLBACK: "credential-rollback-failed",
+  /**
+   * The route into DSH landed but the plugin's own provider catalogue did not.
+   *
+   * A distinct kind because the two halves leave the system in different states
+   * and call for different answers: this one means DSH can already call the
+   * provider, and only the manager table is behind. Retrying the import repairs
+   * it, and the credential must NOT be rolled back — the route references it.
+   */
+  CATALOGUE: "catalogue-write-failed"
 };
 var BLOCKED = {
   INVALID_SETTINGS_JSON: "invalid-settings-json",
@@ -579,12 +838,17 @@ function redactText(value, secrets = []) {
 }
 
 // lib/core/importer.js
+var ROUTE_NAMESPACE = "llm-pi-ai";
+var CCS_NAMESPACE = "dsh-ccswitch-plugin";
+var CATALOGUE_FAILURE = IMPORT_FAILURE.CATALOGUE;
 async function importProfiles({ profiles, selectedIds, settings, credentials, expectedRevision }) {
   const selected = new Set(selectedIds ?? []);
   const results = [];
-  const existing = { ...await readExistingProviders(settings) ?? {} };
+  const existing = { ...await readProviders(settings, ROUTE_NAMESPACE) ?? {} };
+  const catalogue = { ...await readProviders(settings, CCS_NAMESPACE) ?? {} };
   const usedKeys = /* @__PURE__ */ new Set();
   let revisionForNextWrite = expectedRevision;
+  let catalogueRevisionForNextWrite = await readRevision(settings, CCS_NAMESPACE);
   for (const profile of profiles) {
     if (profile.skipped) {
       results.push({ profileId: profile.profileId, profileName: profile.profileName, status: "skipped", skipReason: profile.skipReason });
@@ -622,8 +886,21 @@ async function importProfiles({ profiles, selectedIds, settings, credentials, ex
     usedKeys.add(key);
     const wasConfigured = existing[key] !== void 0;
     const mapped = toProviderProfile(profile, existing[key], key);
-    if (wasConfigured && jsonEqual(existing[key], mapped)) {
-      results.push({ profileId: profile.profileId, profileName: profile.profileName, providerKey: key, status: "unchanged", warnings });
+    const catalogueExisting = catalogue[key];
+    const catalogueRecord = toCCSProvider(profile, catalogueExisting, key);
+    const catalogueCheck = validateCCSProvider(catalogueRecord);
+    const catalogueWarnings = catalogueCheck.ok ? [] : [`\u672A\u5199\u5165 provider \u76EE\u5F55\uFF1A${catalogueCheck.message}`];
+    const catalogueUpToDate = catalogueExisting !== void 0 && jsonEqual(normalizeCCSProvider(catalogueExisting), catalogueRecord);
+    const catalogueSettled = !catalogueCheck.ok || catalogueUpToDate;
+    const routeSettled = wasConfigured && jsonEqual(existing[key], mapped);
+    if (routeSettled && catalogueSettled) {
+      results.push({
+        profileId: profile.profileId,
+        profileName: profile.profileName,
+        providerKey: key,
+        status: "unchanged",
+        warnings: mergeWarnings(warnings, catalogueWarnings)
+      });
       continue;
     }
     const previousCredential = await readCredential(credentials, ref);
@@ -637,62 +914,91 @@ async function importProfiles({ profiles, selectedIds, settings, credentials, ex
         status: "failed",
         errorCode: IMPORT_FAILURE.CREDENTIAL,
         error: `\u51ED\u636E\u5199\u5165\u5931\u8D25\uFF1A${redactText(err, [profile.apiKey])}`,
-        warnings
+        warnings: mergeWarnings(warnings, catalogueWarnings)
       });
       continue;
     }
-    try {
-      await settings.mutate("llm-pi-ai", [{ op: "set", path: ["providers", key], value: mapped }], revisionForNextWrite);
-    } catch (err) {
-      const conflict = isSettingsConflict(err);
-      const failure = {
-        profileId: profile.profileId,
-        profileName: profile.profileName,
-        providerKey: key,
-        status: "failed",
-        errorCode: conflict ? IMPORT_FAILURE.CONFLICT : IMPORT_FAILURE.SETTINGS,
-        error: `\u8BBE\u7F6E\u5199\u5165\u5931\u8D25\uFF1A${redactText(err, [profile.apiKey])}`,
-        warnings
-      };
+    if (!routeSettled) {
       try {
-        await restoreCredential(credentials, ref, previousCredential);
-      } catch (cleanupErr) {
+        await settings.mutate(ROUTE_NAMESPACE, [{ op: "set", path: ["providers", key], value: mapped }], revisionForNextWrite);
+      } catch (err) {
+        const conflict = isSettingsConflict(err);
+        const failure = {
+          profileId: profile.profileId,
+          profileName: profile.profileName,
+          providerKey: key,
+          status: "failed",
+          errorCode: conflict ? IMPORT_FAILURE.CONFLICT : IMPORT_FAILURE.SETTINGS,
+          error: `\u8BBE\u7F6E\u5199\u5165\u5931\u8D25\uFF1A${redactText(err, [profile.apiKey])}`,
+          warnings: mergeWarnings(warnings, catalogueWarnings)
+        };
+        try {
+          await restoreCredential(credentials, ref, previousCredential);
+        } catch (cleanupErr) {
+          results.push({
+            ...failure,
+            errorCode: IMPORT_FAILURE.ROLLBACK,
+            error: `${failure.error}\uFF1B\u4E14\u51ED\u636E\u56DE\u6EDA\u5931\u8D25\uFF1A${redactText(cleanupErr, [profile.apiKey])}`
+          });
+          continue;
+        }
+        results.push(failure);
+        continue;
+      }
+      existing[key] = mapped;
+      revisionForNextWrite = await readRevision(settings, ROUTE_NAMESPACE);
+    }
+    if (catalogueCheck.ok && !catalogueUpToDate) {
+      try {
+        await settings.mutate(CCS_NAMESPACE, [{ op: "set", path: ["providers", key], value: catalogueRecord }], catalogueRevisionForNextWrite);
+      } catch (err) {
         results.push({
-          ...failure,
-          errorCode: IMPORT_FAILURE.ROLLBACK,
-          error: `${failure.error}\uFF1B\u4E14\u51ED\u636E\u56DE\u6EDA\u5931\u8D25\uFF1A${redactText(cleanupErr, [profile.apiKey])}`
+          profileId: profile.profileId,
+          profileName: profile.profileName,
+          providerKey: key,
+          status: "failed",
+          errorCode: CATALOGUE_FAILURE,
+          error: `provider \u8DEF\u7531\u5DF2\u5199\u5165\uFF0C\u4F46 provider \u76EE\u5F55\u5199\u5165\u5931\u8D25\uFF1A${redactText(err, [profile.apiKey])}`,
+          warnings: mergeWarnings(warnings, catalogueWarnings)
         });
         continue;
       }
-      results.push(failure);
-      continue;
+      catalogue[key] = catalogueRecord;
+      catalogueRevisionForNextWrite = await readRevision(settings, CCS_NAMESPACE);
     }
-    existing[key] = mapped;
-    revisionForNextWrite = await readRevision(settings);
-    results.push({ profileId: profile.profileId, profileName: profile.profileName, providerKey: key, status: wasConfigured ? "updated" : "new", warnings });
+    results.push({
+      profileId: profile.profileId,
+      profileName: profile.profileName,
+      providerKey: key,
+      status: wasConfigured ? "updated" : "new",
+      warnings: mergeWarnings(warnings, catalogueWarnings)
+    });
   }
   return results;
 }
-async function readExistingProviders(settings) {
+function mergeWarnings(warnings, extra) {
+  return extra.length === 0 ? warnings : [.../* @__PURE__ */ new Set([...warnings, ...extra])];
+}
+async function readProviders(settings, ns) {
   try {
     if (typeof settings?.describe === "function") {
       const namespaces = await settings.describe();
-      const namespace = (Array.isArray(namespaces) ? namespaces : []).find((entry) => entry.ns === "llm-pi-ai");
+      const namespace = (Array.isArray(namespaces) ? namespaces : []).find((entry) => entry.ns === ns);
       if (namespace?.value?.providers) return namespace.value.providers;
     }
     if (typeof settings?.get === "function") {
-      const value = await settings.get("llm-pi-ai");
+      const value = await settings.get(ns);
       if (value && typeof value === "object" && value.providers) return value.providers;
     }
   } catch {
   }
   return void 0;
 }
-async function readRevision(settings) {
+async function readRevision(settings, ns) {
   try {
     if (typeof settings?.describe === "function") {
       const namespaces = await settings.describe();
-      const namespace = (Array.isArray(namespaces) ? namespaces : []).find((entry) => entry.ns === "llm-pi-ai");
+      const namespace = (Array.isArray(namespaces) ? namespaces : []).find((entry) => entry.ns === ns);
       if (namespace?.revision !== void 0) return namespace.revision;
     }
   } catch {
@@ -721,195 +1027,13 @@ async function restoreCredential(credentials, ref, previous) {
   if (!previous.configured) return credentials.unset(ref);
 }
 
-// src/domain/ccs-provider.mjs
-var CCS_API_PROTOCOLS = Object.freeze([
-  "openai-completions",
-  "openai-responses",
-  "anthropic-messages"
-]);
-var CCS_REASONING_LEVELS = Object.freeze([
-  "off",
-  "minimal",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max"
-]);
-var PROTOCOL_SET = new Set(CCS_API_PROTOCOLS);
-var LEVEL_SET = new Set(CCS_REASONING_LEVELS);
-function defineCCSModel(z2) {
-  return z2.object({
-    id: z2.string().required(),
-    name: z2.string(),
-    contextWindow: z2.number().step(1).min(1),
-    maxTokens: z2.number().step(1).min(1),
-    // `false` disables reasoning for this model; a dict maps each level to the
-    // wire spelling the endpoint expects, or null for "send nothing".
-    reasoningEfforts: z2.union([
-      z2.const(false),
-      z2.dict(z2.union([z2.string(), z2.const(null)]))
-    ])
-  });
-}
-function defineCCSProvider(z2) {
-  return z2.object({
-    displayName: z2.string(),
-    api: z2.union([...CCS_API_PROTOCOLS]),
-    baseURL: z2.string(),
-    apiKeyEnv: z2.string().role("credential-ref"),
-    models: z2.array(defineCCSModel(z2)).default([]),
-    notes: z2.string(),
-    icon: z2.string(),
-    iconColor: z2.string(),
-    appType: z2.string(),
-    sourceProfileId: z2.string(),
-    isCurrent: z2.boolean().default(false),
-    inFailoverQueue: z2.boolean().default(false),
-    costMultiplier: z2.number().min(0),
-    limitDailyUsd: z2.number().min(0),
-    limitMonthlyUsd: z2.number().min(0)
-  });
-}
-function defineCCSConfig(z2) {
-  return z2.object({
-    providers: z2.dict(defineCCSProvider(z2)).default({}).volatile()
-  });
-}
-function emptyCCSProvider(overrides = {}) {
-  return {
-    displayName: "",
-    api: CCS_API_PROTOCOLS[0],
-    baseURL: "",
-    apiKeyEnv: "",
-    models: [],
-    isCurrent: false,
-    inFailoverQueue: false,
-    ...overrides
-  };
-}
-function normalizeBaseUrl2(value) {
-  return String(value ?? "").trim().replace(/\/+$/, "");
-}
-function finiteNumber(value) {
-  if (typeof value === "number") return Number.isFinite(value) ? value : void 0;
-  if (typeof value === "string" && value.trim() !== "") {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : void 0;
-  }
-  return void 0;
-}
-function nonEmptyText(value) {
-  const text = String(value ?? "").trim();
-  return text === "" ? void 0 : text;
-}
-function normalizeCCSProvider(value) {
-  const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
-  const models = [];
-  const seen = /* @__PURE__ */ new Set();
-  for (const entry of Array.isArray(source.models) ? source.models : []) {
-    const model = entry && typeof entry === "object" && !Array.isArray(entry) ? entry : typeof entry === "string" ? { id: entry } : void 0;
-    if (model === void 0) continue;
-    const id = nonEmptyText(model.id);
-    if (id === void 0 || seen.has(id)) continue;
-    seen.add(id);
-    const next = { id };
-    const name2 = nonEmptyText(model.name);
-    if (name2 !== void 0) next.name = name2;
-    const contextWindow = finiteNumber(model.contextWindow);
-    if (contextWindow !== void 0 && contextWindow >= 1) next.contextWindow = truncate(contextWindow);
-    const maxTokens = finiteNumber(model.maxTokens);
-    if (maxTokens !== void 0 && maxTokens >= 1) next.maxTokens = truncate(maxTokens);
-    if (model.reasoningEfforts === false) next.reasoningEfforts = false;
-    else if (model.reasoningEfforts && typeof model.reasoningEfforts === "object") {
-      next.reasoningEfforts = { ...model.reasoningEfforts };
-    }
-    models.push(next);
-  }
-  const provider = {
-    displayName: String(source.displayName ?? "").trim(),
-    api: String(source.api ?? "").trim(),
-    baseURL: normalizeBaseUrl2(source.baseURL),
-    apiKeyEnv: String(source.apiKeyEnv ?? "").trim(),
-    models
-  };
-  for (const field of ["notes", "icon", "iconColor", "appType", "sourceProfileId"]) {
-    const text = nonEmptyText(source[field]);
-    if (text !== void 0) provider[field] = text;
-  }
-  if (source.isCurrent === true) provider.isCurrent = true;
-  if (source.inFailoverQueue === true) provider.inFailoverQueue = true;
-  for (const field of ["costMultiplier", "limitDailyUsd", "limitMonthlyUsd"]) {
-    const amount = finiteNumber(source[field]);
-    if (amount !== void 0 && amount >= 0) provider[field] = amount;
-  }
-  return provider;
-}
-function truncate(value) {
-  return Number.isInteger(value) ? value : Math.trunc(value);
-}
-function validateCCSProvider(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return { ok: false, message: "provider must be an object" };
-  }
-  if (String(value.displayName ?? "").trim() === "") {
-    return { ok: false, message: "displayName is required" };
-  }
-  const api = String(value.api ?? "").trim();
-  if (api === "") return { ok: false, message: "api is required" };
-  if (!PROTOCOL_SET.has(api)) {
-    return { ok: false, message: `api "${api}" is not one of ${CCS_API_PROTOCOLS.join(", ")}` };
-  }
-  const baseURL = String(value.baseURL ?? "").trim();
-  if (baseURL === "") return { ok: false, message: "baseURL is required" };
-  try {
-    new URL(baseURL);
-  } catch {
-    return { ok: false, message: `baseURL "${baseURL}" is not a URL` };
-  }
-  const models = Array.isArray(value.models) ? value.models : [];
-  if (models.length === 0) return { ok: false, message: "at least one model is required" };
-  for (const model of models) {
-    const id = model && typeof model === "object" ? String(model.id ?? "").trim() : "";
-    if (id === "") return { ok: false, message: "every model needs an id" };
-    const efforts = model.reasoningEfforts;
-    if (efforts === void 0 || efforts === false) continue;
-    if (typeof efforts !== "object" || efforts === null || Array.isArray(efforts)) {
-      return { ok: false, message: `model "${id}" reasoningEfforts must be false or an object` };
-    }
-    for (const [level, wire] of Object.entries(efforts)) {
-      if (!LEVEL_SET.has(level)) {
-        return { ok: false, message: `model "${id}" has an unknown reasoning level "${level}"` };
-      }
-      if (wire !== null && typeof wire !== "string") {
-        return { ok: false, message: `model "${id}" level "${level}" must be a string or null` };
-      }
-      if (level !== "off" && (wire === null || wire.trim() === "")) {
-        return { ok: false, message: `model "${id}" level "${level}" needs a wire value` };
-      }
-    }
-  }
-  return { ok: true };
-}
-function activateCCSProvider(providers, key) {
-  if (!providers || typeof providers !== "object" || Array.isArray(providers)) {
-    throw new Error("providers must be an object");
-  }
-  if (!Object.hasOwn(providers, key)) throw new Error(`unknown provider: ${key}`);
-  return Object.fromEntries(
-    Object.entries(providers).map(([entryKey, provider]) => [
-      entryKey,
-      { ...provider, isCurrent: entryKey === key }
-    ])
-  );
-}
-
 // src/domain/presets.mjs
 var PROVIDER_PRESETS = Object.freeze([
   {
     key: "deepseek-claude",
     displayName: "DeepSeek",
     appType: "claude",
+    category: "cn_official",
     api: "anthropic-messages",
     baseURL: "https://api.deepseek.com/anthropic",
     models: ["deepseek-flash", "deepseek-v4-pro"],
@@ -920,6 +1044,10 @@ var PROVIDER_PRESETS = Object.freeze([
     key: "kimi-claude",
     displayName: "Kimi",
     appType: "claude",
+    family: "kimi",
+    planKey: "payg",
+    regionKey: "cn",
+    category: "cn_official",
     api: "anthropic-messages",
     baseURL: "https://api.moonshot.cn/anthropic",
     models: ["kimi-k2.7-code"],
@@ -930,6 +1058,10 @@ var PROVIDER_PRESETS = Object.freeze([
     key: "kimi-codex",
     displayName: "Kimi (Codex)",
     appType: "codex",
+    family: "kimi",
+    planKey: "payg",
+    regionKey: "cn",
+    category: "cn_official",
     api: "openai-responses",
     baseURL: "https://api.moonshot.cn/v1",
     models: ["kimi-k3"],
@@ -940,6 +1072,9 @@ var PROVIDER_PRESETS = Object.freeze([
     key: "zhipu-glm-claude",
     displayName: "Zhipu GLM",
     appType: "claude",
+    family: "zhipu",
+    regionKey: "cn",
+    category: "cn_official",
     api: "anthropic-messages",
     baseURL: "https://open.bigmodel.cn/api/anthropic",
     models: ["glm-5.3"],
@@ -950,6 +1085,9 @@ var PROVIDER_PRESETS = Object.freeze([
     key: "zhipu-glm-codex",
     displayName: "Zhipu GLM (Codex)",
     appType: "codex",
+    family: "zhipu",
+    regionKey: "cn",
+    category: "cn_official",
     api: "openai-responses",
     baseURL: "https://open.bigmodel.cn/api/v1",
     models: ["glm-5.3"],
@@ -960,6 +1098,10 @@ var PROVIDER_PRESETS = Object.freeze([
     key: "siliconflow-claude",
     displayName: "SiliconFlow",
     appType: "claude",
+    family: "siliconflow",
+    regionKey: "cn",
+    category: "aggregator",
+    isPartner: true,
     api: "anthropic-messages",
     baseURL: "https://api.siliconflow.cn",
     models: ["Pro/MiniMaxAI/MiniMax-M2.5"],
@@ -970,6 +1112,10 @@ var PROVIDER_PRESETS = Object.freeze([
     key: "siliconflow-codex",
     displayName: "SiliconFlow (Codex)",
     appType: "codex",
+    family: "siliconflow",
+    regionKey: "cn",
+    category: "aggregator",
+    isPartner: true,
     api: "openai-responses",
     baseURL: "https://api.siliconflow.cn/v1",
     models: ["deepseek-ai/DeepSeek-V4-Flash"],
@@ -980,6 +1126,7 @@ var PROVIDER_PRESETS = Object.freeze([
     key: "modelscope-claude",
     displayName: "ModelScope",
     appType: "claude",
+    category: "aggregator",
     api: "anthropic-messages",
     baseURL: "https://api-inference.modelscope.cn",
     models: ["ZhipuAI/GLM-5.2"],
@@ -990,6 +1137,7 @@ var PROVIDER_PRESETS = Object.freeze([
     key: "modelscope-codex",
     displayName: "ModelScope (Codex)",
     appType: "codex",
+    category: "aggregator",
     api: "openai-responses",
     baseURL: "https://api-inference.modelscope.cn/v1",
     models: ["ZhipuAI/GLM-5.2"],
@@ -1000,6 +1148,9 @@ var PROVIDER_PRESETS = Object.freeze([
     key: "minimax-claude",
     displayName: "MiniMax",
     appType: "claude",
+    family: "minimax",
+    regionKey: "cn",
+    category: "cn_official",
     api: "anthropic-messages",
     baseURL: "https://api.minimax.cn/anthropic",
     models: ["MiniMax-M3"],
@@ -1010,6 +1161,9 @@ var PROVIDER_PRESETS = Object.freeze([
     key: "minimax-codex",
     displayName: "MiniMax (Codex)",
     appType: "codex",
+    family: "minimax",
+    regionKey: "cn",
+    category: "cn_official",
     api: "openai-responses",
     baseURL: "https://api.minimax.cn/v1",
     models: ["MiniMax-M3"],
@@ -1020,6 +1174,7 @@ var PROVIDER_PRESETS = Object.freeze([
     key: "openrouter-claude",
     displayName: "OpenRouter",
     appType: "claude",
+    category: "aggregator",
     api: "anthropic-messages",
     baseURL: "https://openrouter.ai/api",
     models: ["anthropic/claude-haiku-4.5", "anthropic/claude-opus-5", "anthropic/claude-sonnet-5"],
@@ -1030,6 +1185,7 @@ var PROVIDER_PRESETS = Object.freeze([
     key: "nvidia-claude",
     displayName: "Nvidia",
     appType: "claude",
+    category: "aggregator",
     api: "anthropic-messages",
     baseURL: "https://integrate.api.nvidia.com",
     models: ["moonshotai/kimi-k3"],
@@ -1040,6 +1196,7 @@ var PROVIDER_PRESETS = Object.freeze([
     key: "nvidia-codex",
     displayName: "Nvidia (Codex)",
     appType: "codex",
+    category: "aggregator",
     api: "openai-responses",
     baseURL: "https://integrate.api.nvidia.com/v1",
     models: ["moonshotai/kimi-k3"],
@@ -1050,6 +1207,9 @@ var PROVIDER_PRESETS = Object.freeze([
     key: "xiaomi-mimo-claude",
     displayName: "Xiaomi MiMo",
     appType: "claude",
+    family: "xiaomi-mimo",
+    planKey: "payg",
+    category: "cn_official",
     api: "anthropic-messages",
     baseURL: "https://api.xiaomimimo.com/anthropic",
     models: ["mimo-v2.6-pro"],
@@ -1060,6 +1220,9 @@ var PROVIDER_PRESETS = Object.freeze([
     key: "xiaomi-mimo-codex",
     displayName: "Xiaomi MiMo (Codex)",
     appType: "codex",
+    family: "xiaomi-mimo",
+    planKey: "payg",
+    category: "cn_official",
     api: "openai-responses",
     baseURL: "https://api.xiaomimimo.com/v1",
     models: ["mimo-v2.6-pro"],
@@ -1070,6 +1233,7 @@ var PROVIDER_PRESETS = Object.freeze([
     key: "longcat-claude",
     displayName: "Longcat",
     appType: "claude",
+    category: "cn_official",
     api: "anthropic-messages",
     baseURL: "https://api.longcat.chat/anthropic",
     models: ["LongCat-2.0"],
@@ -1080,6 +1244,7 @@ var PROVIDER_PRESETS = Object.freeze([
     key: "longcat-codex",
     displayName: "Longcat (Codex)",
     appType: "codex",
+    category: "cn_official",
     api: "openai-responses",
     baseURL: "https://api.longcat.chat/openai/v1",
     models: ["LongCat-2.0"],
@@ -1090,6 +1255,8 @@ var PROVIDER_PRESETS = Object.freeze([
     key: "packycode-codex",
     displayName: "PackyCode (Codex)",
     appType: "codex",
+    category: "third_party",
+    isPartner: true,
     api: "openai-responses",
     baseURL: "https://www.packyapi.ai/v1",
     models: ["gpt-5.6-sol"],
@@ -1099,6 +1266,7 @@ var PROVIDER_PRESETS = Object.freeze([
     key: "aihubmix-codex",
     displayName: "AiHubMix (Codex)",
     appType: "codex",
+    category: "aggregator",
     api: "openai-responses",
     baseURL: "https://aihubmix.com/v1",
     models: ["gpt-5.6-sol"],
@@ -1109,6 +1277,8 @@ var PROVIDER_PRESETS = Object.freeze([
     key: "ppio-claude",
     displayName: "PPIO",
     appType: "claude",
+    category: "aggregator",
+    isPartner: true,
     api: "anthropic-messages",
     baseURL: "https://api.ppio.com/anthropic",
     models: ["deepseek/deepseek-v4-flash-0731"],
@@ -1119,6 +1289,8 @@ var PROVIDER_PRESETS = Object.freeze([
     key: "ppio-codex",
     displayName: "PPIO (Codex)",
     appType: "codex",
+    category: "aggregator",
+    isPartner: true,
     api: "openai-responses",
     baseURL: "https://api.ppio.com/openai/v1",
     models: ["deepseek/deepseek-v4-flash-0731"],
@@ -1129,6 +1301,9 @@ var PROVIDER_PRESETS = Object.freeze([
     key: "stepfun-claude",
     displayName: "StepFun",
     appType: "claude",
+    family: "stepfun",
+    regionKey: "cn",
+    category: "cn_official",
     api: "anthropic-messages",
     baseURL: "https://api.stepfun.com/step_plan",
     models: ["step-3.5-flash-2603"],
@@ -1139,6 +1314,10 @@ var PROVIDER_PRESETS = Object.freeze([
     key: "stepfun-codex",
     displayName: "StepFun (Codex)",
     appType: "codex",
+    family: "stepfun",
+    planKey: "stepPlan",
+    regionKey: "cn",
+    category: "cn_official",
     api: "openai-responses",
     baseURL: "https://api.stepfun.com/step_plan/v1",
     models: ["step-3.7-flash"],
@@ -1149,6 +1328,7 @@ var PROVIDER_PRESETS = Object.freeze([
     key: "bailing-claude",
     displayName: "BaiLing",
     appType: "claude",
+    category: "cn_official",
     api: "anthropic-messages",
     baseURL: "https://api.ant-ling.com/anthropic",
     models: ["Ling-2.6-1T"],
@@ -1158,6 +1338,7 @@ var PROVIDER_PRESETS = Object.freeze([
     key: "bailing-codex",
     displayName: "BaiLing (Codex)",
     appType: "codex",
+    category: "cn_official",
     api: "openai-responses",
     baseURL: "https://api.ant-ling.com/v1",
     models: ["Ling-2.6-1T"],
@@ -1167,6 +1348,10 @@ var PROVIDER_PRESETS = Object.freeze([
     key: "volcengine-doubao-claude",
     displayName: "Volcengine Doubao",
     appType: "claude",
+    family: "volcengine",
+    planKey: "payg",
+    category: "cn_official",
+    isPartner: true,
     api: "anthropic-messages",
     baseURL: "https://ark.cn-beijing.volces.com/api/compatible",
     models: ["doubao-seed-2-1-pro-260628"],
@@ -1177,6 +1362,10 @@ var PROVIDER_PRESETS = Object.freeze([
     key: "volcengine-doubao-codex",
     displayName: "Volcengine Doubao (Codex)",
     appType: "codex",
+    family: "volcengine",
+    planKey: "payg",
+    category: "cn_official",
+    isPartner: true,
     api: "openai-responses",
     baseURL: "https://ark.cn-beijing.volces.com/api/v3",
     models: ["doubao-seed-2-1-pro-260628"],
@@ -1184,6 +1373,36 @@ var PROVIDER_PRESETS = Object.freeze([
     iconColor: "#3370FF"
   }
 ]);
+var CCS_PROVIDER_CATEGORIES = Object.freeze([
+  "official",
+  "cn_official",
+  "cloud_provider",
+  "aggregator",
+  "third_party",
+  "custom",
+  "omo",
+  "omo-slim"
+]);
+var PRESET_GROUP_ORDER = Object.freeze([
+  "login",
+  "vendor",
+  "thirdparty",
+  "cloud",
+  "plugin"
+]);
+var PRESET_PLAN_KEYS = Object.freeze([
+  "payg",
+  "coding",
+  "codingPlan",
+  "agentPlan",
+  "tokenPlan",
+  "enterpriseLite",
+  "enterprisePro",
+  "stepPlan",
+  "aksk",
+  "apiKey"
+]);
+var PRESET_REGION_KEYS = Object.freeze(["cn", "intl"]);
 
 // lib/core/scan.js
 import { homedir } from "node:os";
@@ -1733,6 +1952,16 @@ function scanFailureMessage(err, dbPath) {
   const detail = /no such table/i.test(message) ? " (no providers table)" : "";
   return `scan failed for ${dbPath}: ${reason}${detail}`;
 }
+function orderClause(db) {
+  const columns = new Set(
+    db.prepare("PRAGMA table_info(providers)").all().map((column) => column.name)
+  );
+  const parts = [];
+  if (columns.has("sort_index")) parts.push("COALESCE(sort_index, 999999)");
+  if (columns.has("created_at")) parts.push("created_at ASC");
+  parts.push("id ASC");
+  return parts.join(", ");
+}
 function scanSource(dbPath, { logger = defaultLogger } = {}) {
   if (!sqliteAvailable()) {
     return { profiles: [], reason: SCAN_REASON.UNSUPPORTED_NODE, dbPath };
@@ -1743,7 +1972,7 @@ function scanSource(dbPath, { logger = defaultLogger } = {}) {
   let db;
   try {
     db = openDb(dbPath);
-    const rows = db.prepare("SELECT id, name, settings_config, is_current, app_type FROM providers").all();
+    const rows = db.prepare(`SELECT id, name, settings_config, is_current, app_type FROM providers ORDER BY ${orderClause(db)}`).all();
     const profiles = rows.filter((row) => SUPPORTED_APP_TYPES.includes(row.app_type)).map((row) => extractProfile(row)).filter((profile) => profile !== void 0);
     return { profiles, reason: profiles.length === 0 ? SCAN_REASON.NO_PROFILES : void 0, dbPath };
   } catch (err) {
@@ -2336,18 +2565,21 @@ function knownSecretsFor(result, secretByProfileId) {
 }
 
 // src/host/writers.js
+import { createHash as createHash3 } from "node:crypto";
 import { mkdir as mkdir2, readFile as readFile2, rm as rm2, writeFile as writeFile2 } from "node:fs/promises";
 import { homedir as homedir2 } from "node:os";
-import { dirname as dirname2, join as join2 } from "node:path";
+import { basename, dirname as dirname2, join as join2, resolve } from "node:path";
 var WRITER_APP_TYPES = Object.freeze(["claude", "codex"]);
 var WriterError = class extends Error {
-  constructor(message, { kind = "parse", path, line, column } = {}) {
+  constructor(message, { kind = "parse", path, line, column, profile, key } = {}) {
     super(message);
     this.name = "WriterError";
     this.kind = kind;
     if (path !== void 0) this.path = path;
     if (line !== void 0) this.line = line;
     if (column !== void 0) this.column = column;
+    if (profile !== void 0) this.profile = profile;
+    if (key !== void 0) this.key = key;
   }
 };
 var CLAUDE_FLOOR_TOP = /* @__PURE__ */ new Set([
@@ -2397,8 +2629,38 @@ var CLAUDE_PROTOCOL_SELECTORS = /* @__PURE__ */ new Set([
 function isClaudeFloorEnv(key) {
   return CLAUDE_FLOOR_ENV_PREFIXES.some((prefix) => key.startsWith(prefix)) || CLAUDE_PROTOCOL_SELECTORS.has(key) || CLAUDE_FLOOR_ENV_KEYS.has(key) || key.startsWith("CLAUDE_CODE_SKIP_") && key.endsWith("_AUTH");
 }
-var CODEX_ROUTE_SECTION = "model_providers.custom";
+var CLAUDE_RESIDUE_ENV = Object.freeze([
+  ["CLAUDE_CODE_MAX_CONTEXT_TOKENS", ["262144", "372000", "983616"]],
+  ["CLAUDE_CODE_AUTO_COMPACT_WINDOW", ["262144", "372000", "1000000"]],
+  ["CLAUDE_CODE_MAX_OUTPUT_TOKENS", ["131072"]]
+]);
+function residueValues(values) {
+  const spellings = [];
+  for (const value of values) {
+    spellings.push(value);
+    if (/^\d+$/.test(value)) spellings.push(Number(value));
+  }
+  return spellings;
+}
 var CODEX_ROUTE_ID = "custom";
+var CODEX_BUILT_IN_IDS = Object.freeze([
+  "amazon-bedrock",
+  "amazon-bedrock-runtime",
+  "openai",
+  "ollama",
+  "lmstudio"
+]);
+var CODEX_RESERVED_TABLE_IDS = Object.freeze(["openai", "ollama", "lmstudio"]);
+var CODEX_LEGACY_REROUTE_ID = "cc-switch";
+var CODEX_PROXY_TOKEN_PLACEHOLDER = "PROXY_MANAGED";
+var CODEX_PROFILE_KEY = "profile";
+var CODEX_PROFILE_ROUTE_KEYS = Object.freeze([
+  "model_provider",
+  "openai_base_url",
+  "experimental_bearer_token"
+]);
+var CODEX_CATALOG_FILENAME = "cc-switch-model-catalog.json";
+var CODEX_CATALOG_KEY = "model_catalog_json";
 var LOCK_WAIT_MS = 5e3;
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -2445,6 +2707,20 @@ async function withWriterLock(path, operation) {
   await mkdir2(dirname2(path), { recursive: true, mode: 448 });
   if (atomic === null) return operation();
   return atomic.withFileLock(path, operation, { waitMs: LOCK_WAIT_MS });
+}
+var DEVICE_DIR = ".dsh-ccswitch-plugin";
+function defaultBackupRoot(home) {
+  return join2(home ?? homedir2(), DEVICE_DIR, "backups", "live-first-write");
+}
+async function ensureFirstWriteBackup(path, current, backupRoot, fileIo) {
+  const absolute = resolve(path);
+  const key = createHash3("sha256").update(absolute).digest("hex").slice(0, 12);
+  const backup = join2(backupRoot, `${key}-${basename(absolute)}`);
+  const marker = `${backup}.source`;
+  if (await fileIo.read(marker) !== void 0) return;
+  await mkdir2(backupRoot, { recursive: true, mode: 448 });
+  if (current !== void 0) await fileIo.write(backup, current, 384);
+  await fileIo.write(marker, absolute, 384);
 }
 var DEFAULT_INDENT = "  ";
 function detectIndent(text) {
@@ -2552,6 +2828,14 @@ function applyClaudePatch(doc, top, env, path) {
       removed.push(`env.${key}`);
     }
   }
+  for (const [key, values] of CLAUDE_RESIDUE_ENV) {
+    if (envTargets.has(key)) continue;
+    const current = doc.env?.[key];
+    if (current === void 0) continue;
+    if (!residueValues(values).includes(current)) continue;
+    delete doc.env[key];
+    removed.push(`env.${key}`);
+  }
   for (const [key, value] of Object.entries(top)) doc[key] = value;
   if (envTargets.size > 0) {
     if (!isRecord(doc.env)) doc.env = {};
@@ -2623,6 +2907,85 @@ function keyOf(line) {
   const match = /^\s*([A-Za-z0-9_-]+|"[^"]*"|'[^']*')\s*=/.exec(line);
   return match === null ? void 0 : unquoteKey(match[1]);
 }
+function nonEmptyString(value) {
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : void 0;
+}
+function codexProviderIds(structure) {
+  const ids = /* @__PURE__ */ new Set();
+  for (const name2 of structure.ranges.keys()) {
+    const parts = name2.split(".");
+    if (parts.length === 2 && parts[0] === "model_providers") ids.add(parts[1]);
+  }
+  for (const name2 of structure.values.keys()) {
+    const parts = name2.split(".");
+    if (parts.length >= 3 && parts[0] === "model_providers") ids.add(parts[1]);
+  }
+  return ids;
+}
+function repairReservedCodexTables(lines, structure) {
+  const renames = /* @__PURE__ */ new Map();
+  const drops = [];
+  const removed = [];
+  const taken = codexProviderIds(structure);
+  for (const id of CODEX_RESERVED_TABLE_IDS) {
+    const section = `model_providers.${id}`;
+    const range = structure.ranges.get(section);
+    if (range === void 0) continue;
+    if (structure.arrays.has(section)) continue;
+    const token = structure.values.get(`${section}.experimental_bearer_token`);
+    if (token === CODEX_PROXY_TOKEN_PLACEHOLDER) {
+      drops.push(range);
+      removed.push(section);
+      continue;
+    }
+    taken.delete(id);
+    const renamed = firstFreeCodexTableId(taken, CODEX_LEGACY_REROUTE_ID);
+    taken.add(renamed);
+    renames.set(range.start, `model_providers.${renamed}`);
+    removed.push(`${section} -> model_providers.${renamed}`);
+  }
+  if (renames.size === 0 && drops.length === 0) return null;
+  const dropped = /* @__PURE__ */ new Set();
+  for (const range of drops) {
+    for (let index = range.start; index < range.end; index += 1) dropped.add(index);
+  }
+  const out = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    if (dropped.has(index)) continue;
+    const renamed = renames.get(index);
+    if (renamed === void 0) {
+      out.push(lines[index]);
+      continue;
+    }
+    out.push(renameSectionHeader(lines[index], renamed));
+  }
+  return { lines: out, removed };
+}
+function renameSectionHeader(line, name2) {
+  const match = /^(\s*)(\[\[?)([^\]]+)(\]\]?)(\s*(?:#.*)?)$/.exec(line);
+  if (match === null) return line;
+  return `${match[1]}${match[2]}${name2}${match[4]}${match[5]}`;
+}
+function checkCodexEffectiveRoute(text, routeId) {
+  const lines = text === "" ? [] : text.replace(/\n$/, "").split("\n");
+  const { values } = scanStructure(lines);
+  const name2 = nonEmptyString(values.get(CODEX_PROFILE_KEY));
+  if (name2 === void 0) return;
+  const overridden = CODEX_PROFILE_ROUTE_KEYS.find((key) => {
+    const value = values.get(`profiles.${name2}.${key}`);
+    if (value === void 0) return false;
+    if (value === UNREADABLE_TOML_VALUE) return true;
+    const text2 = nonEmptyString(value);
+    if (text2 === void 0) return false;
+    if (key === "model_provider") return text2 !== routeId;
+    return true;
+  });
+  if (overridden === void 0) return;
+  throw new WriterError(
+    `the active Codex profile "${name2}" ([profiles.${name2}]) sets ${overridden}, so requests would keep following it instead of the target provider. Remove ${overridden} from that profile or change the top-level profile; nothing was written`,
+    { kind: "route", profile: name2, key: overridden }
+  );
+}
 function commentStart(text) {
   let index = 0;
   while (index < text.length) {
@@ -2683,13 +3046,41 @@ function hasCredentialLoginMaterial(auth) {
   if (!isRecord(tokens)) return false;
   return ["id_token", "access_token", "refresh_token"].some((key) => present(tokens[key]));
 }
-function codexTomlEdits(provider, apiKey, requiresOpenaiAuth) {
+function isBuiltInCodexId(id) {
+  return CODEX_BUILT_IN_IDS.includes(id);
+}
+function isReservedCodexId(id) {
+  return CODEX_RESERVED_TABLE_IDS.includes(id);
+}
+function firstFreeCodexTableId(taken, base) {
+  let candidate = base;
+  let suffix = 2;
+  while (taken.has(candidate)) {
+    candidate = `${base}-${suffix}`;
+    suffix += 1;
+  }
+  return candidate;
+}
+function codexRouteId() {
+  if (!isBuiltInCodexId(CODEX_ROUTE_ID) && !isReservedCodexId(CODEX_ROUTE_ID)) return CODEX_ROUTE_ID;
+  return firstFreeCodexTableId(new Set(CODEX_BUILT_IN_IDS), CODEX_ROUTE_ID);
+}
+function isCcSwitchCatalog(value) {
+  if (typeof value !== "string" || value === "") return false;
+  const name2 = value.split(/[\\/]/).pop();
+  return name2 === CODEX_CATALOG_FILENAME;
+}
+function hasStaleCatalogPointer(structure) {
+  return isCcSwitchCatalog(structure.values.get(CODEX_CATALOG_KEY));
+}
+function codexTomlEdits(provider, apiKey, requiresOpenaiAuth, routeId) {
   const edits = [];
+  const routeSection = `model_providers.${routeId}`;
   const model = primaryModelId(provider);
   if (model !== void 0) {
     edits.push({ section: null, key: "model", literal: tomlString(model) });
   }
-  edits.push({ section: null, key: "model_provider", literal: tomlString(CODEX_ROUTE_ID) });
+  edits.push({ section: null, key: "model_provider", literal: tomlString(routeId) });
   const effort = reasoningEffortOf(provider);
   edits.push({
     section: null,
@@ -2697,16 +3088,16 @@ function codexTomlEdits(provider, apiKey, requiresOpenaiAuth) {
     literal: effort === void 0 ? null : tomlString(effort)
   });
   edits.push(
-    { section: CODEX_ROUTE_SECTION, key: "name", literal: tomlString(provider?.displayName ?? "") },
-    { section: CODEX_ROUTE_SECTION, key: "base_url", literal: tomlString(provider?.baseURL ?? "") },
+    { section: routeSection, key: "name", literal: tomlString(provider?.displayName ?? "") },
+    { section: routeSection, key: "base_url", literal: tomlString(provider?.baseURL ?? "") },
     {
-      section: CODEX_ROUTE_SECTION,
+      section: routeSection,
       key: "wire_api",
       literal: tomlString(provider?.api === "openai-responses" ? "responses" : "chat")
     },
-    { section: CODEX_ROUTE_SECTION, key: "experimental_bearer_token", literal: tomlString(apiKey) },
+    { section: routeSection, key: "experimental_bearer_token", literal: tomlString(apiKey) },
     {
-      section: CODEX_ROUTE_SECTION,
+      section: routeSection,
       key: "requires_openai_auth",
       literal: requiresOpenaiAuth ? "true" : "false"
     }
@@ -2716,6 +3107,8 @@ function codexTomlEdits(provider, apiKey, requiresOpenaiAuth) {
 function scanStructure(lines) {
   const sectionAt = [];
   const headers = /* @__PURE__ */ new Map();
+  const values = /* @__PURE__ */ new Map();
+  const arrays = /* @__PURE__ */ new Set();
   const state = { multiline: null, arrays: 0, unterminated: false };
   let current = null;
   for (let index = 0; index < lines.length; index += 1) {
@@ -2724,7 +3117,17 @@ function scanStructure(lines) {
       const name2 = sectionNameOf(lines[index]);
       if (name2 !== void 0) {
         if (!headers.has(name2)) headers.set(name2, index);
+        if (/^\s*\[\[/.test(lines[index])) arrays.add(name2);
         current = name2;
+        continue;
+      }
+      const key = keyOf(lines[index]);
+      if (key !== void 0 && !state.unterminated) {
+        const value = parseTomlLiteral(lines[index]);
+        values.set(
+          current === null ? key : `${current}.${key}`,
+          value === void 0 ? UNREADABLE_TOML_VALUE : value
+        );
       }
     }
     scanLine(lines[index], state);
@@ -2732,25 +3135,99 @@ function scanStructure(lines) {
   const starts = [...headers.values()].sort((left, right) => left - right);
   const endOf = (start) => starts.find((candidate) => candidate > start) ?? lines.length;
   const ranges = new Map([...headers].map(([name2, start]) => [name2, { start, end: endOf(start) }]));
-  return { sectionAt, headers, ranges, unterminated: state.unterminated };
+  return { sectionAt, headers, ranges, values, arrays, unterminated: state.unterminated };
 }
+function parseTomlLiteral(line) {
+  const eq = line.indexOf("=");
+  if (eq === -1) return void 0;
+  const raw = line.slice(eq + 1);
+  const at = commentStart(raw);
+  const body = (at === -1 ? raw : raw.slice(0, at)).trim();
+  if (body === "") return void 0;
+  if (body.startsWith('"') || body.startsWith("'")) {
+    const quote = body[0];
+    if (body.length < 2 || body[body.length - 1] !== quote) return void 0;
+    const inner = body.slice(1, -1);
+    if (quote === "'") return inner;
+    try {
+      return JSON.parse(body);
+    } catch {
+      return inner;
+    }
+  }
+  if (body === "true") return true;
+  if (body === "false") return false;
+  if (/^[+-]?\d+$/.test(body)) return Number(body);
+  if (body.startsWith("{") && body.endsWith("}")) {
+    return parseInlineTable(body.slice(1, -1));
+  }
+  return void 0;
+}
+function parseInlineTable(body) {
+  const members = {};
+  let depth = 0;
+  let start = 0;
+  const parts = [];
+  for (let index = 0; index < body.length; index += 1) {
+    const char = body[index];
+    if (char === '"' || char === "'") {
+      const close = body.indexOf(char, index + 1);
+      if (close === -1) return void 0;
+      index = close;
+      continue;
+    }
+    if (char === "{" || char === "[") depth += 1;
+    else if (char === "}" || char === "]") depth -= 1;
+    else if (char === "," && depth === 0) {
+      parts.push(body.slice(start, index));
+      start = index + 1;
+    }
+  }
+  parts.push(body.slice(start));
+  for (const part of parts) {
+    const eq = part.indexOf("=");
+    if (eq === -1) continue;
+    const key = unquoteKey(part.slice(0, eq).trim());
+    if (key === "") continue;
+    const value = parseTomlLiteral(`x = ${part.slice(eq + 1)}`);
+    members[key] = value === void 0 ? UNREADABLE_TOML_VALUE : value;
+  }
+  return members;
+}
+var UNREADABLE_TOML_VALUE = Symbol("unreadable-toml-value");
 function patchCodexToml(text, provider, { apiKey, requiresOpenaiAuth, trailingNewline } = {}) {
   const endsWithNewline = trailingNewline ?? text.endsWith("\n");
-  const lines = text === "" ? [] : (endsWithNewline ? text.slice(0, -1) : text).split("\n");
-  const structure = scanStructure(lines);
-  const { sectionAt, headers, ranges } = structure;
+  const original = text === "" ? [] : (endsWithNewline ? text.slice(0, -1) : text).split("\n");
+  let structure = scanStructure(original);
   if (structure.unterminated) {
     throw new WriterError(
       "config.toml contains an unterminated string; refusing to overwrite it",
       { kind: "shape" }
     );
   }
+  const repaired = repairReservedCodexTables(original, structure);
+  let lines = original;
+  const removed = [];
+  if (repaired !== null) {
+    lines = repaired.lines;
+    removed.push(...repaired.removed);
+    structure = scanStructure(lines);
+  }
+  const { sectionAt, headers, ranges } = structure;
+  const routeId = codexRouteId();
+  const routeSection = `model_providers.${routeId}`;
   const replacements = /* @__PURE__ */ new Map();
   const removals = /* @__PURE__ */ new Set();
   const pending = [];
   const written = [];
-  const removed = [];
-  for (const edit of codexTomlEdits(provider, apiKey, requiresOpenaiAuth)) {
+  if (hasStaleCatalogPointer(structure)) {
+    const at = lines.findIndex((line, index) => sectionAt[index] === null && keyOf(line) === CODEX_CATALOG_KEY);
+    if (at !== -1) {
+      removals.add(at);
+      removed.push(CODEX_CATALOG_KEY);
+    }
+  }
+  for (const edit of codexTomlEdits(provider, apiKey, requiresOpenaiAuth, routeId)) {
     const label = edit.section === null ? edit.key : `${edit.section}.${edit.key}`;
     let found = -1;
     for (let index = 0; index < lines.length; index += 1) {
@@ -2774,11 +3251,11 @@ function patchCodexToml(text, provider, { apiKey, requiresOpenaiAuth, trailingNe
     replacements.set(found, `${indent}${edit.key} = ${edit.literal}${suffix}`);
     written.push(label);
   }
-  if (pending.some((edit) => edit.section === CODEX_ROUTE_SECTION) && !headers.has(CODEX_ROUTE_SECTION)) {
-    const inlineCustom = ranges.has("model_providers") && lines.slice(ranges.get("model_providers").start, ranges.get("model_providers").end).some((line) => keyOf(line) === "custom");
-    if (inlineCustom) {
+  if (pending.some((edit) => edit.section === routeSection) && !headers.has(routeSection)) {
+    const inlineRoute = ranges.has("model_providers") && lines.slice(ranges.get("model_providers").start, ranges.get("model_providers").end).some((line) => keyOf(line) === routeId);
+    if (inlineRoute) {
       throw new WriterError(
-        "config.toml defines model_providers.custom inline; refusing to rewrite it",
+        `config.toml defines model_providers.${routeId} inline; refusing to rewrite it`,
         { kind: "shape" }
       );
     }
@@ -2831,11 +3308,13 @@ function patchCodexToml(text, provider, { apiKey, requiresOpenaiAuth, trailingNe
     out.push(replacements.has(index) ? replacements.get(index) : lines[index]);
   }
   const next = `${out.join("\n")}${endsWithNewline ? "\n" : ""}`;
-  verifyCodexToml(next, provider, { apiKey, requiresOpenaiAuth });
+  verifyCodexToml(next, provider, { apiKey, requiresOpenaiAuth, routeId });
+  checkCodexEffectiveRoute(next, routeId);
   return { text: next, written, removed };
 }
-function verifyCodexToml(text, provider, { apiKey, requiresOpenaiAuth } = {}) {
+function verifyCodexToml(text, provider, { apiKey, requiresOpenaiAuth, routeId = CODEX_ROUTE_ID } = {}) {
   const lines = text === "" ? [] : text.replace(/\n$/, "").split("\n");
+  const routeSection = `model_providers.${routeId}`;
   const seen = /* @__PURE__ */ new Set();
   for (const line of lines) {
     const name2 = sectionNameOf(line);
@@ -2866,7 +3345,7 @@ function verifyCodexToml(text, provider, { apiKey, requiresOpenaiAuth } = {}) {
   } else {
     expect("model_reasoning_effort", parsed.reasoningEffort, effort);
   }
-  if (parsed.provider === null) refuse("model_providers.custom");
+  if (parsed.provider === null) refuse(routeSection);
   expect("base_url", parsed.provider.baseUrl, String(provider?.baseURL ?? ""));
   expect("name", parsed.provider.name, String(provider?.displayName ?? ""));
   expect("wire_api", parsed.provider.wireApi, provider?.api === "openai-responses" ? "responses" : "chat");
@@ -2877,7 +3356,7 @@ function verifyCodexToml(text, provider, { apiKey, requiresOpenaiAuth } = {}) {
   for (const line of lines) {
     const name2 = sectionNameOf(line);
     if (name2 !== void 0) {
-      inRoute = name2 === CODEX_ROUTE_SECTION;
+      inRoute = name2 === routeSection;
       continue;
     }
     if (!inRoute || keyOf(line) !== "experimental_bearer_token") continue;
@@ -2900,15 +3379,17 @@ function protocolWarnings(appType, provider) {
   }
   return [];
 }
-async function writeClaudeConfig({ provider, apiKey, home, io } = {}) {
+async function writeClaudeConfig({ provider, apiKey, home, io, backupRoot } = {}) {
   const key = requireApiKey(apiKey);
   const path = join2(home ?? homedir2(), ".claude", "settings.json");
   const fileIo = io ?? defaultIo;
+  const backups = backupRoot ?? defaultBackupRoot(home);
   return withWriterLock(path, async () => {
     const raw = await fileIo.read(path);
     const { doc, style } = parseJsonDocument(raw, path);
     const { top, env } = claudeProjection(provider, key);
     const removed = applyClaudePatch(doc, top, env, path);
+    await ensureFirstWriteBackup(path, raw, backups, fileIo);
     await fileIo.write(path, serializeJson(doc, style), 384);
     return {
       files: [{
@@ -2920,12 +3401,13 @@ async function writeClaudeConfig({ provider, apiKey, home, io } = {}) {
     };
   });
 }
-async function writeCodexConfig({ provider, apiKey, home, io } = {}) {
+async function writeCodexConfig({ provider, apiKey, home, io, backupRoot } = {}) {
   const key = requireApiKey(apiKey);
   const directory = join2(home ?? homedir2(), ".codex");
   const authPath = join2(directory, "auth.json");
   const configPath = join2(directory, "config.toml");
   const fileIo = io ?? defaultIo;
+  const backups = backupRoot ?? defaultBackupRoot(home);
   return withWriterLock(authPath, () => withWriterLock(configPath, async () => {
     const authRaw = await fileIo.read(authPath);
     const { doc, style } = parseJsonDocument(authRaw, authPath);
@@ -2943,6 +3425,8 @@ async function writeCodexConfig({ provider, apiKey, home, io } = {}) {
         trailingNewline: configRaw === void 0 ? true : void 0
       }
     );
+    await ensureFirstWriteBackup(authPath, authRaw, backups, fileIo);
+    await ensureFirstWriteBackup(configPath, configRaw, backups, fileIo);
     await fileIo.write(authPath, authNext, 384);
     try {
       await fileIo.write(configPath, patched.text, 384);
@@ -2994,9 +3478,10 @@ async function readCatalogue(settings) {
     return { providers: {}, revision: void 0, exists: false };
   }
 }
-function currentKeyOf(providers) {
-  const found = Object.entries(providers).find(([, provider]) => provider?.isCurrent === true);
-  return found === void 0 ? void 0 : found[0];
+function currentKeyOf(providers, appType) {
+  const current = currentKeysByApp(providers);
+  if (typeof appType === "string" && appType !== "") return current[appType];
+  return Object.values(current)[0];
 }
 function publicProvider(key, provider, credentialConfigured) {
   const models = Array.isArray(provider?.models) ? provider.models : [];
@@ -3101,7 +3586,7 @@ function makeManagerRoutes(deps = {}) {
         if (!methodFence(request, response, isLoopback, "GET")) return;
         try {
           const { providers, revision, exists } = await readCatalogue(settings);
-          const order = Object.keys(providers);
+          const order = orderProviders(providers);
           const entries = await Promise.all(
             order.map(async (key) => [
               key,
@@ -3112,7 +3597,11 @@ function makeManagerRoutes(deps = {}) {
             exists,
             revision,
             order,
+            // Which provider is active is only answerable per app (CC Switch's
+            // `is_current` is a per-app singleton), so the map is the real
+            // answer. `current` stays for a browser half that predates it.
             current: currentKeyOf(providers),
+            currentByApp: currentKeysByApp(providers),
             providers: Object.fromEntries(entries),
             apiProtocols: [...CCS_API_PROTOCOLS]
           });
@@ -3155,7 +3644,14 @@ function makeManagerRoutes(deps = {}) {
               throw Object.assign(new Error("too many providers"), { code: "TOO_MANY" });
             }
             const apiKeyEnv = credentialRefForProviderKey(key);
+            const existingRecord = existingKey === void 0 ? void 0 : providers[existingKey];
             const record = { ...draft, apiKeyEnv };
+            if (record.sortIndex === void 0 && existingRecord?.sortIndex !== void 0) {
+              record.sortIndex = existingRecord.sortIndex;
+            }
+            if (record.createdAt === void 0) {
+              record.createdAt = existingRecord?.createdAt ?? Date.now();
+            }
             const apiKey = typeof body.apiKey === "string" ? body.apiKey : void 0;
             if (apiKey !== void 0 && apiKey !== "") await credentials.set(apiKeyEnv, apiKey);
             await settings.mutate(
@@ -3197,7 +3693,8 @@ function makeManagerRoutes(deps = {}) {
           const outcome = await serialize(async () => {
             const { providers, revision } = await readCatalogue(settings);
             if (!Object.hasOwn(providers, body.key)) return { missing: true };
-            if (currentKeyOf(providers) === body.key) return { active: true };
+            const deleted = providers[body.key];
+            if (currentKeyOf(providers, effectiveAppType(deleted)) === body.key) return { active: true };
             const ref = providers[body.key]?.apiKeyEnv;
             await settings.mutate(
               MANAGER_NAMESPACE,
@@ -3295,6 +3792,54 @@ function makeManagerRoutes(deps = {}) {
           console.error("[dsh-ccswitch-plugin] manager activate failed:", redactText(err));
           writeJson(response, conflict ? 409 : 500, {
             error: conflict ? "the settings document changed; reload and retry" : "could not activate the provider"
+          });
+        }
+      }
+    },
+    {
+      kind: "exact",
+      path: `${MANAGER_API_BASE}/providers/reorder`,
+      handler: async (request, response) => {
+        if (!methodFence(request, response, isLoopback, "POST", { requireSameOrigin: true })) return;
+        const body = await readJsonBody(request);
+        if (!isRecord2(body) || !Array.isArray(body.keys) || body.keys.some((key) => typeof key !== "string" || key === "")) {
+          writeJson(response, 400, { error: "body must be { keys: string[] }" });
+          return;
+        }
+        const requested = body.keys;
+        if (new Set(requested).size !== requested.length) {
+          writeJson(response, 400, { error: "keys must not repeat" });
+          return;
+        }
+        try {
+          await serialize(async () => {
+            const { providers, revision } = await readCatalogue(settings);
+            const present = Object.keys(providers);
+            if (requested.length !== present.length || requested.some((key) => !Object.hasOwn(providers, key))) {
+              throw Object.assign(new Error("keys must name every provider exactly once"), { code: "NOT_PERMUTATION" });
+            }
+            const next = Object.fromEntries(
+              // Index by position, which is what CC Switch's `sort_index` is:
+              // an ordinal the list is sorted by.
+              requested.map((key, index) => [key, { ...providers[key], sortIndex: index }])
+            );
+            await settings.mutate(
+              MANAGER_NAMESPACE,
+              [{ op: "set", path: ["providers"], value: next }],
+              revisionOf(body) ?? revision
+            );
+            return next;
+          });
+          writeJson(response, 200, { status: "reordered", order: requested });
+        } catch (err) {
+          if (err?.code === "NOT_PERMUTATION") {
+            writeJson(response, 400, { error: "keys must name every provider exactly once" });
+            return;
+          }
+          const conflict = /conflict/i.test(String(err?.code ?? "")) || /conflict/i.test(String(err?.message ?? ""));
+          console.error("[dsh-ccswitch-plugin] manager reorder failed:", redactText(err));
+          writeJson(response, conflict ? 409 : 500, {
+            error: conflict ? "the settings document changed; reload and retry" : "could not reorder the providers"
           });
         }
       }

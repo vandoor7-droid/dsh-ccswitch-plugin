@@ -79,6 +79,13 @@ export function defineCCSProvider(z) {
     iconColor: z.string(),
     appType: z.string(),
     sourceProfileId: z.string(),
+    // CC Switch orders a provider list by `COALESCE(sort_index, 999999),
+    // created_at ASC, id ASC`. Both columns are nullable there, so both fields
+    // are optional here: a provider the user has never reordered has no index,
+    // and a row imported from a database that predates the column has no
+    // creation time.
+    sortIndex: z.number().step(1).min(0),
+    createdAt: z.number(),
     isCurrent: z.boolean().default(false),
     inFailoverQueue: z.boolean().default(false),
     costMultiplier: z.number().min(0),
@@ -195,7 +202,43 @@ export function normalizeCCSProvider(value) {
     const amount = finiteNumber(source[field])
     if (amount !== undefined && amount >= 0) provider[field] = amount
   }
+  // Ordering. `sortIndex` is an ordinal, so a negative or fractional value is a
+  // data error rather than something to round; `createdAt` is an epoch stamp and
+  // is carried as given, since only its relative order is ever used.
+  const sortIndex = finiteNumber(source.sortIndex)
+  if (sortIndex !== undefined && sortIndex >= 0) provider.sortIndex = truncate(sortIndex)
+  const createdAt = finiteNumber(source.createdAt)
+  if (createdAt !== undefined) provider.createdAt = createdAt
   return provider
+}
+
+/**
+ * The catalogue's keys in CC Switch's own order.
+ *
+ * Mirrors `ORDER BY COALESCE(sort_index, 999999), created_at ASC, id ASC`
+ * (`database/dao/providers.rs`). The index is a sparse ordinal the user sets by
+ * reordering, so a provider that was never moved sorts after every one that
+ * was; a missing creation time sorts before any real one, which is what SQLite
+ * does with NULL in an ascending sort. The key is the final tiebreak so the
+ * order is total and does not depend on the insertion order of the document.
+ *
+ * @param providers - the catalogue, keyed by provider key.
+ * @returns an array of keys, never undefined.
+ */
+export function orderProviders(providers) {
+  const UNSORTED = 999999
+  return Object.entries(providers ?? {})
+    .map(([key, provider]) => ({ key, provider }))
+    .sort((a, b) => {
+      const aIndex = Number.isInteger(a.provider?.sortIndex) ? a.provider.sortIndex : UNSORTED
+      const bIndex = Number.isInteger(b.provider?.sortIndex) ? b.provider.sortIndex : UNSORTED
+      if (aIndex !== bIndex) return aIndex - bIndex
+      const aCreated = Number.isFinite(a.provider?.createdAt) ? a.provider.createdAt : Number.NEGATIVE_INFINITY
+      const bCreated = Number.isFinite(b.provider?.createdAt) ? b.provider.createdAt : Number.NEGATIVE_INFINITY
+      if (aCreated !== bCreated) return aCreated - bCreated
+      return a.key < b.key ? -1 : a.key > b.key ? 1 : 0
+    })
+    .map((entry) => entry.key)
 }
 
 /** Truncate a positive amount to an integer without importing Math semantics. */
@@ -257,12 +300,38 @@ export function validateCCSProvider(value) {
 }
 
 /**
- * Mark one provider current and clear every other one.
+ * The app type a stored provider belongs to.
  *
- * CC Switch treats the active provider as a per-app singleton and keeps the
- * flag on each row, so activating one is a whole-catalogue edit rather than a
- * single field write. Returning the complete next catalogue keeps that
- * invariant in one place instead of at each call site.
+ * A record written before `appType` was captured carries none. Those can only
+ * be Claude Code providers — it was the only app type this plugin wrote at the
+ * time — so the default is `claude`. The manager route resolves an unspecified
+ * app type the same way, and the two must agree: if they drifted, activating a
+ * provider would clear the pointer for one app type while the row claimed
+ * another, and the badge would sit on two providers at once.
+ */
+export const DEFAULT_APP_TYPE = 'claude'
+
+export function effectiveAppType(provider) {
+  const own = provider?.appType
+  return typeof own === 'string' && own !== '' ? own : DEFAULT_APP_TYPE
+}
+
+/**
+ * Mark one provider current **within its own app type**, leaving every other
+ * app type's pointer alone.
+ *
+ * CC Switch keeps `is_current` as a per-app singleton — its
+ * `set_current_provider` (<code>database/dao/providers.rs</code>) clears the
+ * flag `WHERE app_type = ?` and then sets it on one row, so the active Claude
+ * provider and the active Codex provider coexist and switching one never
+ * disturbs the other. A single global flag would make activating a Codex
+ * provider silently deactivate the Claude provider that the user's other tool
+ * is still pointed at, which is why this is a whole-catalogue edit returning
+ * the complete next state rather than a single field write.
+ *
+ * Providers of other app types are returned untouched, not rewritten with a
+ * normalised `isCurrent` — a row this call has no opinion about must not show
+ * up as a settings diff on every activation.
  *
  * @param providers - the current catalogue, keyed by provider key.
  * @param key - the provider to activate; must already be present.
@@ -273,10 +342,32 @@ export function activateCCSProvider(providers, key) {
     throw new Error('providers must be an object')
   }
   if (!Object.hasOwn(providers, key)) throw new Error(`unknown provider: ${key}`)
+  const appType = effectiveAppType(providers[key])
   return Object.fromEntries(
     Object.entries(providers).map(([entryKey, provider]) => [
       entryKey,
-      { ...provider, isCurrent: entryKey === key },
+      effectiveAppType(provider) === appType
+        ? { ...provider, isCurrent: entryKey === key }
+        : provider,
     ]),
   )
+}
+
+/**
+ * The key marked current within each app type, as `{ <appType>: <key> }`.
+ *
+ * Mirrors `get_current_provider(app_type)`: the question "which provider is
+ * active" only has an answer per app, so a caller that wants one global answer
+ * is asking the wrong question.
+ */
+export function currentKeysByApp(providers) {
+  const current = {}
+  for (const [key, provider] of Object.entries(providers ?? {})) {
+    if (provider?.isCurrent !== true) continue
+    const appType = effectiveAppType(provider)
+    // First wins, so the result does not depend on key order if a document
+    // somehow carries two current rows for one app.
+    if (!Object.hasOwn(current, appType)) current[appType] = key
+  }
+  return current
 }
