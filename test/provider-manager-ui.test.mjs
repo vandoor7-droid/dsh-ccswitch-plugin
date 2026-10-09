@@ -1409,6 +1409,15 @@ test('a failed reorder is reported as a reorder failure', async () => {
 // provider added by hand silently became a Claude Code provider: the Host
 // defaults an absent app type to `claude`. It is now shown and editable.
 
+test('a row shows which app it belongs to, resolving an absent value to claude', () => {
+  // The edit form can set this, so the list has to show it — otherwise two
+  // providers with the same name in different apps look identical.
+  assert.equal(providerRowView({ key: 'k', appType: 'codex' }, {}).appType, 'codex')
+  assert.equal(providerRowView({ key: 'k' }, {}).appType, 'claude')
+  assert.equal(providerRowView({ key: 'k', appType: '' }, {}).appType, 'claude')
+  assert.equal(providerRowView({ key: 'k', appType: 7 }, {}).appType, 'claude')
+})
+
 test('a new provider names an app type instead of leaving it implied', () => {
   assert.equal(emptyDraft().appType, 'claude')
   // A stored provider that predates the field reads as the value the Host will

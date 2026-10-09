@@ -106,6 +106,11 @@ export function providerRowView(provider, snapshot) {
     // never be dressed up as ready.
     credentialFound: provider?.credential === 'found',
     modelCount: Array.isArray(provider?.models) ? provider.models.length : 0,
+    // Which app this row belongs to, resolved the way the Host resolves it: an
+    // absent value means `claude`. Shown on the row because the edit form can
+    // now change it, and without it two same-named providers filed under
+    // different apps would be indistinguishable in the list.
+    appType: typeof provider?.appType === 'string' && provider.appType !== '' ? provider.appType : 'claude',
     inFailoverQueue: provider?.inFailoverQueue === true,
     // Whether this row can be probed at all. The probe route reads CC Switch's
     // database and is addressed by the `profileId` a scan produced, so a
@@ -547,6 +552,7 @@ export function ProviderManagerSection({ controller, t }) {
               ),
               h("div", { className: "dsh-ccswitch-manager__meta-line" },
                 h("code", { className: "dsh-ccswitch-manager__provider-key" }, view.key),
+                h("span", { className: "dsh-ccswitch-manager__app-type" }, view.appType),
                 h("span", { className: "dsh-ccswitch-manager__protocol" }, provider.api || "—"),
                 provider.baseURL ? h("code", null, provider.baseURL) : null,
                 h("span", null, view.modelCount > 0

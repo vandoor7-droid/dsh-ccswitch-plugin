@@ -3210,6 +3210,11 @@ window.__ModuleLoader__.load({
 		    // never be dressed up as ready.
 		    credentialFound: provider?.credential === "found",
 		    modelCount: Array.isArray(provider?.models) ? provider.models.length : 0,
+		    // Which app this row belongs to, resolved the way the Host resolves it: an
+		    // absent value means `claude`. Shown on the row because the edit form can
+		    // now change it, and without it two same-named providers filed under
+		    // different apps would be indistinguishable in the list.
+		    appType: typeof provider?.appType === "string" && provider.appType !== "" ? provider.appType : "claude",
 		    inFailoverQueue: provider?.inFailoverQueue === true,
 		    // Whether this row can be probed at all. The probe route reads CC Switch's
 		    // database and is addressed by the `profileId` a scan produced, so a
@@ -3525,6 +3530,7 @@ window.__ModuleLoader__.load({
 		              "div",
 		              { className: "dsh-ccswitch-manager__meta-line" },
 		              h5("code", { className: "dsh-ccswitch-manager__provider-key" }, view.key),
+		              h5("span", { className: "dsh-ccswitch-manager__app-type" }, view.appType),
 		              h5("span", { className: "dsh-ccswitch-manager__protocol" }, provider.api || "\u2014"),
 		              provider.baseURL ? h5("code", null, provider.baseURL) : null,
 		              h5("span", null, view.modelCount > 0 ? tr("manager.modelCount", "{count} \u4E2A\u6A21\u578B", { count: view.modelCount }) : tr("manager.noModels", "\u65E0\u6A21\u578B")),
