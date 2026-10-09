@@ -175,7 +175,7 @@ function normalizeScanResult(scanned) {
 export const SAME_ORIGIN_HEADER = 'x-dsh-ccswitch-origin'
 export const SAME_ORIGIN_VALUE = 'same-origin'
 
-function sameOriginSignals(request) {
+export function sameOriginSignals(request) {
   const headers = request.headers ?? {}
   const origin = typeof headers.origin === 'string' ? headers.origin.trim() : ''
   const site = typeof headers['sec-fetch-site'] === 'string' ? headers['sec-fetch-site'].trim().toLowerCase() : ''
@@ -187,7 +187,13 @@ function sameOriginSignals(request) {
   return { origin, site, marker, proof }
 }
 
-function methodFence(request, response, isLoopback, method, { requireSameOrigin = false } = {}) {
+/**
+ * The shared request fence: loopback-only, one method, and — for anything that
+ * changes state — proof the request came from this app's own page. Exported so
+ * the manager routes enforce exactly the same rules rather than a second copy
+ * that can drift away from this one.
+ */
+export function methodFence(request, response, isLoopback, method, { requireSameOrigin = false } = {}) {
   if (!isLoopback(request)) {
     writeJson(response, 403, { error: 'forbidden: loopback and same-origin only' })
     return false

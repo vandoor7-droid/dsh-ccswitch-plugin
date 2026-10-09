@@ -2,7 +2,7 @@
 import z from "@deepseek-ai/schemastery";
 
 // lib/core/ids.js
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 function shortHash(input, length) {
   return createHash("sha256").update(input).digest("hex").slice(0, length);
 }
@@ -14,6 +14,10 @@ function providerKey(profileId, profileName) {
   const slug = slugify(profileName);
   const hash = shortHash(`${profileId}::${profileName}`, 8);
   return `ccs-${slug}-${hash}`;
+}
+function newProviderKey(displayName) {
+  const slug = slugify(displayName);
+  return `ccs-${slug}-${randomBytes(4).toString("hex")}`;
 }
 function credentialRefForProviderKey(providerKeyValue) {
   const tail = String(providerKeyValue).split("-").pop();
@@ -607,6 +611,414 @@ function defineCCSConfig(z2) {
     providers: z2.dict(defineCCSProvider(z2)).default({}).volatile()
   });
 }
+function emptyCCSProvider(overrides = {}) {
+  return {
+    displayName: "",
+    api: CCS_API_PROTOCOLS[0],
+    baseURL: "",
+    apiKeyEnv: "",
+    models: [],
+    isCurrent: false,
+    inFailoverQueue: false,
+    ...overrides
+  };
+}
+function normalizeBaseUrl2(value) {
+  return String(value ?? "").trim().replace(/\/+$/, "");
+}
+function finiteNumber(value) {
+  if (typeof value === "number") return Number.isFinite(value) ? value : void 0;
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : void 0;
+  }
+  return void 0;
+}
+function nonEmptyText(value) {
+  const text = String(value ?? "").trim();
+  return text === "" ? void 0 : text;
+}
+function normalizeCCSProvider(value) {
+  const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const models = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const entry of Array.isArray(source.models) ? source.models : []) {
+    const model = entry && typeof entry === "object" && !Array.isArray(entry) ? entry : typeof entry === "string" ? { id: entry } : void 0;
+    if (model === void 0) continue;
+    const id = nonEmptyText(model.id);
+    if (id === void 0 || seen.has(id)) continue;
+    seen.add(id);
+    const next = { id };
+    const name2 = nonEmptyText(model.name);
+    if (name2 !== void 0) next.name = name2;
+    const contextWindow = finiteNumber(model.contextWindow);
+    if (contextWindow !== void 0 && contextWindow >= 1) next.contextWindow = truncate(contextWindow);
+    const maxTokens = finiteNumber(model.maxTokens);
+    if (maxTokens !== void 0 && maxTokens >= 1) next.maxTokens = truncate(maxTokens);
+    if (model.reasoningEfforts === false) next.reasoningEfforts = false;
+    else if (model.reasoningEfforts && typeof model.reasoningEfforts === "object") {
+      next.reasoningEfforts = { ...model.reasoningEfforts };
+    }
+    models.push(next);
+  }
+  const provider = {
+    displayName: String(source.displayName ?? "").trim(),
+    api: String(source.api ?? "").trim(),
+    baseURL: normalizeBaseUrl2(source.baseURL),
+    apiKeyEnv: String(source.apiKeyEnv ?? "").trim(),
+    models
+  };
+  for (const field of ["notes", "icon", "iconColor", "appType", "sourceProfileId"]) {
+    const text = nonEmptyText(source[field]);
+    if (text !== void 0) provider[field] = text;
+  }
+  if (source.isCurrent === true) provider.isCurrent = true;
+  if (source.inFailoverQueue === true) provider.inFailoverQueue = true;
+  for (const field of ["costMultiplier", "limitDailyUsd", "limitMonthlyUsd"]) {
+    const amount = finiteNumber(source[field]);
+    if (amount !== void 0 && amount >= 0) provider[field] = amount;
+  }
+  return provider;
+}
+function truncate(value) {
+  return Number.isInteger(value) ? value : Math.trunc(value);
+}
+function validateCCSProvider(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { ok: false, message: "provider must be an object" };
+  }
+  if (String(value.displayName ?? "").trim() === "") {
+    return { ok: false, message: "displayName is required" };
+  }
+  const api = String(value.api ?? "").trim();
+  if (api === "") return { ok: false, message: "api is required" };
+  if (!PROTOCOL_SET.has(api)) {
+    return { ok: false, message: `api "${api}" is not one of ${CCS_API_PROTOCOLS.join(", ")}` };
+  }
+  const baseURL = String(value.baseURL ?? "").trim();
+  if (baseURL === "") return { ok: false, message: "baseURL is required" };
+  try {
+    new URL(baseURL);
+  } catch {
+    return { ok: false, message: `baseURL "${baseURL}" is not a URL` };
+  }
+  const models = Array.isArray(value.models) ? value.models : [];
+  if (models.length === 0) return { ok: false, message: "at least one model is required" };
+  for (const model of models) {
+    const id = model && typeof model === "object" ? String(model.id ?? "").trim() : "";
+    if (id === "") return { ok: false, message: "every model needs an id" };
+    const efforts = model.reasoningEfforts;
+    if (efforts === void 0 || efforts === false) continue;
+    if (typeof efforts !== "object" || efforts === null || Array.isArray(efforts)) {
+      return { ok: false, message: `model "${id}" reasoningEfforts must be false or an object` };
+    }
+    for (const [level, wire] of Object.entries(efforts)) {
+      if (!LEVEL_SET.has(level)) {
+        return { ok: false, message: `model "${id}" has an unknown reasoning level "${level}"` };
+      }
+      if (wire !== null && typeof wire !== "string") {
+        return { ok: false, message: `model "${id}" level "${level}" must be a string or null` };
+      }
+      if (level !== "off" && (wire === null || wire.trim() === "")) {
+        return { ok: false, message: `model "${id}" level "${level}" needs a wire value` };
+      }
+    }
+  }
+  return { ok: true };
+}
+function activateCCSProvider(providers, key) {
+  if (!providers || typeof providers !== "object" || Array.isArray(providers)) {
+    throw new Error("providers must be an object");
+  }
+  if (!Object.hasOwn(providers, key)) throw new Error(`unknown provider: ${key}`);
+  return Object.fromEntries(
+    Object.entries(providers).map(([entryKey, provider]) => [
+      entryKey,
+      { ...provider, isCurrent: entryKey === key }
+    ])
+  );
+}
+
+// src/domain/presets.mjs
+var PROVIDER_PRESETS = Object.freeze([
+  {
+    key: "deepseek-claude",
+    displayName: "DeepSeek",
+    appType: "claude",
+    api: "anthropic-messages",
+    baseURL: "https://api.deepseek.com/anthropic",
+    models: ["deepseek-flash", "deepseek-v4-pro"],
+    icon: "deepseek",
+    iconColor: "#1E88E5"
+  },
+  {
+    key: "kimi-claude",
+    displayName: "Kimi",
+    appType: "claude",
+    api: "anthropic-messages",
+    baseURL: "https://api.moonshot.cn/anthropic",
+    models: ["kimi-k2.7-code"],
+    icon: "kimi",
+    iconColor: "#6366F1"
+  },
+  {
+    key: "kimi-codex",
+    displayName: "Kimi (Codex)",
+    appType: "codex",
+    api: "openai-responses",
+    baseURL: "https://api.moonshot.cn/v1",
+    models: ["kimi-k3"],
+    icon: "kimi",
+    iconColor: "#6366F1"
+  },
+  {
+    key: "zhipu-glm-claude",
+    displayName: "Zhipu GLM",
+    appType: "claude",
+    api: "anthropic-messages",
+    baseURL: "https://open.bigmodel.cn/api/anthropic",
+    models: ["glm-5.3"],
+    icon: "zhipu",
+    iconColor: "#0F62FE"
+  },
+  {
+    key: "zhipu-glm-codex",
+    displayName: "Zhipu GLM (Codex)",
+    appType: "codex",
+    api: "openai-responses",
+    baseURL: "https://open.bigmodel.cn/api/v1",
+    models: ["glm-5.3"],
+    icon: "zhipu",
+    iconColor: "#0F62FE"
+  },
+  {
+    key: "siliconflow-claude",
+    displayName: "SiliconFlow",
+    appType: "claude",
+    api: "anthropic-messages",
+    baseURL: "https://api.siliconflow.cn",
+    models: ["Pro/MiniMaxAI/MiniMax-M2.5"],
+    icon: "siliconflow",
+    iconColor: "#6E29F6"
+  },
+  {
+    key: "siliconflow-codex",
+    displayName: "SiliconFlow (Codex)",
+    appType: "codex",
+    api: "openai-responses",
+    baseURL: "https://api.siliconflow.cn/v1",
+    models: ["deepseek-ai/DeepSeek-V4-Flash"],
+    icon: "siliconflow",
+    iconColor: "#6E29F6"
+  },
+  {
+    key: "modelscope-claude",
+    displayName: "ModelScope",
+    appType: "claude",
+    api: "anthropic-messages",
+    baseURL: "https://api-inference.modelscope.cn",
+    models: ["ZhipuAI/GLM-5.2"],
+    icon: "modelscope",
+    iconColor: "#624AFF"
+  },
+  {
+    key: "modelscope-codex",
+    displayName: "ModelScope (Codex)",
+    appType: "codex",
+    api: "openai-responses",
+    baseURL: "https://api-inference.modelscope.cn/v1",
+    models: ["ZhipuAI/GLM-5.2"],
+    icon: "modelscope",
+    iconColor: "#624AFF"
+  },
+  {
+    key: "minimax-claude",
+    displayName: "MiniMax",
+    appType: "claude",
+    api: "anthropic-messages",
+    baseURL: "https://api.minimax.cn/anthropic",
+    models: ["MiniMax-M3"],
+    icon: "minimax",
+    iconColor: "#FF6B6B"
+  },
+  {
+    key: "minimax-codex",
+    displayName: "MiniMax (Codex)",
+    appType: "codex",
+    api: "openai-responses",
+    baseURL: "https://api.minimax.cn/v1",
+    models: ["MiniMax-M3"],
+    icon: "minimax",
+    iconColor: "#FF6B6B"
+  },
+  {
+    key: "openrouter-claude",
+    displayName: "OpenRouter",
+    appType: "claude",
+    api: "anthropic-messages",
+    baseURL: "https://openrouter.ai/api",
+    models: ["anthropic/claude-haiku-4.5", "anthropic/claude-opus-5", "anthropic/claude-sonnet-5"],
+    icon: "openrouter",
+    iconColor: "#6566F1"
+  },
+  {
+    key: "nvidia-claude",
+    displayName: "Nvidia",
+    appType: "claude",
+    api: "anthropic-messages",
+    baseURL: "https://integrate.api.nvidia.com",
+    models: ["moonshotai/kimi-k3"],
+    icon: "nvidia",
+    iconColor: "#000000"
+  },
+  {
+    key: "nvidia-codex",
+    displayName: "Nvidia (Codex)",
+    appType: "codex",
+    api: "openai-responses",
+    baseURL: "https://integrate.api.nvidia.com/v1",
+    models: ["moonshotai/kimi-k3"],
+    icon: "nvidia",
+    iconColor: "#000000"
+  },
+  {
+    key: "xiaomi-mimo-claude",
+    displayName: "Xiaomi MiMo",
+    appType: "claude",
+    api: "anthropic-messages",
+    baseURL: "https://api.xiaomimimo.com/anthropic",
+    models: ["mimo-v2.6-pro"],
+    icon: "xiaomimimo",
+    iconColor: "#000000"
+  },
+  {
+    key: "xiaomi-mimo-codex",
+    displayName: "Xiaomi MiMo (Codex)",
+    appType: "codex",
+    api: "openai-responses",
+    baseURL: "https://api.xiaomimimo.com/v1",
+    models: ["mimo-v2.6-pro"],
+    icon: "xiaomimimo",
+    iconColor: "#000000"
+  },
+  {
+    key: "longcat-claude",
+    displayName: "Longcat",
+    appType: "claude",
+    api: "anthropic-messages",
+    baseURL: "https://api.longcat.chat/anthropic",
+    models: ["LongCat-2.0"],
+    icon: "longcat",
+    iconColor: "#29E154"
+  },
+  {
+    key: "longcat-codex",
+    displayName: "Longcat (Codex)",
+    appType: "codex",
+    api: "openai-responses",
+    baseURL: "https://api.longcat.chat/openai/v1",
+    models: ["LongCat-2.0"],
+    icon: "longcat",
+    iconColor: "#29E154"
+  },
+  {
+    key: "packycode-codex",
+    displayName: "PackyCode (Codex)",
+    appType: "codex",
+    api: "openai-responses",
+    baseURL: "https://www.packyapi.ai/v1",
+    models: ["gpt-5.6-sol"],
+    icon: "packycode"
+  },
+  {
+    key: "aihubmix-codex",
+    displayName: "AiHubMix (Codex)",
+    appType: "codex",
+    api: "openai-responses",
+    baseURL: "https://aihubmix.com/v1",
+    models: ["gpt-5.6-sol"],
+    icon: "aihubmix",
+    iconColor: "#006FFB"
+  },
+  {
+    key: "ppio-claude",
+    displayName: "PPIO",
+    appType: "claude",
+    api: "anthropic-messages",
+    baseURL: "https://api.ppio.com/anthropic",
+    models: ["deepseek/deepseek-v4-flash-0731"],
+    icon: "ppio",
+    iconColor: "#2874FF"
+  },
+  {
+    key: "ppio-codex",
+    displayName: "PPIO (Codex)",
+    appType: "codex",
+    api: "openai-responses",
+    baseURL: "https://api.ppio.com/openai/v1",
+    models: ["deepseek/deepseek-v4-flash-0731"],
+    icon: "ppio",
+    iconColor: "#2874FF"
+  },
+  {
+    key: "stepfun-claude",
+    displayName: "StepFun",
+    appType: "claude",
+    api: "anthropic-messages",
+    baseURL: "https://api.stepfun.com/step_plan",
+    models: ["step-3.5-flash-2603"],
+    icon: "stepfun",
+    iconColor: "#16D6D2"
+  },
+  {
+    key: "stepfun-codex",
+    displayName: "StepFun (Codex)",
+    appType: "codex",
+    api: "openai-responses",
+    baseURL: "https://api.stepfun.com/step_plan/v1",
+    models: ["step-3.7-flash"],
+    icon: "stepfun",
+    iconColor: "#16D6D2"
+  },
+  {
+    key: "bailing-claude",
+    displayName: "BaiLing",
+    appType: "claude",
+    api: "anthropic-messages",
+    baseURL: "https://api.ant-ling.com/anthropic",
+    models: ["Ling-2.6-1T"],
+    icon: "bailing"
+  },
+  {
+    key: "bailing-codex",
+    displayName: "BaiLing (Codex)",
+    appType: "codex",
+    api: "openai-responses",
+    baseURL: "https://api.ant-ling.com/v1",
+    models: ["Ling-2.6-1T"],
+    icon: "bailing"
+  },
+  {
+    key: "volcengine-doubao-claude",
+    displayName: "Volcengine Doubao",
+    appType: "claude",
+    api: "anthropic-messages",
+    baseURL: "https://ark.cn-beijing.volces.com/api/compatible",
+    models: ["doubao-seed-2-1-pro-260628"],
+    icon: "doubao",
+    iconColor: "#3370FF"
+  },
+  {
+    key: "volcengine-doubao-codex",
+    displayName: "Volcengine Doubao (Codex)",
+    appType: "codex",
+    api: "openai-responses",
+    baseURL: "https://ark.cn-beijing.volces.com/api/v3",
+    models: ["doubao-seed-2-1-pro-260628"],
+    icon: "doubao",
+    iconColor: "#3370FF"
+  }
+]);
 
 // lib/core/scan.js
 import { homedir } from "node:os";
@@ -1748,6 +2160,297 @@ function knownSecretsFor(result, secretByProfileId) {
   return typeof own === "string" ? [own] : [];
 }
 
+// src/host/manager-routes.mjs
+var MANAGER_API_BASE = "/api/dsh-ccswitch-manager";
+var MANAGER_NAMESPACE = "dsh-ccswitch-plugin";
+var MAX_PROVIDERS = 500;
+var SAFE_REASONS = /* @__PURE__ */ new Set(["new", "updated", "unchanged", "removed", "activated", "created"]);
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+async function readCatalogue(settings) {
+  try {
+    const descriptors = await settings?.describe?.();
+    const descriptor = (Array.isArray(descriptors) ? descriptors : []).find((entry) => entry?.ns === MANAGER_NAMESPACE);
+    if (descriptor === void 0) return { providers: {}, revision: void 0, exists: false };
+    const providers = isRecord(descriptor.value?.providers) ? descriptor.value.providers : {};
+    return { providers, revision: descriptor.revision, exists: true };
+  } catch {
+    return { providers: {}, revision: void 0, exists: false };
+  }
+}
+function currentKeyOf(providers) {
+  const found = Object.entries(providers).find(([, provider]) => provider?.isCurrent === true);
+  return found === void 0 ? void 0 : found[0];
+}
+function publicProvider(key, provider, credentialConfigured) {
+  const models = Array.isArray(provider?.models) ? provider.models : [];
+  return {
+    key,
+    displayName: String(provider?.displayName ?? ""),
+    api: String(provider?.api ?? ""),
+    baseURL: String(provider?.baseURL ?? ""),
+    apiKeyEnv: typeof provider?.apiKeyEnv === "string" ? provider.apiKeyEnv : void 0,
+    credential: credentialConfigured ? "found" : "missing",
+    models: models.slice(0, 200).map((model) => ({
+      id: String(model?.id ?? ""),
+      name: typeof model?.name === "string" ? model.name : void 0,
+      contextWindow: Number.isInteger(model?.contextWindow) ? model.contextWindow : void 0,
+      maxTokens: Number.isInteger(model?.maxTokens) ? model.maxTokens : void 0,
+      reasoningEfforts: model?.reasoningEfforts === false ? false : void 0
+    })),
+    notes: typeof provider?.notes === "string" ? provider.notes : void 0,
+    icon: typeof provider?.icon === "string" ? provider.icon : void 0,
+    iconColor: typeof provider?.iconColor === "string" ? provider.iconColor : void 0,
+    appType: typeof provider?.appType === "string" ? provider.appType : void 0,
+    sourceProfileId: typeof provider?.sourceProfileId === "string" ? provider.sourceProfileId : void 0,
+    isCurrent: provider?.isCurrent === true,
+    inFailoverQueue: provider?.inFailoverQueue === true,
+    costMultiplier: typeof provider?.costMultiplier === "number" ? provider.costMultiplier : void 0,
+    limitDailyUsd: typeof provider?.limitDailyUsd === "number" ? provider.limitDailyUsd : void 0,
+    limitMonthlyUsd: typeof provider?.limitMonthlyUsd === "number" ? provider.limitMonthlyUsd : void 0
+  };
+}
+async function credentialState(credentials, ref) {
+  if (typeof ref !== "string" || ref === "") return false;
+  if (typeof credentials?.describe === "function") {
+    try {
+      const described = await credentials.describe(ref);
+      if (described?.configured === true) return true;
+    } catch {
+    }
+  }
+  if (typeof credentials?.resolve === "function") {
+    try {
+      const resolved = await credentials.resolve(ref);
+      return typeof resolved?.value === "string" && resolved.value.length > 0;
+    } catch {
+    }
+  }
+  return false;
+}
+function uniqueKey(displayName, providers) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const candidate = newProviderKey(displayName);
+    if (!Object.hasOwn(providers, candidate)) return candidate;
+  }
+  throw new Error("could not allocate a provider key");
+}
+function revisionOf(body) {
+  return Number.isInteger(body?.expectedRevision) ? body.expectedRevision : void 0;
+}
+function makeManagerRoutes(deps = {}) {
+  const settings = deps.settings;
+  const credentials = deps.credentials;
+  const isLoopback = deps.isLoopback ?? isLoopbackRequest;
+  const presets = Array.isArray(deps.presets) ? deps.presets : [];
+  const applyProvider = deps.applyProvider ?? (async () => {
+  });
+  let queue = Promise.resolve();
+  const serialize = (work) => {
+    const next = queue.then(work, work);
+    queue = next.then(() => void 0, () => void 0);
+    return next;
+  };
+  const write = async (response, status, body) => writeJson(response, status, body);
+  return [
+    {
+      kind: "exact",
+      path: `${MANAGER_API_BASE}/providers`,
+      handler: async (request, response) => {
+        if (!methodFence(request, response, isLoopback, "GET")) return;
+        try {
+          const { providers, revision, exists } = await readCatalogue(settings);
+          const order = Object.keys(providers);
+          const entries = await Promise.all(
+            order.map(async (key) => [
+              key,
+              publicProvider(key, providers[key], await credentialState(credentials, providers[key]?.apiKeyEnv))
+            ])
+          );
+          writeJson(response, 200, {
+            exists,
+            revision,
+            order,
+            current: currentKeyOf(providers),
+            providers: Object.fromEntries(entries),
+            apiProtocols: [...CCS_API_PROTOCOLS]
+          });
+        } catch (err) {
+          console.error("[dsh-ccswitch-plugin] manager list failed:", redactText(err));
+          writeJson(response, 500, { error: "could not read the provider catalogue" });
+        }
+      }
+    },
+    {
+      kind: "exact",
+      path: `${MANAGER_API_BASE}/providers/save`,
+      handler: async (request, response) => {
+        if (!methodFence(request, response, isLoopback, "POST", { requireSameOrigin: true })) return;
+        const body = await readJsonBody(request);
+        if (!isRecord(body) || !isRecord(body.provider)) {
+          writeJson(response, 400, { error: "body must be { provider: object, key?: string }" });
+          return;
+        }
+        const draft = normalizeCCSProvider({
+          ...emptyCCSProvider(),
+          ...body.provider,
+          // A key is never accepted from the body: it addresses the credential
+          // reference, so letting a caller choose one would let it point a new
+          // provider at an existing provider's stored secret.
+          apiKeyEnv: void 0
+        });
+        const check = validateCCSProvider(draft);
+        if (!check.ok) {
+          writeJson(response, 400, { error: "provider is not usable", errors: [check.message] });
+          return;
+        }
+        const requestedKey = typeof body.key === "string" && body.key !== "" ? body.key : void 0;
+        try {
+          const result = await serialize(async () => {
+            const { providers, revision } = await readCatalogue(settings);
+            const existingKey = requestedKey !== void 0 && Object.hasOwn(providers, requestedKey) ? requestedKey : void 0;
+            const key = existingKey ?? uniqueKey(draft.displayName, providers);
+            if (existingKey === void 0 && Object.keys(providers).length >= MAX_PROVIDERS) {
+              throw Object.assign(new Error("too many providers"), { code: "TOO_MANY" });
+            }
+            const apiKeyEnv = credentialRefForProviderKey(key);
+            const record = { ...draft, apiKeyEnv };
+            const apiKey = typeof body.apiKey === "string" ? body.apiKey : void 0;
+            if (apiKey !== void 0 && apiKey !== "") await credentials.set(apiKeyEnv, apiKey);
+            await settings.mutate(
+              MANAGER_NAMESPACE,
+              [{ op: "set", path: ["providers", key], value: record }],
+              revisionOf(body) ?? revision
+            );
+            return { key, record, created: existingKey === void 0 };
+          });
+          writeJson(response, 200, {
+            key: result.key,
+            status: SAFE_REASONS.has(result.created ? "created" : "updated") ? result.created ? "created" : "updated" : "updated",
+            provider: publicProvider(result.key, result.record, await credentialState(credentials, result.record.apiKeyEnv))
+          });
+        } catch (err) {
+          if (err?.code === "TOO_MANY") {
+            writeJson(response, 409, { error: `the catalogue is limited to ${MAX_PROVIDERS} providers` });
+            return;
+          }
+          const conflict = /conflict/i.test(String(err?.code ?? "")) || /conflict/i.test(String(err?.message ?? ""));
+          console.error("[dsh-ccswitch-plugin] manager save failed:", redactText(err, [body.apiKey]));
+          writeJson(response, conflict ? 409 : 500, {
+            error: conflict ? "the settings document changed; reload and retry" : "could not save the provider"
+          });
+        }
+      }
+    },
+    {
+      kind: "exact",
+      path: `${MANAGER_API_BASE}/providers/delete`,
+      handler: async (request, response) => {
+        if (!methodFence(request, response, isLoopback, "POST", { requireSameOrigin: true })) return;
+        const body = await readJsonBody(request);
+        if (!isRecord(body) || typeof body.key !== "string" || body.key === "") {
+          writeJson(response, 400, { error: "body must be { key: string }" });
+          return;
+        }
+        try {
+          const outcome = await serialize(async () => {
+            const { providers, revision } = await readCatalogue(settings);
+            if (!Object.hasOwn(providers, body.key)) return { missing: true };
+            const ref = providers[body.key]?.apiKeyEnv;
+            await settings.mutate(
+              MANAGER_NAMESPACE,
+              [{ op: "unset", path: ["providers", body.key] }],
+              revisionOf(body) ?? revision
+            );
+            if (typeof ref === "string" && ref !== "" && typeof credentials?.unset === "function") {
+              try {
+                await credentials.unset(ref);
+              } catch (err) {
+                console.error("[dsh-ccswitch-plugin] credential cleanup failed:", redactText(err));
+              }
+            }
+            return { missing: false };
+          });
+          if (outcome.missing) {
+            writeJson(response, 404, { error: "no such provider" });
+            return;
+          }
+          writeJson(response, 200, { key: body.key, status: "removed" });
+        } catch (err) {
+          const conflict = /conflict/i.test(String(err?.code ?? "")) || /conflict/i.test(String(err?.message ?? ""));
+          console.error("[dsh-ccswitch-plugin] manager delete failed:", redactText(err));
+          writeJson(response, conflict ? 409 : 500, {
+            error: conflict ? "the settings document changed; reload and retry" : "could not delete the provider"
+          });
+        }
+      }
+    },
+    {
+      kind: "exact",
+      path: `${MANAGER_API_BASE}/providers/activate`,
+      handler: async (request, response) => {
+        if (!methodFence(request, response, isLoopback, "POST", { requireSameOrigin: true })) return;
+        const body = await readJsonBody(request);
+        if (!isRecord(body) || typeof body.key !== "string" || body.key === "") {
+          writeJson(response, 400, { error: "body must be { key: string }" });
+          return;
+        }
+        try {
+          const outcome = await serialize(async () => {
+            const { providers, revision } = await readCatalogue(settings);
+            if (!Object.hasOwn(providers, body.key)) return { missing: true };
+            const next = activateCCSProvider(providers, body.key);
+            await settings.mutate(
+              MANAGER_NAMESPACE,
+              [{ op: "set", path: ["providers"], value: next }],
+              revisionOf(body) ?? revision
+            );
+            return { missing: false, provider: next[body.key] };
+          });
+          if (outcome.missing) {
+            writeJson(response, 404, { error: "no such provider" });
+            return;
+          }
+          let warnings = [];
+          try {
+            warnings = await applyProvider(body.key, outcome.provider) ?? [];
+          } catch (err) {
+            console.error("[dsh-ccswitch-plugin] activating the provider failed:", redactText(err));
+            writeJson(response, 200, {
+              key: body.key,
+              status: "activated",
+              applied: false,
+              warnings: ["the provider is marked active but DSH did not accept it; see the host log"]
+            });
+            return;
+          }
+          writeJson(response, 200, {
+            key: body.key,
+            status: "activated",
+            applied: true,
+            warnings: (Array.isArray(warnings) ? warnings : []).slice(0, 20).map((text) => redactText(text).slice(0, 200))
+          });
+        } catch (err) {
+          const conflict = /conflict/i.test(String(err?.code ?? "")) || /conflict/i.test(String(err?.message ?? ""));
+          console.error("[dsh-ccswitch-plugin] manager activate failed:", redactText(err));
+          writeJson(response, conflict ? 409 : 500, {
+            error: conflict ? "the settings document changed; reload and retry" : "could not activate the provider"
+          });
+        }
+      }
+    },
+    {
+      kind: "exact",
+      path: `${MANAGER_API_BASE}/presets`,
+      handler: async (request, response) => {
+        if (!methodFence(request, response, isLoopback, "GET")) return;
+        writeJson(response, 200, { presets });
+      }
+    }
+  ];
+}
+
 // src/host/index.mjs
 var name = "dsh-ccswitch-plugin";
 var inject = ["webServer", "settings", "credentials"];
@@ -1767,8 +2470,32 @@ function apply(ctx) {
     credentials: ctx.credentials,
     importProfiles
   });
+  const managerRoutes = makeManagerRoutes({
+    settings: ctx.settings,
+    credentials: ctx.credentials,
+    presets: PROVIDER_PRESETS,
+    applyProvider: async (key, provider) => {
+      const namespaces = await ctx.settings.describe();
+      const live = (Array.isArray(namespaces) ? namespaces : []).find((entry) => entry.ns === "llm-pi-ai");
+      if (live === void 0) {
+        return ["llm-pi-ai is not installed, so the provider was marked active but DSH has no route to use it"];
+      }
+      const existing = live.value?.providers?.[key];
+      const mapped = toProviderProfile({
+        profileId: provider?.sourceProfileId ?? key,
+        profileName: provider?.displayName ?? key,
+        baseURL: provider?.baseURL,
+        api: provider?.api,
+        models: provider?.models ?? [],
+        modelReasoningEffort: void 0
+      }, existing, key);
+      await ctx.settings.mutate("llm-pi-ai", [{ op: "set", path: ["providers", key], value: mapped }], live.revision);
+      return [];
+    }
+  });
+  const allRoutes = [...routes, ...managerRoutes];
   ctx.effect(() => {
-    const disposers = routes.map((route) => ctx.webServer.register(route));
+    const disposers = allRoutes.map((route) => ctx.webServer.register(route));
     return () => {
       for (const dispose of disposers) if (typeof dispose === "function") dispose();
     };

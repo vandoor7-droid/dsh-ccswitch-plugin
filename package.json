@@ -37,7 +37,8 @@
     "./catalog": "./dist/domain/catalog.mjs",
     "./validation": "./dist/domain/validation.mjs",
     "./settings": "./dist/domain/settings.mjs",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./ccs-provider": "./dist/domain/ccs-provider.mjs"
   },
   "files": [
     "dist",

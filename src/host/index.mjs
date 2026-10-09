@@ -3,7 +3,10 @@
 // Reworked for DSH 0.2.0-rc.2. See NOTICE for the full attribution chain.
 import z from '@deepseek-ai/schemastery'
 import { importProfiles } from '../../lib/core/importer.js'
+import { toProviderProfile } from '../../lib/core/mapper.js'
 import { defineCCSConfig } from '../domain/ccs-provider.mjs'
+import { PROVIDER_PRESETS } from '../domain/presets.mjs'
+import { makeManagerRoutes } from './manager-routes.mjs'
 import { makeRoutes } from './routes.mjs'
 
 export const name = 'dsh-ccswitch-plugin'
@@ -52,8 +55,37 @@ export function apply(ctx) {
     credentials: ctx.credentials,
     importProfiles,
   })
+  const managerRoutes = makeManagerRoutes({
+    settings: ctx.settings,
+    credentials: ctx.credentials,
+    presets: PROVIDER_PRESETS,
+    applyProvider: async (key, provider) => {
+      // Activating a provider here has to mean something to DSH itself, or the
+      // row would light up while every request kept going to the old route.
+      // The provider is projected into `llm-pi-ai` through the *same* mapper
+      // the importer uses, so a provider added by hand and one imported from
+      // CC Switch produce an identical route.
+      const namespaces = await ctx.settings.describe()
+      const live = (Array.isArray(namespaces) ? namespaces : []).find((entry) => entry.ns === 'llm-pi-ai')
+      if (live === undefined) {
+        return ['llm-pi-ai is not installed, so the provider was marked active but DSH has no route to use it']
+      }
+      const existing = live.value?.providers?.[key]
+      const mapped = toProviderProfile({
+        profileId: provider?.sourceProfileId ?? key,
+        profileName: provider?.displayName ?? key,
+        baseURL: provider?.baseURL,
+        api: provider?.api,
+        models: provider?.models ?? [],
+        modelReasoningEffort: undefined,
+      }, existing, key)
+      await ctx.settings.mutate('llm-pi-ai', [{ op: 'set', path: ['providers', key], value: mapped }], live.revision)
+      return []
+    },
+  })
+  const allRoutes = [...routes, ...managerRoutes]
   ctx.effect(() => {
-    const disposers = routes.map((route) => ctx.webServer.register(route))
+    const disposers = allRoutes.map((route) => ctx.webServer.register(route))
     return () => {
       for (const dispose of disposers) if (typeof dispose === 'function') dispose()
     }

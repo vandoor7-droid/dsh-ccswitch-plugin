@@ -64,7 +64,7 @@ export async function buildAll() {
   });
   await writeFile(resolve(DIST, "client.js"), createLoaderBundle(PLUGIN_ID, client.outputFiles[0].text), "utf8");
 
-  for (const entry of ["catalog", "validation", "settings"]) {
+  for (const entry of ["catalog", "validation", "settings", "ccs-provider"]) {
     await bundleEntry(`src/domain/${entry}.mjs`, `dist/domain/${entry}.mjs`, {
       format: "esm",
       platform: "neutral",
