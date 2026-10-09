@@ -107,11 +107,15 @@ test('DeepSeek keeps its distinct Claude and Codex endpoints', () => {
   assert.equal(claude.icon, 'deepseek')
   assert.equal(claude.iconColor, '#1E88E5')
 
-  const codex = PROVIDER_PRESETS.find((preset) => preset.appType === 'codex' && preset.displayName.startsWith('DeepSeek'))
-  if (codex !== undefined) {
-    assert.equal(codex.baseURL, 'https://api.deepseek.com/v1')
-    assert.equal(codex.api, 'openai-responses')
-  }
+  // The Codex half points at the bare host, not at `/v1`. cc-switch 4.0.6 writes
+  // `base_url = "https://api.deepseek.com"` with `wire_api = "responses"`, and its
+  // own comment records that DeepSeek serves Responses natively from that base.
+  // This assertion used to be dead code — no Codex-side DeepSeek preset existed,
+  // so the `if` never ran — which is how the `/v1` spelling stayed unverified.
+  const codex = PROVIDER_PRESETS.find((preset) => preset.appType === 'codex' && preset.displayName === 'DeepSeek')
+  assert.ok(codex, 'the DeepSeek codex preset is missing')
+  assert.equal(codex.baseURL, 'https://api.deepseek.com')
+  assert.equal(codex.api, 'openai-responses')
 })
 
 test('the Claude-side presets speak the Anthropic protocol', () => {
@@ -247,9 +251,11 @@ test('the vendors CC Switch shares across apps carry the same family here', () =
     // A family that merged only one preset would be a tag with no effect, which
     // means the transcription is wrong rather than merely redundant.
     assert.ok(presets.length > 1, `family "${family}" groups only ${presets[0].key}`)
-    // Every version of one vendor must be categorised alike, or the picker
-    // would file the same vendor under two sections.
-    assert.equal(new Set(presets.map((preset) => preset.category)).size, 1, `family "${family}" spans several categories`)
+    // A family is deliberately NOT required to agree on a category. cc-switch's
+    // own `presetFamilies.ts` says the family is "只是显示用的分组，不影响请求和
+    // category", and its OpenCode entry uses one family across `third_party` (Go)
+    // and `aggregator` (Zen). Asserting agreement would fail on cc-switch's real
+    // data, so the family is checked for grouping only.
   }
 })
 
