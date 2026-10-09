@@ -117,3 +117,66 @@ test('a missing db reports not-installed instead of throwing', () => {
 test('node:sqlite loads lazily so the plugin still loads on older runtimes', () => {
   assert.equal(sqliteAvailable(), true)
 })
+
+/**
+ * A providers table carrying the two columns CC Switch orders by, plus the
+ * creation timestamp. Inserted in a deliberately scrambled order so a passing
+ * test cannot be an accident of insertion order.
+ */
+function makeOrderedDb(rows) {
+  const dir = mkdtempSync(join(tmpdir(), 'ccs-order-'))
+  const dbPath = join(dir, 'cc-switch.db')
+  const db = new DatabaseSync(dbPath)
+  db.exec(`CREATE TABLE providers (
+    id TEXT, name TEXT, settings_config TEXT, is_current BOOLEAN,
+    app_type TEXT, sort_index INTEGER, created_at INTEGER
+  )`)
+  const insert = db.prepare(
+    'INSERT INTO providers (id, name, settings_config, is_current, app_type, sort_index, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+  )
+  for (const row of rows) {
+    insert.run(row.id, row.name, row.settings_config, row.is_current ?? 0, row.app_type ?? 'codex',
+      row.sortIndex ?? null, row.createdAt ?? null)
+  }
+  db.close()
+  return { dir, dbPath }
+}
+
+// The `sort_index` and `created_at` columns both arrive by migration, so a
+// database written by an older CC Switch has neither. Naming a missing column
+// in ORDER BY makes SQLite throw, which would report a perfectly readable
+// database as unreadable — hence the column probe.
+test('rows come back in CC Switch order, not storage order', () => {
+  const codex = JSON.stringify({ auth: { OPENAI_API_KEY: 'sk-a' }, config: VALID_TOML })
+  const { dir, dbPath } = makeOrderedDb([
+    { id: 'z', name: 'Zed', settings_config: codex, sortIndex: 5, createdAt: 100 },
+    { id: 'a', name: 'Ann', settings_config: codex, sortIndex: 1, createdAt: 300 },
+    { id: 'm', name: 'Mel', settings_config: codex, sortIndex: 1, createdAt: 200 },
+    // `sort_index` NULL sorts last, not first: CC Switch coalesces it to 999999.
+    { id: 'n', name: 'Nia', settings_config: codex, sortIndex: null, createdAt: 50 },
+  ])
+  try {
+    // Same index, earlier creation first; NULL index last.
+    assert.deepEqual(scanProfiles(dbPath).map((p) => p.profileName), ['Mel', 'Ann', 'Zed', 'Nia'])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a database predating the ordering columns still lists every row', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ccs-legacy-'))
+  const dbPath = join(dir, 'cc-switch.db')
+  const db = new DatabaseSync(dbPath)
+  db.exec('CREATE TABLE providers (id TEXT, name TEXT, settings_config TEXT, is_current BOOLEAN, app_type TEXT)')
+  const insert = db.prepare('INSERT INTO providers (id, name, settings_config, is_current, app_type) VALUES (?, ?, ?, ?, ?)')
+  const codex = JSON.stringify({ auth: { OPENAI_API_KEY: 'sk-a' }, config: VALID_TOML })
+  for (const id of ['b', 'a', 'c']) insert.run(id, id.toUpperCase(), codex, 0, 'codex')
+  db.close()
+  try {
+    // No ordering column exists, so `id` is the only total order available —
+    // and the scan still reads rather than reporting the file as unreadable.
+    assert.deepEqual(scanProfiles(dbPath).map((p) => p.profileName), ['A', 'B', 'C'])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
