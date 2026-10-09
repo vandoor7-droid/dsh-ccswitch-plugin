@@ -471,25 +471,15 @@ export function ProviderManagerSection({ controller, t }) {
     // no providers it would be a control that cannot do anything, and it would
     // sit above the empty state that is trying to explain how to get one.
     rows.length > 0
-      ? h("div", {
-        // Laid out inline rather than through a stylesheet rule: every other
-        // class this tab uses lives in `src/client/styles.mjs`, which this
-        // change does not own. Hoisting these three declarations into a
-        // `.dsh-ccswitch-manager__search` rule there is the tidier home and is
-        // worth doing the next time that file is open.
-        style: { display: "flex", alignItems: "center", gap: "8px", minWidth: 0 },
-      },
+      ? h("div", { className: "dsh-ccswitch-manager__search" },
         h("input", {
           // `text`, not `search`: the latter draws the browser's own clear
           // affordance, which would sit beside the button below and clear the
           // field twice.
           type: "text",
           // The edit form's own input class, so the two controls cannot drift
-          // apart in border, focus ring or font. Its `width:100%` is overridden
-          // below, because in a flex row it would push the clear button onto a
-          // second line.
+          // apart in border, focus ring or font.
           className: "dsh-ccswitch-form__input",
-          style: { flex: "1 1 auto", width: "auto", minWidth: 0, maxWidth: "360px" },
           value: query,
           placeholder: tr("manager.searchPlaceholder", "按名称/备注/请求地址搜索供应商…"),
           "aria-label": tr("manager.searchAriaLabel", "搜索供应商"),

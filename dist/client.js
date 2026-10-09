@@ -3456,25 +3456,15 @@ window.__ModuleLoader__.load({
 		    // sit above the empty state that is trying to explain how to get one.
 		    rows.length > 0 ? h5(
 		      "div",
-		      {
-		        // Laid out inline rather than through a stylesheet rule: every other
-		        // class this tab uses lives in `src/client/styles.mjs`, which this
-		        // change does not own. Hoisting these three declarations into a
-		        // `.dsh-ccswitch-manager__search` rule there is the tidier home and is
-		        // worth doing the next time that file is open.
-		        style: { display: "flex", alignItems: "center", gap: "8px", minWidth: 0 }
-		      },
+		      { className: "dsh-ccswitch-manager__search" },
 		      h5("input", {
 		        // `text`, not `search`: the latter draws the browser's own clear
 		        // affordance, which would sit beside the button below and clear the
 		        // field twice.
 		        type: "text",
 		        // The edit form's own input class, so the two controls cannot drift
-		        // apart in border, focus ring or font. Its `width:100%` is overridden
-		        // below, because in a flex row it would push the clear button onto a
-		        // second line.
+		        // apart in border, focus ring or font.
 		        className: "dsh-ccswitch-form__input",
-		        style: { flex: "1 1 auto", width: "auto", minWidth: 0, maxWidth: "360px" },
 		        value: query,
 		        placeholder: tr("manager.searchPlaceholder", "\u6309\u540D\u79F0/\u5907\u6CE8/\u8BF7\u6C42\u5730\u5740\u641C\u7D22\u4F9B\u5E94\u5546\u2026"),
 		        "aria-label": tr("manager.searchAriaLabel", "\u641C\u7D22\u4F9B\u5E94\u5546"),
@@ -3756,8 +3746,13 @@ window.__ModuleLoader__.load({
 		  ".dsh-ccswitch-manager__preset{display:flex;align-items:center;gap:6px;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;}",
 		  ".dsh-ccswitch-manager__preset-select{box-sizing:border-box;min-height:28px;padding:0 8px;border:1px solid var(--dsw-alias-border-l2);border-radius:7px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-family:inherit;font-size:12px;line-height:18px;}",
 		  ".dsh-ccswitch-manager__preset-select:focus-visible{outline:2px solid var(--dsw-alias-border-l3);outline-offset:1px;}",
+		  ".dsh-ccswitch-manager__preset-label{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;white-space:nowrap;}",
 		  ".dsh-ccswitch-manager__note{margin:0;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;overflow-wrap:anywhere;}",
 		  ".dsh-ccswitch-manager__empty{margin:0;color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:20px;}",
+		  ".dsh-ccswitch-manager__search{display:flex;align-items:center;gap:8px;min-width:0;}",
+		  // `width:auto` overrides the field class's `width:100%`, which in a flex
+		  // row would push the clear button onto a second line.
+		  ".dsh-ccswitch-manager__search input{flex:1 1 auto;width:auto;min-width:0;max-width:360px;}",
 		  ".dsh-ccswitch-manager__list{display:flex;flex-direction:column;gap:8px;}",
 		  ".dsh-ccswitch-manager__row{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;min-width:0;padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-1);}",
 		  // The active row is marked by its border rather than a fill, so the badge
@@ -3769,6 +3764,10 @@ window.__ModuleLoader__.load({
 		  ".dsh-ccswitch-manager__meta-line{display:flex;align-items:baseline;flex-wrap:wrap;gap:8px;min-width:0;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;}",
 		  ".dsh-ccswitch-manager__meta-line>*{min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}",
 		  ".dsh-ccswitch-manager__provider-key,.dsh-ccswitch-manager__meta-line code{color:var(--dsw-alias-label-tertiary);font-family:var(--ds-font-family-code,monospace);font-size:11px;line-height:16px;}",
+		  // The app type carries the same chip shape as a badge, so a row reads as
+		  // "which tool, over which protocol" without either word needing a label.
+		  ".dsh-ccswitch-manager__app-type{flex:none;min-height:18px;box-sizing:border-box;padding:0 7px;border:1px solid var(--dsw-alias-border-l2);border-radius:999px;color:var(--dsw-alias-label-secondary);font-size:11px;font-weight:500;line-height:16px;}",
+		  ".dsh-ccswitch-manager__protocol{color:var(--dsw-alias-label-tertiary);font-family:var(--ds-font-family-code,monospace);font-size:11px;line-height:16px;}",
 		  ".dsh-ccswitch-manager__failover{color:var(--dsw-alias-label-secondary);}",
 		  ".dsh-ccswitch-manager__row-error{margin:2px 0 0;color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:18px;overflow-wrap:anywhere;}",
 		  ".dsh-ccswitch-manager__row-actions{display:flex;align-items:center;gap:10px;flex:none;flex-wrap:wrap;justify-content:flex-end;}",

@@ -15,6 +15,7 @@
 // source-text assertion catches, so the tree is built rather than grepped.
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 import React from 'react'
 import { createCCSwitchManagerController } from '../src/client/manager-controller.mjs'
 import { ProviderManagerSection, emptyState, presetOptionLabel, providerMatches, providerRowView } from '../src/ui/ProviderManagerSection.mjs'
@@ -32,6 +33,9 @@ import {
 import { MESSAGES } from '../src/client/messages.mjs'
 import { PROVIDER_PRESETS, presetGroup, presetVersionKeys } from '../src/domain/presets.mjs'
 import { MODELS_FOOTER_SLOT, PLUGINS_TAB_SLOT, registerReasoningSettings } from '../src/client/registration.mjs'
+
+const root = new URL('../', import.meta.url)
+const read = (relative) => readFile(new URL(relative, root), 'utf8')
 
 const INTERNALS = React.__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED
 
@@ -1471,6 +1475,38 @@ test('the modal offers the Host app-type list and sends the chosen one', () => {
   byType(rebuilt, 'form')[0].props.onSubmit({ preventDefault() {} })
   assert.equal(submitted.length, 1)
   assert.equal(submitted[0].appType, 'codex')
+})
+
+test('every manager class the components use is defined in the stylesheet', async () => {
+  // Derived from the sources rather than listed by hand: a hand list only ever
+  // covers the classes someone remembered to add to it, which is how
+  // `__app-type`, `__protocol`, `__preset-label` and `__search` shipped with no
+  // rule at all. `dsh-ccswitch-form__*` and `dsh-ccswitch-import__*` are skipped
+  // because they belong to the import panel and the edit form, whose coverage is
+  // asserted in `ui-fixes.test.mjs`.
+  const files = ['src/ui/ProviderManagerSection.mjs']
+  const used = new Set()
+  const defined = new Set()
+  for (const file of files) {
+    const text = await read(file)
+    for (const [, name] of text.matchAll(/"?(dsh-ccswitch-manager__[a-z-]+)"?/g)) used.add(name)
+  }
+  const css = await read('src/client/styles.mjs')
+  for (const [, name] of css.matchAll(/\.(dsh-ccswitch-manager__[a-z-]+)/g)) defined.add(name)
+
+  const missing = [...used].filter((name) => !defined.has(name)).sort()
+  assert.deepEqual(missing, [], `styles.mjs is missing a rule for: ${missing.join(', ')}`)
+
+  // The reverse direction is not an error — a modifier like `__row--current` is
+  // built by concatenation and never appears as a bare literal — but a rule
+  // nothing can ever apply is dead weight, so the handful of them that do come
+  // from concatenation are named here.
+  const concatenated = new Set([
+    'dsh-ccswitch-manager__row--current',
+    'dsh-ccswitch-manager__activation--warn',
+  ])
+  const unused = [...defined].filter((name) => !used.has(name) && !concatenated.has(name)).sort()
+  assert.deepEqual(unused, [], `styles.mjs rules nothing applies: ${unused.join(', ')}`)
 })
 
 test('a stored app type the Host no longer offers is still selectable', () => {
