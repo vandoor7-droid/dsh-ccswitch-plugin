@@ -122,6 +122,8 @@ function publicProvider(key, provider, credentialConfigured) {
       maxTokens: Number.isInteger(model?.maxTokens) ? model.maxTokens : undefined,
       reasoningEfforts: model?.reasoningEfforts === false ? false : undefined,
     })),
+    category: typeof provider?.category === 'string' ? provider.category : undefined,
+    websiteUrl: typeof provider?.websiteUrl === 'string' ? provider.websiteUrl : undefined,
     notes: typeof provider?.notes === 'string' ? provider.notes : undefined,
     icon: typeof provider?.icon === 'string' ? provider.icon : undefined,
     iconColor: typeof provider?.iconColor === 'string' ? provider.iconColor : undefined,

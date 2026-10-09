@@ -354,726 +354,6 @@ function claudeExclusiveEnvOf(provider) {
   return pickClaudeExclusiveEnv(provider?.exclusiveEnv);
 }
 
-// src/domain/ccs-provider.mjs
-var CCS_API_PROTOCOLS = Object.freeze([
-  "openai-completions",
-  "openai-responses",
-  "anthropic-messages"
-]);
-var CCS_REASONING_LEVELS = Object.freeze([
-  "off",
-  "minimal",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max"
-]);
-var PROTOCOL_SET = new Set(CCS_API_PROTOCOLS);
-var LEVEL_SET = new Set(CCS_REASONING_LEVELS);
-function defineCCSModel(z2) {
-  return z2.object({
-    id: z2.string().required(),
-    name: z2.string(),
-    contextWindow: z2.number().step(1).min(1),
-    maxTokens: z2.number().step(1).min(1),
-    // `false` disables reasoning for this model; a dict maps each level to the
-    // wire spelling the endpoint expects, or null for "send nothing".
-    reasoningEfforts: z2.union([
-      z2.const(false),
-      z2.dict(z2.union([z2.string(), z2.const(null)]))
-    ])
-  });
-}
-function defineCCSProvider(z2) {
-  return z2.object({
-    displayName: z2.string(),
-    api: z2.union([...CCS_API_PROTOCOLS]),
-    baseURL: z2.string(),
-    apiKeyEnv: z2.string().role("credential-ref"),
-    models: z2.array(defineCCSModel(z2)).default([]),
-    // The provider's own Claude Code compatibility switches and window sizes.
-    // Kept as a dict of primitives rather than a fixed key set so a value the
-    // schema does not know yet survives a round-trip; `pickClaudeExclusiveEnv`
-    // is what narrows it to keys this plugin is willing to write.
-    exclusiveEnv: z2.dict(z2.union([z2.string(), z2.number(), z2.boolean()])),
-    notes: z2.string(),
-    icon: z2.string(),
-    iconColor: z2.string(),
-    appType: z2.string(),
-    sourceProfileId: z2.string(),
-    // CC Switch orders a provider list by `COALESCE(sort_index, 999999),
-    // created_at ASC, id ASC`. Both columns are nullable there, so both fields
-    // are optional here: a provider the user has never reordered has no index,
-    // and a row imported from a database that predates the column has no
-    // creation time.
-    sortIndex: z2.number().step(1).min(0),
-    createdAt: z2.number(),
-    isCurrent: z2.boolean().default(false),
-    inFailoverQueue: z2.boolean().default(false),
-    costMultiplier: z2.number().min(0),
-    limitDailyUsd: z2.number().min(0),
-    limitMonthlyUsd: z2.number().min(0)
-  });
-}
-function defineCCSConfig(z2) {
-  return z2.object({
-    providers: z2.dict(defineCCSProvider(z2)).default({}).volatile()
-  });
-}
-function emptyCCSProvider(overrides = {}) {
-  return {
-    displayName: "",
-    api: CCS_API_PROTOCOLS[0],
-    baseURL: "",
-    apiKeyEnv: "",
-    models: [],
-    isCurrent: false,
-    inFailoverQueue: false,
-    ...overrides
-  };
-}
-function normalizeBaseUrl(value) {
-  return String(value ?? "").trim().replace(/\/+$/, "");
-}
-function finiteNumber(value) {
-  if (typeof value === "number") return Number.isFinite(value) ? value : void 0;
-  if (typeof value === "string" && value.trim() !== "") {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : void 0;
-  }
-  return void 0;
-}
-function nonEmptyText(value) {
-  const text = String(value ?? "").trim();
-  return text === "" ? void 0 : text;
-}
-function normalizeCCSProvider(value) {
-  const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
-  const models = [];
-  const seen = /* @__PURE__ */ new Set();
-  for (const entry of Array.isArray(source.models) ? source.models : []) {
-    const model = entry && typeof entry === "object" && !Array.isArray(entry) ? entry : typeof entry === "string" ? { id: entry } : void 0;
-    if (model === void 0) continue;
-    const id = nonEmptyText(model.id);
-    if (id === void 0 || seen.has(id)) continue;
-    seen.add(id);
-    const next = { id };
-    const name2 = nonEmptyText(model.name);
-    if (name2 !== void 0) next.name = name2;
-    const contextWindow = finiteNumber(model.contextWindow);
-    if (contextWindow !== void 0 && contextWindow >= 1) next.contextWindow = truncate(contextWindow);
-    const maxTokens = finiteNumber(model.maxTokens);
-    if (maxTokens !== void 0 && maxTokens >= 1) next.maxTokens = truncate(maxTokens);
-    if (model.reasoningEfforts === false) next.reasoningEfforts = false;
-    else if (model.reasoningEfforts && typeof model.reasoningEfforts === "object") {
-      next.reasoningEfforts = { ...model.reasoningEfforts };
-    }
-    models.push(next);
-  }
-  const provider = {
-    displayName: String(source.displayName ?? "").trim(),
-    api: String(source.api ?? "").trim(),
-    baseURL: normalizeBaseUrl(source.baseURL),
-    apiKeyEnv: String(source.apiKeyEnv ?? "").trim(),
-    models
-  };
-  const exclusiveEnv = pickClaudeExclusiveEnv(source.exclusiveEnv);
-  if (Object.keys(exclusiveEnv).length > 0) provider.exclusiveEnv = exclusiveEnv;
-  for (const field of ["notes", "icon", "iconColor", "appType", "sourceProfileId"]) {
-    const text = nonEmptyText(source[field]);
-    if (text !== void 0) provider[field] = text;
-  }
-  if (source.isCurrent === true) provider.isCurrent = true;
-  if (source.inFailoverQueue === true) provider.inFailoverQueue = true;
-  for (const field of ["costMultiplier", "limitDailyUsd", "limitMonthlyUsd"]) {
-    const amount = finiteNumber(source[field]);
-    if (amount !== void 0 && amount >= 0) provider[field] = amount;
-  }
-  const sortIndex = finiteNumber(source.sortIndex);
-  if (sortIndex !== void 0 && sortIndex >= 0) provider.sortIndex = truncate(sortIndex);
-  const createdAt = finiteNumber(source.createdAt);
-  if (createdAt !== void 0) provider.createdAt = createdAt;
-  return provider;
-}
-function orderProviders(providers) {
-  const UNSORTED = 999999;
-  return Object.entries(providers ?? {}).map(([key, provider]) => ({ key, provider })).sort((a, b) => {
-    const aIndex = Number.isInteger(a.provider?.sortIndex) ? a.provider.sortIndex : UNSORTED;
-    const bIndex = Number.isInteger(b.provider?.sortIndex) ? b.provider.sortIndex : UNSORTED;
-    if (aIndex !== bIndex) return aIndex - bIndex;
-    const aCreated = Number.isFinite(a.provider?.createdAt) ? a.provider.createdAt : Number.NEGATIVE_INFINITY;
-    const bCreated = Number.isFinite(b.provider?.createdAt) ? b.provider.createdAt : Number.NEGATIVE_INFINITY;
-    if (aCreated !== bCreated) return aCreated - bCreated;
-    return a.key < b.key ? -1 : a.key > b.key ? 1 : 0;
-  }).map((entry) => entry.key);
-}
-function truncate(value) {
-  return Number.isInteger(value) ? value : Math.trunc(value);
-}
-function validateCCSProvider(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return { ok: false, message: "provider must be an object" };
-  }
-  if (String(value.displayName ?? "").trim() === "") {
-    return { ok: false, message: "displayName is required" };
-  }
-  const api = String(value.api ?? "").trim();
-  if (api === "") return { ok: false, message: "api is required" };
-  if (!PROTOCOL_SET.has(api)) {
-    return { ok: false, message: `api "${api}" is not one of ${CCS_API_PROTOCOLS.join(", ")}` };
-  }
-  const baseURL = String(value.baseURL ?? "").trim();
-  if (baseURL === "") return { ok: false, message: "baseURL is required" };
-  try {
-    new URL(baseURL);
-  } catch {
-    return { ok: false, message: `baseURL "${baseURL}" is not a URL` };
-  }
-  const models = Array.isArray(value.models) ? value.models : [];
-  if (models.length === 0) return { ok: false, message: "at least one model is required" };
-  for (const model of models) {
-    const id = model && typeof model === "object" ? String(model.id ?? "").trim() : "";
-    if (id === "") return { ok: false, message: "every model needs an id" };
-    const efforts = model.reasoningEfforts;
-    if (efforts === void 0 || efforts === false) continue;
-    if (typeof efforts !== "object" || efforts === null || Array.isArray(efforts)) {
-      return { ok: false, message: `model "${id}" reasoningEfforts must be false or an object` };
-    }
-    for (const [level, wire] of Object.entries(efforts)) {
-      if (!LEVEL_SET.has(level)) {
-        return { ok: false, message: `model "${id}" has an unknown reasoning level "${level}"` };
-      }
-      if (wire !== null && typeof wire !== "string") {
-        return { ok: false, message: `model "${id}" level "${level}" must be a string or null` };
-      }
-      if (level !== "off" && (wire === null || wire.trim() === "")) {
-        return { ok: false, message: `model "${id}" level "${level}" needs a wire value` };
-      }
-    }
-  }
-  return { ok: true };
-}
-var DEFAULT_APP_TYPE = "claude";
-function effectiveAppType(provider) {
-  const own = provider?.appType;
-  return typeof own === "string" && own !== "" ? own : DEFAULT_APP_TYPE;
-}
-function activateCCSProvider(providers, key) {
-  if (!providers || typeof providers !== "object" || Array.isArray(providers)) {
-    throw new Error("providers must be an object");
-  }
-  if (!Object.hasOwn(providers, key)) throw new Error(`unknown provider: ${key}`);
-  const appType = effectiveAppType(providers[key]);
-  return Object.fromEntries(
-    Object.entries(providers).map(([entryKey, provider]) => [
-      entryKey,
-      effectiveAppType(provider) === appType ? { ...provider, isCurrent: entryKey === key } : provider
-    ])
-  );
-}
-function currentKeysByApp(providers) {
-  const current = {};
-  for (const [key, provider] of Object.entries(providers ?? {})) {
-    if (provider?.isCurrent !== true) continue;
-    const appType = effectiveAppType(provider);
-    if (!Object.hasOwn(current, appType)) current[appType] = key;
-  }
-  return current;
-}
-
-// lib/core/json-equal.js
-function jsonEqual(a, b) {
-  if (a === b) return true;
-  if (typeof a !== typeof b) return false;
-  if (Array.isArray(a) || Array.isArray(b)) {
-    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
-    return a.every((item, index) => jsonEqual(item, b[index]));
-  }
-  if (typeof a === "object" && a !== null && b !== null) {
-    const aKeys = Object.keys(a).filter((key) => a[key] !== void 0);
-    const bKeys = Object.keys(b).filter((key) => b[key] !== void 0);
-    if (aKeys.length !== bKeys.length) return false;
-    return aKeys.every((key) => b[key] !== void 0 && jsonEqual(a[key], b[key]));
-  }
-  return false;
-}
-
-// lib/core/mapper.js
-function isObject(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-function enrichModel(sourceModel, profile) {
-  const catalog = catalogFieldsFor(sourceModel.id);
-  const next = { ...catalog, ...sourceModel };
-  const thinking = sourceModel.fallbackThinking === true || isThinkingModel(sourceModel.id);
-  if (profile.api === "anthropic-messages" && thinking) {
-    const currentCompat = isObject(next.compat) ? next.compat : {};
-    if (currentCompat.forceAdaptiveThinking === void 0) {
-      next.compat = { ...currentCompat, forceAdaptiveThinking: true };
-    }
-  }
-  delete next.fallbackThinking;
-  return next;
-}
-function profileWarnings(profile, extra = []) {
-  const modelId = profile.models?.find((model) => typeof model?.id === "string")?.id;
-  const seed = modelId === void 0 ? { warnings: [] } : seedReasoning(modelId, profile.modelReasoningEffort);
-  return [.../* @__PURE__ */ new Set([...profile.warnings ?? [], ...seed.warnings ?? [], ...extra])];
-}
-function preservationWarnings(profile, existing) {
-  if (!isObject(existing)) return [];
-  const warnings = [];
-  const primaryModel = profile.models?.find((model) => typeof model?.id === "string");
-  if (existing.reasoning !== void 0 && primaryModel) {
-    const importedDefault = seedReasoning(primaryModel.id, profile.modelReasoningEffort).defaultEffort;
-    if (importedDefault !== void 0 && existing.reasoning !== importedDefault) {
-      warnings.push(`\u5DF2\u4FDD\u7559\u73B0\u6709 route reasoning ${existing.reasoning}\uFF0C\u672A\u8986\u76D6\u5BFC\u5165\u503C ${importedDefault}`);
-    }
-  }
-  const existingModels = Array.isArray(existing.models) ? existing.models : [];
-  for (const sourceModel of profile.models ?? []) {
-    const current = existingModels.find((model) => model?.id === sourceModel?.id);
-    if (!current || current.reasoningEfforts === void 0) continue;
-    const importedEfforts = seedReasoning(sourceModel.id, profile.modelReasoningEffort).efforts;
-    if (importedEfforts !== void 0 && JSON.stringify(current.reasoningEfforts) !== JSON.stringify(importedEfforts)) {
-      warnings.push(`\u5DF2\u4FDD\u7559\u6A21\u578B ${sourceModel.id} \u7684\u73B0\u6709 reasoningEfforts`);
-    }
-  }
-  return warnings;
-}
-function normalizeBaseUrl2(url) {
-  return String(url ?? "").replace(/\/+$/, "");
-}
-function sourceModelsOf(profile) {
-  return (profile.models ?? []).map((model) => typeof model === "string" ? { id: model } : model).filter((model) => typeof model?.id === "string" && model.id.length > 0);
-}
-function buildModels(profile, existingModels) {
-  const existing = Array.isArray(existingModels) ? existingModels : [];
-  const sourceModels = sourceModelsOf(profile);
-  const sourceIds = new Set(sourceModels.map((model) => model.id));
-  const models = sourceModels.map((sourceModel) => {
-    const current = existing.find((model) => model?.id === sourceModel.id);
-    const enriched = enrichModel(sourceModel, profile);
-    const { fallbackThinking: _flag, ...source } = sourceModel;
-    const next = { ...enriched, ...isObject(current) ? current : {}, ...source };
-    delete next.fallbackThinking;
-    if (isObject(enriched.compat) || isObject(next.compat)) {
-      next.compat = { ...enriched.compat ?? {}, ...isObject(next.compat) ? next.compat : {} };
-    }
-    if (current?.reasoningEfforts === void 0) {
-      next.reasoningEfforts = seedReasoning(sourceModel.id, profile.modelReasoningEffort).efforts;
-    }
-    return next;
-  });
-  for (const model of existing) {
-    if (isObject(model) && typeof model.id === "string" && !sourceIds.has(model.id)) models.push({ ...model });
-  }
-  return { models, sourceModels };
-}
-function toProviderProfile(profile, existing, providerKeyValue) {
-  const previous = isObject(existing) ? existing : {};
-  const resolvedKey = providerKeyValue ?? providerKey(profile.profileId, profile.profileName);
-  const key = credentialRefForProviderKey(resolvedKey);
-  const { models, sourceModels } = buildModels(profile, previous.models);
-  const mapped = {
-    ...previous,
-    displayName: profile.profileName,
-    baseURL: normalizeBaseUrl2(profile.baseURL),
-    api: profile.api,
-    apiKeyEnv: key,
-    models
-  };
-  const primaryModel = sourceModels[0];
-  if (mapped.reasoning === void 0 && primaryModel) {
-    const defaultEffort = seedReasoning(primaryModel.id, profile.modelReasoningEffort).defaultEffort;
-    if (defaultEffort !== void 0) mapped.reasoning = defaultEffort;
-  }
-  return mapped;
-}
-function toCCSProvider(profile, existing, providerKeyValue) {
-  const previous = isObject(existing) ? existing : {};
-  const resolvedKey = providerKeyValue ?? providerKey(profile.profileId, profile.profileName);
-  return normalizeCCSProvider({
-    ...previous,
-    displayName: profile.profileName,
-    api: profile.api,
-    baseURL: normalizeBaseUrl2(profile.baseURL),
-    apiKeyEnv: credentialRefForProviderKey(resolvedKey),
-    models: buildModels(profile, previous.models).models,
-    ...profile.appType === void 0 ? {} : { appType: profile.appType },
-    ...profile.profileId === void 0 ? {} : { sourceProfileId: profile.profileId },
-    ...profile.notes === void 0 ? {} : { notes: profile.notes },
-    ...profile.icon === void 0 ? {} : { icon: profile.icon },
-    ...profile.iconColor === void 0 ? {} : { iconColor: profile.iconColor },
-    // Carried through the catalogue so activation can put the provider's own
-    // compatibility switches into the file it rewrites. `normalizeCCSProvider`
-    // filters the key set, so a row cannot smuggle an arbitrary key in here.
-    ...profile.exclusiveEnv === void 0 ? {} : { exclusiveEnv: profile.exclusiveEnv }
-  });
-}
-function redactSummary(profile, key, status, extraWarnings = []) {
-  return {
-    profileId: profile.profileId,
-    profileName: profile.profileName,
-    sourceLabel: "CCSwitch",
-    providerKey: key,
-    baseURL: normalizeBaseUrl2(profile.baseURL),
-    api: profile.api,
-    modelCount: (profile.models ?? []).length,
-    modelIds: (profile.models ?? []).map((m) => m.id),
-    credential: profile.apiKey !== void 0 ? "found" : "missing",
-    reasoningEffort: normalizeImportedEffort(profile.modelReasoningEffort),
-    status,
-    warnings: profileWarnings(profile, extraWarnings),
-    blockedReason: profile.blocked ? profile.blockedReason : void 0,
-    // The code/detail pair travels next to the Host-facing prose so the browser
-    // can label the row in its own locale without parsing Chinese.
-    blockedCode: profile.blocked ? profile.blockedCode : void 0,
-    blockedDetail: profile.blocked ? profile.blockedDetail : void 0
-  };
-}
-function resolveProviderKey(profile, existingProviders) {
-  const existing = existingProviders ?? {};
-  const baseKey = providerKey(profile.profileId, profile.profileName);
-  let key = baseKey;
-  const sameRoute = (entry) => entry?.displayName === profile.profileName && entry?.baseURL === normalizeBaseUrl2(profile.baseURL);
-  let collisionWarning;
-  if (existing[key] !== void 0 && !sameRoute(existing[key])) {
-    let index = 1;
-    while (existing[variantKey(baseKey, index)] !== void 0) {
-      const candidate = variantKey(baseKey, index);
-      if (sameRoute(existing[candidate])) {
-        key = candidate;
-        break;
-      }
-      index += 1;
-    }
-    if (key === baseKey) key = variantKey(baseKey, index);
-    collisionWarning = `\u5DF2\u5B58\u5728\u540C\u540D provider\uFF0C\u5C06\u4F7F\u7528 ${key} \u5BFC\u5165\uFF0C\u4E0D\u8986\u76D6\u73B0\u6709\u914D\u7F6E`;
-  }
-  const warnings = profileWarnings(profile, [
-    ...collisionWarning ? [collisionWarning] : [],
-    ...preservationWarnings(profile, existing[key])
-  ]);
-  return { key, warnings };
-}
-function classifyProfiles(profiles, existingProviders, existingCatalogue) {
-  const existing = existingProviders ?? {};
-  const catalogue = existingCatalogue ?? {};
-  const checkCatalogue = existingCatalogue !== void 0;
-  const seen = /* @__PURE__ */ new Map();
-  return profiles.map((profile) => {
-    if (profile.skipped || profile.blocked) {
-      return {
-        profileId: profile.profileId,
-        profileName: profile.profileName,
-        status: "blocked",
-        summary: redactSummary(profile, "", "blocked")
-      };
-    }
-    const { key, warnings } = resolveProviderKey(profile, existing);
-    if (seen.has(key)) {
-      const duplicateWarning = `provider \u952E ${key} \u91CD\u590D\uFF0C\u4EC5\u5BFC\u5165\u7B2C\u4E00\u6761`;
-      return {
-        profileId: profile.profileId,
-        profileName: profile.profileName,
-        status: "blocked",
-        providerKey: key,
-        warnings: [...warnings, duplicateWarning],
-        summary: redactSummary(profile, key, "blocked", [...warnings, duplicateWarning])
-      };
-    }
-    seen.set(key, true);
-    const existingEntry = existing[key];
-    const mapped = toProviderProfile(profile, existingEntry, key);
-    const catalogueEntry = catalogue[key];
-    const catalogueRecord = checkCatalogue ? toCCSProvider(profile, catalogueEntry, key) : void 0;
-    const catalogueSettled = !checkCatalogue || !validateCCSProvider(catalogueRecord).ok || catalogueEntry !== void 0 && jsonEqual(normalizeCCSProvider(catalogueEntry), catalogueRecord);
-    const status = existingEntry === void 0 && (!checkCatalogue || catalogueEntry === void 0) ? "new" : jsonEqual(existingEntry, mapped) && catalogueSettled ? "unchanged" : "update";
-    return {
-      profileId: profile.profileId,
-      profileName: profile.profileName,
-      status,
-      providerKey: key,
-      warnings,
-      summary: redactSummary(profile, key, status, warnings)
-    };
-  });
-}
-
-// lib/core/safety.js
-var HOST_SETTINGS_CONFLICT_CODE = "SETTINGS_CONFLICT";
-var REMOTE_SETTINGS_CONFLICT_CODE = "settings/conflict";
-function isSettingsConflict(error) {
-  if (!error) return false;
-  const code = typeof error?.code === "string" ? error.code : "";
-  if (code === HOST_SETTINGS_CONFLICT_CODE || code === REMOTE_SETTINGS_CONFLICT_CODE) return true;
-  if (/conflict/i.test(code)) return true;
-  const message = error instanceof Error ? error.message : String(error?.message ?? error ?? "");
-  return /conflict/i.test(message);
-}
-var IMPORT_FAILURE = {
-  CREDENTIAL: "credential-write-failed",
-  SETTINGS: "settings-write-failed",
-  CONFLICT: "settings-conflict",
-  ROLLBACK: "credential-rollback-failed",
-  /**
-   * The route into DSH landed but the plugin's own provider catalogue did not.
-   *
-   * A distinct kind because the two halves leave the system in different states
-   * and call for different answers: this one means DSH can already call the
-   * provider, and only the manager table is behind. Retrying the import repairs
-   * it, and the credential must NOT be rolled back — the route references it.
-   */
-  CATALOGUE: "catalogue-write-failed"
-};
-var BLOCKED = {
-  INVALID_SETTINGS_JSON: "invalid-settings-json",
-  UNSUPPORTED_APP_TYPE: "unsupported-app-type",
-  MISSING_OPENAI_KEY: "missing-openai-key",
-  MISSING_CODEX_PROVIDER: "missing-codex-provider",
-  MISSING_ANTHROPIC_KEY: "missing-anthropic-key",
-  MISSING_ANTHROPIC_BASE_URL: "missing-anthropic-base-url",
-  /** claude-desktop keeps its endpoint at the top level and names the key field. */
-  MISSING_CLAUDE_DESKTOP_KEY: "missing-claude-desktop-key",
-  MISSING_CLAUDE_DESKTOP_BASE_URL: "missing-claude-desktop-base-url",
-  /**
-   * claude-desktop carries an `apiFormat` naming the wire format its own tool
-   * speaks. We already read the row's fields, so a value we cannot serve has to
-   * be refused by name rather than imported as the one protocol we do serve —
-   * that is exactly how a provider ends up registered and unable to answer.
-   */
-  UNSUPPORTED_CLAUDE_DESKTOP_PROTOCOL: "unsupported-claude-desktop-protocol",
-  MISSING_OPENCODE_KEY: "missing-opencode-key",
-  MISSING_OPENCODE_BASE_URL: "missing-opencode-base-url",
-  UNSUPPORTED_OPENCODE_ADAPTER: "unsupported-opencode-adapter",
-  /**
-   * gemini rows are never blocked for a missing field — they are blocked on
-   * protocol grounds. cc-switch configures the Gemini CLI, which speaks
-   * Gemini's own protocol, and llm-pi-ai has no adapter for it, so any import
-   * would be a provider that can never answer. `blockedDetail` is the endpoint
-   * host so the row can still name what it would have pointed at.
-   */
-  UNSUPPORTED_GEMINI_PROTOCOL: "unsupported-gemini-protocol",
-  MISSING_HERMES_KEY: "missing-hermes-key",
-  MISSING_HERMES_BASE_URL: "missing-hermes-base-url",
-  MISSING_PI_KEY: "missing-pi-key",
-  MISSING_PI_BASE_URL: "missing-pi-base-url",
-  /** `api` was present but is not one of the three llm-pi-ai protocols. */
-  UNSUPPORTED_PI_API: "unsupported-pi-api",
-  MISSING_MCODE_KEY: "missing-mcode-key",
-  MISSING_MCODE_BASE_URL: "missing-mcode-base-url",
-  UNSUPPORTED_MCODE_API: "unsupported-mcode-api",
-  MISSING_OPENCLAW_KEY: "missing-openclaw-key",
-  MISSING_OPENCLAW_BASE_URL: "missing-openclaw-base-url",
-  UNSUPPORTED_OPENCLAW_API: "unsupported-openclaw-api",
-  /** Two selected rows resolve to the same provider key in one batch. */
-  DUPLICATE_PROVIDER_KEY: "duplicate-provider-key",
-  /** Fallback for a row that is blocked for a reason this build does not know. */
-  UNKNOWN: "blocked"
-};
-var BLOCKED_CODES = new Set(Object.values(BLOCKED));
-function redactText(value, secrets = []) {
-  let text = value instanceof Error ? value.message : String(value?.message ?? value ?? "");
-  for (const secret of secrets) {
-    if (typeof secret === "string" && secret.length >= 8) {
-      text = text.split(secret).join("[redacted]");
-    }
-  }
-  return text.replace(/sk-[A-Za-z0-9_-]{8,}/g, "sk-[redacted]").replace(/\b(?:authorization|x-api-key|api-key)\b[^\n]*/gi, "auth header [redacted]").replace(/[A-Za-z0-9_\-]{32,}/g, "[redacted]").slice(0, 300);
-}
-
-// lib/core/importer.js
-var ROUTE_NAMESPACE = "llm-pi-ai";
-var CCS_NAMESPACE = "dsh-ccswitch-plugin";
-var CATALOGUE_FAILURE = IMPORT_FAILURE.CATALOGUE;
-async function importProfiles({ profiles, selectedIds, settings, credentials, expectedRevision }) {
-  const selected = new Set(selectedIds ?? []);
-  const results = [];
-  const existing = { ...await readProviders(settings, ROUTE_NAMESPACE) ?? {} };
-  const catalogue = { ...await readProviders(settings, CCS_NAMESPACE) ?? {} };
-  const usedKeys = /* @__PURE__ */ new Set();
-  let revisionForNextWrite = expectedRevision;
-  let catalogueRevisionForNextWrite = await readRevision(settings, CCS_NAMESPACE);
-  for (const profile of profiles) {
-    if (profile.skipped) {
-      results.push({ profileId: profile.profileId, profileName: profile.profileName, status: "skipped", skipReason: profile.skipReason });
-      continue;
-    }
-    if (!selected.has(profile.profileId)) {
-      results.push({ profileId: profile.profileId, profileName: profile.profileName, status: "skipped", skipReason: "\u672A\u9009\u62E9" });
-      continue;
-    }
-    if (profile.blocked) {
-      results.push({
-        profileId: profile.profileId,
-        profileName: profile.profileName,
-        status: "blocked",
-        error: profile.blockedReason,
-        blockedCode: profile.blockedCode ?? BLOCKED.UNKNOWN,
-        blockedDetail: profile.blockedDetail
-      });
-      continue;
-    }
-    const { key, warnings } = resolveProviderKey(profile, existing);
-    const ref = credentialRefForProviderKey(key);
-    if (usedKeys.has(key)) {
-      results.push({
-        profileId: profile.profileId,
-        profileName: profile.profileName,
-        status: "blocked",
-        error: `provider \u952E ${key} \u91CD\u590D`,
-        blockedCode: BLOCKED.DUPLICATE_PROVIDER_KEY,
-        blockedDetail: key,
-        warnings
-      });
-      continue;
-    }
-    usedKeys.add(key);
-    const wasConfigured = existing[key] !== void 0;
-    const mapped = toProviderProfile(profile, existing[key], key);
-    const catalogueExisting = catalogue[key];
-    const catalogueRecord = toCCSProvider(profile, catalogueExisting, key);
-    const catalogueCheck = validateCCSProvider(catalogueRecord);
-    const catalogueWarnings = catalogueCheck.ok ? [] : [`\u672A\u5199\u5165 provider \u76EE\u5F55\uFF1A${catalogueCheck.message}`];
-    const catalogueUpToDate = catalogueExisting !== void 0 && jsonEqual(normalizeCCSProvider(catalogueExisting), catalogueRecord);
-    const catalogueSettled = !catalogueCheck.ok || catalogueUpToDate;
-    const routeSettled = wasConfigured && jsonEqual(existing[key], mapped);
-    if (routeSettled && catalogueSettled) {
-      results.push({
-        profileId: profile.profileId,
-        profileName: profile.profileName,
-        providerKey: key,
-        status: "unchanged",
-        warnings: mergeWarnings(warnings, catalogueWarnings)
-      });
-      continue;
-    }
-    const previousCredential = await readCredential(credentials, ref);
-    try {
-      await credentials.set(ref, profile.apiKey);
-    } catch (err) {
-      results.push({
-        profileId: profile.profileId,
-        profileName: profile.profileName,
-        providerKey: key,
-        status: "failed",
-        errorCode: IMPORT_FAILURE.CREDENTIAL,
-        error: `\u51ED\u636E\u5199\u5165\u5931\u8D25\uFF1A${redactText(err, [profile.apiKey])}`,
-        warnings: mergeWarnings(warnings, catalogueWarnings)
-      });
-      continue;
-    }
-    if (!routeSettled) {
-      try {
-        await settings.mutate(ROUTE_NAMESPACE, [{ op: "set", path: ["providers", key], value: mapped }], revisionForNextWrite);
-      } catch (err) {
-        const conflict = isSettingsConflict(err);
-        const failure = {
-          profileId: profile.profileId,
-          profileName: profile.profileName,
-          providerKey: key,
-          status: "failed",
-          errorCode: conflict ? IMPORT_FAILURE.CONFLICT : IMPORT_FAILURE.SETTINGS,
-          error: `\u8BBE\u7F6E\u5199\u5165\u5931\u8D25\uFF1A${redactText(err, [profile.apiKey])}`,
-          warnings: mergeWarnings(warnings, catalogueWarnings)
-        };
-        try {
-          await restoreCredential(credentials, ref, previousCredential);
-        } catch (cleanupErr) {
-          results.push({
-            ...failure,
-            errorCode: IMPORT_FAILURE.ROLLBACK,
-            error: `${failure.error}\uFF1B\u4E14\u51ED\u636E\u56DE\u6EDA\u5931\u8D25\uFF1A${redactText(cleanupErr, [profile.apiKey])}`
-          });
-          continue;
-        }
-        results.push(failure);
-        continue;
-      }
-      existing[key] = mapped;
-      revisionForNextWrite = await readRevision(settings, ROUTE_NAMESPACE);
-    }
-    if (catalogueCheck.ok && !catalogueUpToDate) {
-      try {
-        await settings.mutate(CCS_NAMESPACE, [{ op: "set", path: ["providers", key], value: catalogueRecord }], catalogueRevisionForNextWrite);
-      } catch (err) {
-        results.push({
-          profileId: profile.profileId,
-          profileName: profile.profileName,
-          providerKey: key,
-          status: "failed",
-          errorCode: CATALOGUE_FAILURE,
-          error: `provider \u8DEF\u7531\u5DF2\u5199\u5165\uFF0C\u4F46 provider \u76EE\u5F55\u5199\u5165\u5931\u8D25\uFF1A${redactText(err, [profile.apiKey])}`,
-          warnings: mergeWarnings(warnings, catalogueWarnings)
-        });
-        continue;
-      }
-      catalogue[key] = catalogueRecord;
-      catalogueRevisionForNextWrite = await readRevision(settings, CCS_NAMESPACE);
-    }
-    results.push({
-      profileId: profile.profileId,
-      profileName: profile.profileName,
-      providerKey: key,
-      status: wasConfigured ? "updated" : "new",
-      warnings: mergeWarnings(warnings, catalogueWarnings)
-    });
-  }
-  return results;
-}
-function mergeWarnings(warnings, extra) {
-  return extra.length === 0 ? warnings : [.../* @__PURE__ */ new Set([...warnings, ...extra])];
-}
-async function readProviders(settings, ns) {
-  try {
-    if (typeof settings?.describe === "function") {
-      const namespaces = await settings.describe();
-      const namespace = (Array.isArray(namespaces) ? namespaces : []).find((entry) => entry.ns === ns);
-      if (namespace?.value?.providers) return namespace.value.providers;
-    }
-    if (typeof settings?.get === "function") {
-      const value = await settings.get(ns);
-      if (value && typeof value === "object" && value.providers) return value.providers;
-    }
-  } catch {
-  }
-  return void 0;
-}
-async function readRevision(settings, ns) {
-  try {
-    if (typeof settings?.describe === "function") {
-      const namespaces = await settings.describe();
-      const namespace = (Array.isArray(namespaces) ? namespaces : []).find((entry) => entry.ns === ns);
-      if (namespace?.revision !== void 0) return namespace.revision;
-    }
-  } catch {
-  }
-  return void 0;
-}
-async function readCredential(credentials, ref) {
-  if (typeof credentials?.resolve === "function") {
-    try {
-      const resolved = await credentials.resolve(ref);
-      if (resolved?.value !== void 0) return { configured: true, value: resolved.value };
-    } catch {
-    }
-  }
-  if (typeof credentials?.describe === "function") {
-    try {
-      const described = await credentials.describe(ref);
-      return { configured: described?.configured === true, value: void 0 };
-    } catch {
-    }
-  }
-  return { configured: false, value: void 0 };
-}
-async function restoreCredential(credentials, ref, previous) {
-  if (previous.value !== void 0) return credentials.set(ref, previous.value);
-  if (!previous.configured) return credentials.unset(ref);
-}
-
 // src/domain/presets.mjs
 var PROVIDER_PRESETS = Object.freeze([
   {
@@ -1451,6 +731,740 @@ var PRESET_PLAN_KEYS = Object.freeze([
 ]);
 var PRESET_REGION_KEYS = Object.freeze(["cn", "intl"]);
 
+// src/domain/ccs-provider.mjs
+var CCS_API_PROTOCOLS = Object.freeze([
+  "openai-completions",
+  "openai-responses",
+  "anthropic-messages"
+]);
+var CCS_REASONING_LEVELS = Object.freeze([
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max"
+]);
+var PROTOCOL_SET = new Set(CCS_API_PROTOCOLS);
+var LEVEL_SET = new Set(CCS_REASONING_LEVELS);
+function defineCCSModel(z2) {
+  return z2.object({
+    id: z2.string().required(),
+    name: z2.string(),
+    contextWindow: z2.number().step(1).min(1),
+    maxTokens: z2.number().step(1).min(1),
+    // `false` disables reasoning for this model; a dict maps each level to the
+    // wire spelling the endpoint expects, or null for "send nothing".
+    reasoningEfforts: z2.union([
+      z2.const(false),
+      z2.dict(z2.union([z2.string(), z2.const(null)]))
+    ])
+  });
+}
+function defineCCSProvider(z2) {
+  return z2.object({
+    displayName: z2.string(),
+    api: z2.union([...CCS_API_PROTOCOLS]),
+    baseURL: z2.string(),
+    apiKeyEnv: z2.string().role("credential-ref"),
+    models: z2.array(defineCCSModel(z2)).default([]),
+    // The provider's own Claude Code compatibility switches and window sizes.
+    // Kept as a dict of primitives rather than a fixed key set so a value the
+    // schema does not know yet survives a round-trip; `pickClaudeExclusiveEnv`
+    // is what narrows it to keys this plugin is willing to write.
+    exclusiveEnv: z2.dict(z2.union([z2.string(), z2.number(), z2.boolean()])),
+    // CC Switch groups and labels a row by these two, and they drive four
+    // behaviours that cannot otherwise be reproduced: whether the row can be
+    // connectivity-checked at all, whether its API-key field is editable, the
+    // "official accounts do not join the failover queue" refusal, and the
+    // 官方 chip. Kept optional; an unclassified row is simply unclassified.
+    category: z2.union([...CCS_PROVIDER_CATEGORIES]),
+    websiteUrl: z2.string(),
+    notes: z2.string(),
+    icon: z2.string(),
+    iconColor: z2.string(),
+    appType: z2.string(),
+    sourceProfileId: z2.string(),
+    // CC Switch orders a provider list by `COALESCE(sort_index, 999999),
+    // created_at ASC, id ASC`. Both columns are nullable there, so both fields
+    // are optional here: a provider the user has never reordered has no index,
+    // and a row imported from a database that predates the column has no
+    // creation time.
+    sortIndex: z2.number().step(1).min(0),
+    createdAt: z2.number(),
+    isCurrent: z2.boolean().default(false),
+    inFailoverQueue: z2.boolean().default(false),
+    costMultiplier: z2.number().min(0),
+    limitDailyUsd: z2.number().min(0),
+    limitMonthlyUsd: z2.number().min(0)
+  });
+}
+function defineCCSConfig(z2) {
+  return z2.object({
+    providers: z2.dict(defineCCSProvider(z2)).default({}).volatile()
+  });
+}
+function emptyCCSProvider(overrides = {}) {
+  return {
+    displayName: "",
+    api: CCS_API_PROTOCOLS[0],
+    baseURL: "",
+    apiKeyEnv: "",
+    models: [],
+    isCurrent: false,
+    inFailoverQueue: false,
+    ...overrides
+  };
+}
+function normalizeBaseUrl(value) {
+  return String(value ?? "").trim().replace(/\/+$/, "");
+}
+function finiteNumber(value) {
+  if (typeof value === "number") return Number.isFinite(value) ? value : void 0;
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : void 0;
+  }
+  return void 0;
+}
+function nonEmptyText(value) {
+  const text = String(value ?? "").trim();
+  return text === "" ? void 0 : text;
+}
+function normalizeCCSProvider(value) {
+  const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const models = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const entry of Array.isArray(source.models) ? source.models : []) {
+    const model = entry && typeof entry === "object" && !Array.isArray(entry) ? entry : typeof entry === "string" ? { id: entry } : void 0;
+    if (model === void 0) continue;
+    const id = nonEmptyText(model.id);
+    if (id === void 0 || seen.has(id)) continue;
+    seen.add(id);
+    const next = { id };
+    const name2 = nonEmptyText(model.name);
+    if (name2 !== void 0) next.name = name2;
+    const contextWindow = finiteNumber(model.contextWindow);
+    if (contextWindow !== void 0 && contextWindow >= 1) next.contextWindow = truncate(contextWindow);
+    const maxTokens = finiteNumber(model.maxTokens);
+    if (maxTokens !== void 0 && maxTokens >= 1) next.maxTokens = truncate(maxTokens);
+    if (model.reasoningEfforts === false) next.reasoningEfforts = false;
+    else if (model.reasoningEfforts && typeof model.reasoningEfforts === "object") {
+      next.reasoningEfforts = { ...model.reasoningEfforts };
+    }
+    models.push(next);
+  }
+  const provider = {
+    displayName: String(source.displayName ?? "").trim(),
+    api: String(source.api ?? "").trim(),
+    baseURL: normalizeBaseUrl(source.baseURL),
+    apiKeyEnv: String(source.apiKeyEnv ?? "").trim(),
+    models
+  };
+  const exclusiveEnv = pickClaudeExclusiveEnv(source.exclusiveEnv);
+  if (Object.keys(exclusiveEnv).length > 0) provider.exclusiveEnv = exclusiveEnv;
+  const category = nonEmptyText(source.category);
+  if (category !== void 0 && CCS_PROVIDER_CATEGORIES.includes(category)) provider.category = category;
+  for (const field of ["websiteUrl", "notes", "icon", "iconColor", "appType", "sourceProfileId"]) {
+    const text = nonEmptyText(source[field]);
+    if (text !== void 0) provider[field] = text;
+  }
+  if (source.isCurrent === true) provider.isCurrent = true;
+  if (source.inFailoverQueue === true) provider.inFailoverQueue = true;
+  for (const field of ["costMultiplier", "limitDailyUsd", "limitMonthlyUsd"]) {
+    const amount = finiteNumber(source[field]);
+    if (amount !== void 0 && amount >= 0) provider[field] = amount;
+  }
+  const sortIndex = finiteNumber(source.sortIndex);
+  if (sortIndex !== void 0 && sortIndex >= 0) provider.sortIndex = truncate(sortIndex);
+  const createdAt = finiteNumber(source.createdAt);
+  if (createdAt !== void 0) provider.createdAt = createdAt;
+  return provider;
+}
+function orderProviders(providers) {
+  const UNSORTED = 999999;
+  return Object.entries(providers ?? {}).map(([key, provider]) => ({ key, provider })).sort((a, b) => {
+    const aIndex = Number.isInteger(a.provider?.sortIndex) ? a.provider.sortIndex : UNSORTED;
+    const bIndex = Number.isInteger(b.provider?.sortIndex) ? b.provider.sortIndex : UNSORTED;
+    if (aIndex !== bIndex) return aIndex - bIndex;
+    const aCreated = Number.isFinite(a.provider?.createdAt) ? a.provider.createdAt : Number.NEGATIVE_INFINITY;
+    const bCreated = Number.isFinite(b.provider?.createdAt) ? b.provider.createdAt : Number.NEGATIVE_INFINITY;
+    if (aCreated !== bCreated) return aCreated - bCreated;
+    return a.key < b.key ? -1 : a.key > b.key ? 1 : 0;
+  }).map((entry) => entry.key);
+}
+function truncate(value) {
+  return Number.isInteger(value) ? value : Math.trunc(value);
+}
+function validateCCSProvider(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { ok: false, message: "provider must be an object" };
+  }
+  if (String(value.displayName ?? "").trim() === "") {
+    return { ok: false, message: "displayName is required" };
+  }
+  const api = String(value.api ?? "").trim();
+  if (api === "") return { ok: false, message: "api is required" };
+  if (!PROTOCOL_SET.has(api)) {
+    return { ok: false, message: `api "${api}" is not one of ${CCS_API_PROTOCOLS.join(", ")}` };
+  }
+  const baseURL = String(value.baseURL ?? "").trim();
+  if (baseURL === "") return { ok: false, message: "baseURL is required" };
+  try {
+    new URL(baseURL);
+  } catch {
+    return { ok: false, message: `baseURL "${baseURL}" is not a URL` };
+  }
+  const models = Array.isArray(value.models) ? value.models : [];
+  if (models.length === 0) return { ok: false, message: "at least one model is required" };
+  for (const model of models) {
+    const id = model && typeof model === "object" ? String(model.id ?? "").trim() : "";
+    if (id === "") return { ok: false, message: "every model needs an id" };
+    const efforts = model.reasoningEfforts;
+    if (efforts === void 0 || efforts === false) continue;
+    if (typeof efforts !== "object" || efforts === null || Array.isArray(efforts)) {
+      return { ok: false, message: `model "${id}" reasoningEfforts must be false or an object` };
+    }
+    for (const [level, wire] of Object.entries(efforts)) {
+      if (!LEVEL_SET.has(level)) {
+        return { ok: false, message: `model "${id}" has an unknown reasoning level "${level}"` };
+      }
+      if (wire !== null && typeof wire !== "string") {
+        return { ok: false, message: `model "${id}" level "${level}" must be a string or null` };
+      }
+      if (level !== "off" && (wire === null || wire.trim() === "")) {
+        return { ok: false, message: `model "${id}" level "${level}" needs a wire value` };
+      }
+    }
+  }
+  return { ok: true };
+}
+var DEFAULT_APP_TYPE = "claude";
+function effectiveAppType(provider) {
+  const own = provider?.appType;
+  return typeof own === "string" && own !== "" ? own : DEFAULT_APP_TYPE;
+}
+function activateCCSProvider(providers, key) {
+  if (!providers || typeof providers !== "object" || Array.isArray(providers)) {
+    throw new Error("providers must be an object");
+  }
+  if (!Object.hasOwn(providers, key)) throw new Error(`unknown provider: ${key}`);
+  const appType = effectiveAppType(providers[key]);
+  return Object.fromEntries(
+    Object.entries(providers).map(([entryKey, provider]) => [
+      entryKey,
+      effectiveAppType(provider) === appType ? { ...provider, isCurrent: entryKey === key } : provider
+    ])
+  );
+}
+function currentKeysByApp(providers) {
+  const current = {};
+  for (const [key, provider] of Object.entries(providers ?? {})) {
+    if (provider?.isCurrent !== true) continue;
+    const appType = effectiveAppType(provider);
+    if (!Object.hasOwn(current, appType)) current[appType] = key;
+  }
+  return current;
+}
+
+// lib/core/json-equal.js
+function jsonEqual(a, b) {
+  if (a === b) return true;
+  if (typeof a !== typeof b) return false;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    return a.every((item, index) => jsonEqual(item, b[index]));
+  }
+  if (typeof a === "object" && a !== null && b !== null) {
+    const aKeys = Object.keys(a).filter((key) => a[key] !== void 0);
+    const bKeys = Object.keys(b).filter((key) => b[key] !== void 0);
+    if (aKeys.length !== bKeys.length) return false;
+    return aKeys.every((key) => b[key] !== void 0 && jsonEqual(a[key], b[key]));
+  }
+  return false;
+}
+
+// lib/core/mapper.js
+function isObject(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function enrichModel(sourceModel, profile) {
+  const catalog = catalogFieldsFor(sourceModel.id);
+  const next = { ...catalog, ...sourceModel };
+  const thinking = sourceModel.fallbackThinking === true || isThinkingModel(sourceModel.id);
+  if (profile.api === "anthropic-messages" && thinking) {
+    const currentCompat = isObject(next.compat) ? next.compat : {};
+    if (currentCompat.forceAdaptiveThinking === void 0) {
+      next.compat = { ...currentCompat, forceAdaptiveThinking: true };
+    }
+  }
+  delete next.fallbackThinking;
+  return next;
+}
+function profileWarnings(profile, extra = []) {
+  const modelId = profile.models?.find((model) => typeof model?.id === "string")?.id;
+  const seed = modelId === void 0 ? { warnings: [] } : seedReasoning(modelId, profile.modelReasoningEffort);
+  return [.../* @__PURE__ */ new Set([...profile.warnings ?? [], ...seed.warnings ?? [], ...extra])];
+}
+function preservationWarnings(profile, existing) {
+  if (!isObject(existing)) return [];
+  const warnings = [];
+  const primaryModel = profile.models?.find((model) => typeof model?.id === "string");
+  if (existing.reasoning !== void 0 && primaryModel) {
+    const importedDefault = seedReasoning(primaryModel.id, profile.modelReasoningEffort).defaultEffort;
+    if (importedDefault !== void 0 && existing.reasoning !== importedDefault) {
+      warnings.push(`\u5DF2\u4FDD\u7559\u73B0\u6709 route reasoning ${existing.reasoning}\uFF0C\u672A\u8986\u76D6\u5BFC\u5165\u503C ${importedDefault}`);
+    }
+  }
+  const existingModels = Array.isArray(existing.models) ? existing.models : [];
+  for (const sourceModel of profile.models ?? []) {
+    const current = existingModels.find((model) => model?.id === sourceModel?.id);
+    if (!current || current.reasoningEfforts === void 0) continue;
+    const importedEfforts = seedReasoning(sourceModel.id, profile.modelReasoningEffort).efforts;
+    if (importedEfforts !== void 0 && JSON.stringify(current.reasoningEfforts) !== JSON.stringify(importedEfforts)) {
+      warnings.push(`\u5DF2\u4FDD\u7559\u6A21\u578B ${sourceModel.id} \u7684\u73B0\u6709 reasoningEfforts`);
+    }
+  }
+  return warnings;
+}
+function normalizeBaseUrl2(url) {
+  return String(url ?? "").replace(/\/+$/, "");
+}
+function sourceModelsOf(profile) {
+  return (profile.models ?? []).map((model) => typeof model === "string" ? { id: model } : model).filter((model) => typeof model?.id === "string" && model.id.length > 0);
+}
+function buildModels(profile, existingModels) {
+  const existing = Array.isArray(existingModels) ? existingModels : [];
+  const sourceModels = sourceModelsOf(profile);
+  const sourceIds = new Set(sourceModels.map((model) => model.id));
+  const models = sourceModels.map((sourceModel) => {
+    const current = existing.find((model) => model?.id === sourceModel.id);
+    const enriched = enrichModel(sourceModel, profile);
+    const { fallbackThinking: _flag, ...source } = sourceModel;
+    const next = { ...enriched, ...isObject(current) ? current : {}, ...source };
+    delete next.fallbackThinking;
+    if (isObject(enriched.compat) || isObject(next.compat)) {
+      next.compat = { ...enriched.compat ?? {}, ...isObject(next.compat) ? next.compat : {} };
+    }
+    if (current?.reasoningEfforts === void 0) {
+      next.reasoningEfforts = seedReasoning(sourceModel.id, profile.modelReasoningEffort).efforts;
+    }
+    return next;
+  });
+  for (const model of existing) {
+    if (isObject(model) && typeof model.id === "string" && !sourceIds.has(model.id)) models.push({ ...model });
+  }
+  return { models, sourceModels };
+}
+function toProviderProfile(profile, existing, providerKeyValue) {
+  const previous = isObject(existing) ? existing : {};
+  const resolvedKey = providerKeyValue ?? providerKey(profile.profileId, profile.profileName);
+  const key = credentialRefForProviderKey(resolvedKey);
+  const { models, sourceModels } = buildModels(profile, previous.models);
+  const mapped = {
+    ...previous,
+    displayName: profile.profileName,
+    baseURL: normalizeBaseUrl2(profile.baseURL),
+    api: profile.api,
+    apiKeyEnv: key,
+    models
+  };
+  const primaryModel = sourceModels[0];
+  if (mapped.reasoning === void 0 && primaryModel) {
+    const defaultEffort = seedReasoning(primaryModel.id, profile.modelReasoningEffort).defaultEffort;
+    if (defaultEffort !== void 0) mapped.reasoning = defaultEffort;
+  }
+  return mapped;
+}
+function toCCSProvider(profile, existing, providerKeyValue) {
+  const previous = isObject(existing) ? existing : {};
+  const resolvedKey = providerKeyValue ?? providerKey(profile.profileId, profile.profileName);
+  return normalizeCCSProvider({
+    ...previous,
+    displayName: profile.profileName,
+    api: profile.api,
+    baseURL: normalizeBaseUrl2(profile.baseURL),
+    apiKeyEnv: credentialRefForProviderKey(resolvedKey),
+    models: buildModels(profile, previous.models).models,
+    ...profile.appType === void 0 ? {} : { appType: profile.appType },
+    ...profile.profileId === void 0 ? {} : { sourceProfileId: profile.profileId },
+    ...profile.notes === void 0 ? {} : { notes: profile.notes },
+    ...profile.icon === void 0 ? {} : { icon: profile.icon },
+    ...profile.iconColor === void 0 ? {} : { iconColor: profile.iconColor },
+    // Carried through the catalogue so activation can put the provider's own
+    // compatibility switches into the file it rewrites. `normalizeCCSProvider`
+    // filters the key set, so a row cannot smuggle an arbitrary key in here.
+    ...profile.exclusiveEnv === void 0 ? {} : { exclusiveEnv: profile.exclusiveEnv },
+    // The vendor site and CC Switch's own grouping. Both are hand-editable in
+    // the manager, so an existing value is kept when the row carries none —
+    // which is what the spread-over-`previous` order already does.
+    ...profile.websiteUrl === void 0 ? {} : { websiteUrl: profile.websiteUrl },
+    ...profile.category === void 0 ? {} : { category: profile.category }
+  });
+}
+function redactSummary(profile, key, status, extraWarnings = []) {
+  return {
+    profileId: profile.profileId,
+    profileName: profile.profileName,
+    sourceLabel: "CCSwitch",
+    providerKey: key,
+    baseURL: normalizeBaseUrl2(profile.baseURL),
+    api: profile.api,
+    modelCount: (profile.models ?? []).length,
+    modelIds: (profile.models ?? []).map((m) => m.id),
+    credential: profile.apiKey !== void 0 ? "found" : "missing",
+    reasoningEffort: normalizeImportedEffort(profile.modelReasoningEffort),
+    status,
+    warnings: profileWarnings(profile, extraWarnings),
+    blockedReason: profile.blocked ? profile.blockedReason : void 0,
+    // The code/detail pair travels next to the Host-facing prose so the browser
+    // can label the row in its own locale without parsing Chinese.
+    blockedCode: profile.blocked ? profile.blockedCode : void 0,
+    blockedDetail: profile.blocked ? profile.blockedDetail : void 0
+  };
+}
+function resolveProviderKey(profile, existingProviders) {
+  const existing = existingProviders ?? {};
+  const baseKey = providerKey(profile.profileId, profile.profileName);
+  let key = baseKey;
+  const sameRoute = (entry) => entry?.displayName === profile.profileName && entry?.baseURL === normalizeBaseUrl2(profile.baseURL);
+  let collisionWarning;
+  if (existing[key] !== void 0 && !sameRoute(existing[key])) {
+    let index = 1;
+    while (existing[variantKey(baseKey, index)] !== void 0) {
+      const candidate = variantKey(baseKey, index);
+      if (sameRoute(existing[candidate])) {
+        key = candidate;
+        break;
+      }
+      index += 1;
+    }
+    if (key === baseKey) key = variantKey(baseKey, index);
+    collisionWarning = `\u5DF2\u5B58\u5728\u540C\u540D provider\uFF0C\u5C06\u4F7F\u7528 ${key} \u5BFC\u5165\uFF0C\u4E0D\u8986\u76D6\u73B0\u6709\u914D\u7F6E`;
+  }
+  const warnings = profileWarnings(profile, [
+    ...collisionWarning ? [collisionWarning] : [],
+    ...preservationWarnings(profile, existing[key])
+  ]);
+  return { key, warnings };
+}
+function classifyProfiles(profiles, existingProviders, existingCatalogue) {
+  const existing = existingProviders ?? {};
+  const catalogue = existingCatalogue ?? {};
+  const checkCatalogue = existingCatalogue !== void 0;
+  const seen = /* @__PURE__ */ new Map();
+  return profiles.map((profile) => {
+    if (profile.skipped || profile.blocked) {
+      return {
+        profileId: profile.profileId,
+        profileName: profile.profileName,
+        status: "blocked",
+        summary: redactSummary(profile, "", "blocked")
+      };
+    }
+    const { key, warnings } = resolveProviderKey(profile, existing);
+    if (seen.has(key)) {
+      const duplicateWarning = `provider \u952E ${key} \u91CD\u590D\uFF0C\u4EC5\u5BFC\u5165\u7B2C\u4E00\u6761`;
+      return {
+        profileId: profile.profileId,
+        profileName: profile.profileName,
+        status: "blocked",
+        providerKey: key,
+        warnings: [...warnings, duplicateWarning],
+        summary: redactSummary(profile, key, "blocked", [...warnings, duplicateWarning])
+      };
+    }
+    seen.set(key, true);
+    const existingEntry = existing[key];
+    const mapped = toProviderProfile(profile, existingEntry, key);
+    const catalogueEntry = catalogue[key];
+    const catalogueRecord = checkCatalogue ? toCCSProvider(profile, catalogueEntry, key) : void 0;
+    const catalogueSettled = !checkCatalogue || !validateCCSProvider(catalogueRecord).ok || catalogueEntry !== void 0 && jsonEqual(normalizeCCSProvider(catalogueEntry), catalogueRecord);
+    const status = existingEntry === void 0 && (!checkCatalogue || catalogueEntry === void 0) ? "new" : jsonEqual(existingEntry, mapped) && catalogueSettled ? "unchanged" : "update";
+    return {
+      profileId: profile.profileId,
+      profileName: profile.profileName,
+      status,
+      providerKey: key,
+      warnings,
+      summary: redactSummary(profile, key, status, warnings)
+    };
+  });
+}
+
+// lib/core/safety.js
+var HOST_SETTINGS_CONFLICT_CODE = "SETTINGS_CONFLICT";
+var REMOTE_SETTINGS_CONFLICT_CODE = "settings/conflict";
+function isSettingsConflict(error) {
+  if (!error) return false;
+  const code = typeof error?.code === "string" ? error.code : "";
+  if (code === HOST_SETTINGS_CONFLICT_CODE || code === REMOTE_SETTINGS_CONFLICT_CODE) return true;
+  if (/conflict/i.test(code)) return true;
+  const message = error instanceof Error ? error.message : String(error?.message ?? error ?? "");
+  return /conflict/i.test(message);
+}
+var IMPORT_FAILURE = {
+  CREDENTIAL: "credential-write-failed",
+  SETTINGS: "settings-write-failed",
+  CONFLICT: "settings-conflict",
+  ROLLBACK: "credential-rollback-failed",
+  /**
+   * The route into DSH landed but the plugin's own provider catalogue did not.
+   *
+   * A distinct kind because the two halves leave the system in different states
+   * and call for different answers: this one means DSH can already call the
+   * provider, and only the manager table is behind. Retrying the import repairs
+   * it, and the credential must NOT be rolled back — the route references it.
+   */
+  CATALOGUE: "catalogue-write-failed"
+};
+var BLOCKED = {
+  INVALID_SETTINGS_JSON: "invalid-settings-json",
+  UNSUPPORTED_APP_TYPE: "unsupported-app-type",
+  MISSING_OPENAI_KEY: "missing-openai-key",
+  MISSING_CODEX_PROVIDER: "missing-codex-provider",
+  MISSING_ANTHROPIC_KEY: "missing-anthropic-key",
+  MISSING_ANTHROPIC_BASE_URL: "missing-anthropic-base-url",
+  /** claude-desktop keeps its endpoint at the top level and names the key field. */
+  MISSING_CLAUDE_DESKTOP_KEY: "missing-claude-desktop-key",
+  MISSING_CLAUDE_DESKTOP_BASE_URL: "missing-claude-desktop-base-url",
+  /**
+   * claude-desktop carries an `apiFormat` naming the wire format its own tool
+   * speaks. We already read the row's fields, so a value we cannot serve has to
+   * be refused by name rather than imported as the one protocol we do serve —
+   * that is exactly how a provider ends up registered and unable to answer.
+   */
+  UNSUPPORTED_CLAUDE_DESKTOP_PROTOCOL: "unsupported-claude-desktop-protocol",
+  MISSING_OPENCODE_KEY: "missing-opencode-key",
+  MISSING_OPENCODE_BASE_URL: "missing-opencode-base-url",
+  UNSUPPORTED_OPENCODE_ADAPTER: "unsupported-opencode-adapter",
+  /**
+   * gemini rows are never blocked for a missing field — they are blocked on
+   * protocol grounds. cc-switch configures the Gemini CLI, which speaks
+   * Gemini's own protocol, and llm-pi-ai has no adapter for it, so any import
+   * would be a provider that can never answer. `blockedDetail` is the endpoint
+   * host so the row can still name what it would have pointed at.
+   */
+  UNSUPPORTED_GEMINI_PROTOCOL: "unsupported-gemini-protocol",
+  MISSING_HERMES_KEY: "missing-hermes-key",
+  MISSING_HERMES_BASE_URL: "missing-hermes-base-url",
+  MISSING_PI_KEY: "missing-pi-key",
+  MISSING_PI_BASE_URL: "missing-pi-base-url",
+  /** `api` was present but is not one of the three llm-pi-ai protocols. */
+  UNSUPPORTED_PI_API: "unsupported-pi-api",
+  MISSING_MCODE_KEY: "missing-mcode-key",
+  MISSING_MCODE_BASE_URL: "missing-mcode-base-url",
+  UNSUPPORTED_MCODE_API: "unsupported-mcode-api",
+  MISSING_OPENCLAW_KEY: "missing-openclaw-key",
+  MISSING_OPENCLAW_BASE_URL: "missing-openclaw-base-url",
+  UNSUPPORTED_OPENCLAW_API: "unsupported-openclaw-api",
+  /** Two selected rows resolve to the same provider key in one batch. */
+  DUPLICATE_PROVIDER_KEY: "duplicate-provider-key",
+  /** Fallback for a row that is blocked for a reason this build does not know. */
+  UNKNOWN: "blocked"
+};
+var BLOCKED_CODES = new Set(Object.values(BLOCKED));
+function redactText(value, secrets = []) {
+  let text = value instanceof Error ? value.message : String(value?.message ?? value ?? "");
+  for (const secret of secrets) {
+    if (typeof secret === "string" && secret.length >= 8) {
+      text = text.split(secret).join("[redacted]");
+    }
+  }
+  return text.replace(/sk-[A-Za-z0-9_-]{8,}/g, "sk-[redacted]").replace(/\b(?:authorization|x-api-key|api-key)\b[^\n]*/gi, "auth header [redacted]").replace(/[A-Za-z0-9_\-]{32,}/g, "[redacted]").slice(0, 300);
+}
+
+// lib/core/importer.js
+var ROUTE_NAMESPACE = "llm-pi-ai";
+var CCS_NAMESPACE = "dsh-ccswitch-plugin";
+var CATALOGUE_FAILURE = IMPORT_FAILURE.CATALOGUE;
+async function importProfiles({ profiles, selectedIds, settings, credentials, expectedRevision }) {
+  const selected = new Set(selectedIds ?? []);
+  const results = [];
+  const existing = { ...await readProviders(settings, ROUTE_NAMESPACE) ?? {} };
+  const catalogue = { ...await readProviders(settings, CCS_NAMESPACE) ?? {} };
+  const usedKeys = /* @__PURE__ */ new Set();
+  let revisionForNextWrite = expectedRevision;
+  let catalogueRevisionForNextWrite = await readRevision(settings, CCS_NAMESPACE);
+  for (const profile of profiles) {
+    if (profile.skipped) {
+      results.push({ profileId: profile.profileId, profileName: profile.profileName, status: "skipped", skipReason: profile.skipReason });
+      continue;
+    }
+    if (!selected.has(profile.profileId)) {
+      results.push({ profileId: profile.profileId, profileName: profile.profileName, status: "skipped", skipReason: "\u672A\u9009\u62E9" });
+      continue;
+    }
+    if (profile.blocked) {
+      results.push({
+        profileId: profile.profileId,
+        profileName: profile.profileName,
+        status: "blocked",
+        error: profile.blockedReason,
+        blockedCode: profile.blockedCode ?? BLOCKED.UNKNOWN,
+        blockedDetail: profile.blockedDetail
+      });
+      continue;
+    }
+    const { key, warnings } = resolveProviderKey(profile, existing);
+    const ref = credentialRefForProviderKey(key);
+    if (usedKeys.has(key)) {
+      results.push({
+        profileId: profile.profileId,
+        profileName: profile.profileName,
+        status: "blocked",
+        error: `provider \u952E ${key} \u91CD\u590D`,
+        blockedCode: BLOCKED.DUPLICATE_PROVIDER_KEY,
+        blockedDetail: key,
+        warnings
+      });
+      continue;
+    }
+    usedKeys.add(key);
+    const wasConfigured = existing[key] !== void 0;
+    const mapped = toProviderProfile(profile, existing[key], key);
+    const catalogueExisting = catalogue[key];
+    const catalogueRecord = toCCSProvider(profile, catalogueExisting, key);
+    const catalogueCheck = validateCCSProvider(catalogueRecord);
+    const catalogueWarnings = catalogueCheck.ok ? [] : [`\u672A\u5199\u5165 provider \u76EE\u5F55\uFF1A${catalogueCheck.message}`];
+    const catalogueUpToDate = catalogueExisting !== void 0 && jsonEqual(normalizeCCSProvider(catalogueExisting), catalogueRecord);
+    const catalogueSettled = !catalogueCheck.ok || catalogueUpToDate;
+    const routeSettled = wasConfigured && jsonEqual(existing[key], mapped);
+    if (routeSettled && catalogueSettled) {
+      results.push({
+        profileId: profile.profileId,
+        profileName: profile.profileName,
+        providerKey: key,
+        status: "unchanged",
+        warnings: mergeWarnings(warnings, catalogueWarnings)
+      });
+      continue;
+    }
+    const previousCredential = await readCredential(credentials, ref);
+    try {
+      await credentials.set(ref, profile.apiKey);
+    } catch (err) {
+      results.push({
+        profileId: profile.profileId,
+        profileName: profile.profileName,
+        providerKey: key,
+        status: "failed",
+        errorCode: IMPORT_FAILURE.CREDENTIAL,
+        error: `\u51ED\u636E\u5199\u5165\u5931\u8D25\uFF1A${redactText(err, [profile.apiKey])}`,
+        warnings: mergeWarnings(warnings, catalogueWarnings)
+      });
+      continue;
+    }
+    if (!routeSettled) {
+      try {
+        await settings.mutate(ROUTE_NAMESPACE, [{ op: "set", path: ["providers", key], value: mapped }], revisionForNextWrite);
+      } catch (err) {
+        const conflict = isSettingsConflict(err);
+        const failure = {
+          profileId: profile.profileId,
+          profileName: profile.profileName,
+          providerKey: key,
+          status: "failed",
+          errorCode: conflict ? IMPORT_FAILURE.CONFLICT : IMPORT_FAILURE.SETTINGS,
+          error: `\u8BBE\u7F6E\u5199\u5165\u5931\u8D25\uFF1A${redactText(err, [profile.apiKey])}`,
+          warnings: mergeWarnings(warnings, catalogueWarnings)
+        };
+        try {
+          await restoreCredential(credentials, ref, previousCredential);
+        } catch (cleanupErr) {
+          results.push({
+            ...failure,
+            errorCode: IMPORT_FAILURE.ROLLBACK,
+            error: `${failure.error}\uFF1B\u4E14\u51ED\u636E\u56DE\u6EDA\u5931\u8D25\uFF1A${redactText(cleanupErr, [profile.apiKey])}`
+          });
+          continue;
+        }
+        results.push(failure);
+        continue;
+      }
+      existing[key] = mapped;
+      revisionForNextWrite = await readRevision(settings, ROUTE_NAMESPACE);
+    }
+    if (catalogueCheck.ok && !catalogueUpToDate) {
+      try {
+        await settings.mutate(CCS_NAMESPACE, [{ op: "set", path: ["providers", key], value: catalogueRecord }], catalogueRevisionForNextWrite);
+      } catch (err) {
+        results.push({
+          profileId: profile.profileId,
+          profileName: profile.profileName,
+          providerKey: key,
+          status: "failed",
+          errorCode: CATALOGUE_FAILURE,
+          error: `provider \u8DEF\u7531\u5DF2\u5199\u5165\uFF0C\u4F46 provider \u76EE\u5F55\u5199\u5165\u5931\u8D25\uFF1A${redactText(err, [profile.apiKey])}`,
+          warnings: mergeWarnings(warnings, catalogueWarnings)
+        });
+        continue;
+      }
+      catalogue[key] = catalogueRecord;
+      catalogueRevisionForNextWrite = await readRevision(settings, CCS_NAMESPACE);
+    }
+    results.push({
+      profileId: profile.profileId,
+      profileName: profile.profileName,
+      providerKey: key,
+      status: wasConfigured ? "updated" : "new",
+      warnings: mergeWarnings(warnings, catalogueWarnings)
+    });
+  }
+  return results;
+}
+function mergeWarnings(warnings, extra) {
+  return extra.length === 0 ? warnings : [.../* @__PURE__ */ new Set([...warnings, ...extra])];
+}
+async function readProviders(settings, ns) {
+  try {
+    if (typeof settings?.describe === "function") {
+      const namespaces = await settings.describe();
+      const namespace = (Array.isArray(namespaces) ? namespaces : []).find((entry) => entry.ns === ns);
+      if (namespace?.value?.providers) return namespace.value.providers;
+    }
+    if (typeof settings?.get === "function") {
+      const value = await settings.get(ns);
+      if (value && typeof value === "object" && value.providers) return value.providers;
+    }
+  } catch {
+  }
+  return void 0;
+}
+async function readRevision(settings, ns) {
+  try {
+    if (typeof settings?.describe === "function") {
+      const namespaces = await settings.describe();
+      const namespace = (Array.isArray(namespaces) ? namespaces : []).find((entry) => entry.ns === ns);
+      if (namespace?.revision !== void 0) return namespace.revision;
+    }
+  } catch {
+  }
+  return void 0;
+}
+async function readCredential(credentials, ref) {
+  if (typeof credentials?.resolve === "function") {
+    try {
+      const resolved = await credentials.resolve(ref);
+      if (resolved?.value !== void 0) return { configured: true, value: resolved.value };
+    } catch {
+    }
+  }
+  if (typeof credentials?.describe === "function") {
+    try {
+      const described = await credentials.describe(ref);
+      return { configured: described?.configured === true, value: void 0 };
+    } catch {
+    }
+  }
+  return { configured: false, value: void 0 };
+}
+async function restoreCredential(credentials, ref, previous) {
+  if (previous.value !== void 0) return credentials.set(ref, previous.value);
+  if (!previous.configured) return credentials.unset(ref);
+}
+
 // lib/core/scan.js
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -1604,11 +1618,15 @@ function extractProfile(row) {
   if (SKIP_NAMES.has(profileName)) {
     return { profileId, profileName, appType, skipped: true, skipReason: "\u5B98\u65B9/\u9ED8\u8BA4 provider \u4E0D\u652F\u6301\u5BFC\u5165" };
   }
+  const websiteUrl = asText(row.website_url);
+  const category = asText(row.category);
   const base = {
     profileId,
     profileName,
     appType,
     isCurrent: Boolean(row.is_current),
+    ...websiteUrl === void 0 ? {} : { websiteUrl },
+    ...category === void 0 ? {} : { category },
     blocked: false,
     blockedReason: "",
     blockedCode: void 0,
@@ -2021,7 +2039,15 @@ function scanSource(dbPath, { logger = defaultLogger } = {}) {
   let db;
   try {
     db = openDb(dbPath);
-    const rows = db.prepare(`SELECT id, name, settings_config, is_current, app_type FROM providers ORDER BY ${orderClause(db)}`).all();
+    const present = new Set(
+      db.prepare("PRAGMA table_info(providers)").all().map((column) => column.name)
+    );
+    const optional = [
+      present.has("website_url") ? "website_url" : void 0,
+      present.has("category") ? "category" : void 0
+    ].filter((column) => column !== void 0);
+    const columns = ["id", "name", "settings_config", "is_current", "app_type", ...optional];
+    const rows = db.prepare(`SELECT ${columns.join(", ")} FROM providers ORDER BY ${orderClause(db)}`).all();
     const profiles = rows.filter((row) => SUPPORTED_APP_TYPES.includes(row.app_type)).map((row) => extractProfile(row)).filter((profile) => profile !== void 0);
     return { profiles, reason: profiles.length === 0 ? SCAN_REASON.NO_PROFILES : void 0, dbPath };
   } catch (err) {
@@ -3564,6 +3590,8 @@ function publicProvider(key, provider, credentialConfigured) {
       maxTokens: Number.isInteger(model?.maxTokens) ? model.maxTokens : void 0,
       reasoningEfforts: model?.reasoningEfforts === false ? false : void 0
     })),
+    category: typeof provider?.category === "string" ? provider.category : void 0,
+    websiteUrl: typeof provider?.websiteUrl === "string" ? provider.websiteUrl : void 0,
     notes: typeof provider?.notes === "string" ? provider.notes : void 0,
     icon: typeof provider?.icon === "string" ? provider.icon : void 0,
     iconColor: typeof provider?.iconColor === "string" ? provider.iconColor : void 0,

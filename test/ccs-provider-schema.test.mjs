@@ -13,6 +13,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   CCS_API_PROTOCOLS,
+  CCS_PROVIDER_CATEGORIES,
   CCS_REASONING_LEVELS,
   activateCCSProvider,
   currentKeysByApp,
@@ -73,6 +74,7 @@ test('the provider schema declares exactly the CC Switch fields', () => {
     'apiKeyEnv',
     'appType',
     'baseURL',
+    'category',
     'costMultiplier',
     'createdAt',
     'displayName',
@@ -87,6 +89,7 @@ test('the provider schema declares exactly the CC Switch fields', () => {
     'notes',
     'sortIndex',
     'sourceProfileId',
+    'websiteUrl',
   ])
   // The three booleans/numbers that a form toggles carry a default so an
   // untouched new provider still round-trips through the settings document.
@@ -384,4 +387,28 @@ test('ordering metadata survives normalisation and round-trips', () => {
   // A negative ordinals is a data error, not something to clamp.
   assert.equal(normalizeCCSProvider({ displayName: 'A', sortIndex: -1 }).sortIndex, undefined)
   assert.equal(normalizeCCSProvider({ displayName: 'A', createdAt: 'nope' }).createdAt, undefined)
+})
+test('category is a closed vocabulary and websiteUrl is free text', () => {
+  // `category` is an enum the UI switches on, so an unknown value is dropped
+  // rather than stored: keeping one would mean carrying a string nothing can
+  // render and nothing can act on. `websiteUrl` is only ever displayed and
+  // searched, so any non-empty string is fine.
+  const base = {
+    displayName: 'Official',
+    api: 'anthropic-messages',
+    baseURL: 'https://api.anthropic.com',
+    models: [{ id: 'claude-opus-5' }],
+  }
+  for (const category of CCS_PROVIDER_CATEGORIES) {
+    assert.equal(normalizeCCSProvider({ ...base, category }).category, category)
+  }
+  assert.equal(Object.hasOwn(normalizeCCSProvider({ ...base, category: 'invented' }), 'category'), false)
+  assert.equal(Object.hasOwn(normalizeCCSProvider({ ...base, category: '' }), 'category'), false)
+  assert.equal(Object.hasOwn(normalizeCCSProvider({ ...base, category: 42 }), 'category'), false)
+  // Omitted rather than stored empty, so describe() does not report an edit
+  // on every save — the settings layer diffs the projected form.
+  assert.equal(normalizeCCSProvider({ ...base, websiteUrl: '   ' }).websiteUrl, undefined)
+  assert.equal(normalizeCCSProvider({ ...base, websiteUrl: ' https://x.test ' }).websiteUrl, 'https://x.test')
+  assert.equal(Object.hasOwn(normalizeCCSProvider(base), 'category'), false)
+  assert.equal(Object.hasOwn(normalizeCCSProvider(base), 'websiteUrl'), false)
 })

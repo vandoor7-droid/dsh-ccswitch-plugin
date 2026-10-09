@@ -101,6 +101,8 @@ export function sanitizeProvider(key, value) {
     // make a provider whose credential is unset look ready.
     credential: source.credential === 'found' ? 'found' : 'missing',
     models: (Array.isArray(source.models) ? source.models : []).slice(0, 200).map(sanitizeModel),
+    category: optionalText(source.category),
+    websiteUrl: optionalText(source.websiteUrl),
     notes: optionalText(source.notes),
     icon: optionalText(source.icon),
     iconColor: optionalText(source.iconColor),

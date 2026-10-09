@@ -64,6 +64,8 @@ export function emptyDraft() {
     api: "",
     baseURL: "",
     apiKey: "",
+    category: "",
+    websiteUrl: "",
     notes: "",
     icon: "",
     iconColor: "",
@@ -104,6 +106,8 @@ export function draftFromProvider(provider) {
     baseURL: String(provider.baseURL ?? ""),
     // Never copied from a stored value; see the module comment.
     apiKey: "",
+    category: String(provider.category ?? ""),
+    websiteUrl: String(provider.websiteUrl ?? ""),
     notes: String(provider.notes ?? ""),
     icon: String(provider.icon ?? ""),
     iconColor: String(provider.iconColor ?? ""),
@@ -146,6 +150,8 @@ export function draftFromPreset(preset) {
     displayName: String(preset.displayName ?? ""),
     api: String(preset.api ?? ""),
     baseURL: String(preset.baseURL ?? ""),
+    category: typeof preset.category === "string" ? preset.category : "",
+    websiteUrl: typeof preset.websiteUrl === "string" ? preset.websiteUrl : "",
     icon: String(preset.icon ?? ""),
     iconColor: String(preset.iconColor ?? ""),
     appType: typeof preset.appType === "string" ? preset.appType : undefined,
@@ -208,6 +214,8 @@ export function draftToProvider(draft) {
   };
   if (source.isCurrent === true) provider.isCurrent = true;
   for (const [field, value] of [
+    ["category", optionalText(source.category)],
+    ["websiteUrl", optionalText(source.websiteUrl)],
     ["notes", optionalText(source.notes)],
     ["icon", optionalText(source.icon)],
     ["iconColor", optionalText(source.iconColor)],
@@ -288,6 +296,8 @@ export function draftSignature(draft) {
     provider.api,
     provider.baseURL,
     provider.models,
+    provider.category,
+    provider.websiteUrl,
     provider.notes,
     provider.icon,
     provider.iconColor,

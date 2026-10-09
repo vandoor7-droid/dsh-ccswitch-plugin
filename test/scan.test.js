@@ -180,3 +180,34 @@ test('a database predating the ordering columns still lists every row', () => {
     rmSync(dir, { recursive: true, force: true })
   }
 })
+test('the vendor columns are read when the database has them', () => {
+  // `website_url` and `category` arrive by migration on older installs, so the
+  // scan selects only the columns that are actually there. Naming a missing
+  // one in the select list makes SQLite throw, which would report a perfectly
+  // readable database as unreadable.
+  const dir = mkdtempSync(join(tmpdir(), 'ccs-vendor-'))
+  const dbPath = join(dir, 'cc-switch.db')
+  const db = new DatabaseSync(dbPath)
+  db.exec(`CREATE TABLE providers (
+    id TEXT, name TEXT, settings_config TEXT, is_current BOOLEAN,
+    app_type TEXT, website_url TEXT, category TEXT
+  )`)
+  const insert = db.prepare('INSERT INTO providers (id, name, settings_config, is_current, app_type, website_url, category) VALUES (?, ?, ?, ?, ?, ?, ?)')
+  const claude = JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'https://api.deepseek.com/anthropic', ANTHROPIC_AUTH_TOKEN: 'sk-a' } })
+  insert.run('ds', 'DeepSeek', claude, 0, 'claude', 'https://platform.deepseek.com', 'cn_official')
+  insert.run('bare', 'Bare', claude, 0, 'claude', null, null)
+  db.close()
+  try {
+    const profiles = scanProfiles(dbPath)
+    const ds = profiles.find((p) => p.profileName === 'DeepSeek')
+    assert.equal(ds.websiteUrl, 'https://platform.deepseek.com')
+    assert.equal(ds.category, 'cn_official')
+    // Absent rather than empty, so a row that carries neither does not blank
+    // out a value the user set by hand in the manager.
+    const bare = profiles.find((p) => p.profileName === 'Bare')
+    assert.equal(Object.hasOwn(bare, 'websiteUrl'), false)
+    assert.equal(Object.hasOwn(bare, 'category'), false)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

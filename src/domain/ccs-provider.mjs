@@ -2,6 +2,14 @@
 // (Apache-2.0), which is itself a derivative of wtiaw/dsh-ccswitch-importer.
 // Reworked for DSH 0.2.0-rc.2. See NOTICE for the full attribution chain.
 import { pickClaudeExclusiveEnv } from '../../lib/core/claude-exclusive.js'
+import { CCS_PROVIDER_CATEGORIES } from './presets.mjs'
+
+// Re-exported so a consumer of the provider schema gets its vocabulary from
+// one place. The list itself lives in `presets.mjs`, which is where the
+// presets that carry these values are defined; moving it would mean the
+// schema module importing nothing and the preset module importing this one,
+// which is the same edge in the opposite direction.
+export { CCS_PROVIDER_CATEGORIES }
 
 /**
  * The provider shape this plugin stores in its own settings namespace, plus the
@@ -81,6 +89,13 @@ export function defineCCSProvider(z) {
     // schema does not know yet survives a round-trip; `pickClaudeExclusiveEnv`
     // is what narrows it to keys this plugin is willing to write.
     exclusiveEnv: z.dict(z.union([z.string(), z.number(), z.boolean()])),
+    // CC Switch groups and labels a row by these two, and they drive four
+    // behaviours that cannot otherwise be reproduced: whether the row can be
+    // connectivity-checked at all, whether its API-key field is editable, the
+    // "official accounts do not join the failover queue" refusal, and the
+    // 官方 chip. Kept optional; an unclassified row is simply unclassified.
+    category: z.union([...CCS_PROVIDER_CATEGORIES]),
+    websiteUrl: z.string(),
     notes: z.string(),
     icon: z.string(),
     iconColor: z.string(),
@@ -202,7 +217,12 @@ export function normalizeCCSProvider(value) {
   // settings document from steering an arbitrary key into another tool's file.
   const exclusiveEnv = pickClaudeExclusiveEnv(source.exclusiveEnv)
   if (Object.keys(exclusiveEnv).length > 0) provider.exclusiveEnv = exclusiveEnv
-  for (const field of ['notes', 'icon', 'iconColor', 'appType', 'sourceProfileId']) {
+  // A category outside the vocabulary is dropped rather than stored: it is an
+  // enum the UI switches on, so keeping an unknown value would mean carrying a
+  // string nothing can render and nothing can act on.
+  const category = nonEmptyText(source.category)
+  if (category !== undefined && CCS_PROVIDER_CATEGORIES.includes(category)) provider.category = category
+  for (const field of ['websiteUrl', 'notes', 'icon', 'iconColor', 'appType', 'sourceProfileId']) {
     const text = nonEmptyText(source[field])
     if (text !== undefined) provider[field] = text
   }
