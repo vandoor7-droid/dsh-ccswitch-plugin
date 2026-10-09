@@ -4,6 +4,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { extractProfile } from '../lib/core/extract.js'
+import { BLOCKED } from '../lib/core/safety.js'
 
 const toml = `model_provider = "custom"
 model = "gpt-5.6-terra"
@@ -111,4 +112,44 @@ test('blocked profile never carries the api key', () => {
   const profile = extractProfile(row)
   assert.ok(profile.blocked)
   assert.equal(profile.apiKey, undefined)
+})
+
+test('plain claude rows stay on the env-only path', () => {
+  const row = {
+    id: 'c-1',
+    name: 'C1',
+    app_type: 'claude',
+    settings_config: JSON.stringify({
+      env: { ANTHROPIC_AUTH_TOKEN: 'sk-token', ANTHROPIC_BASE_URL: 'https://c.example' },
+    }),
+  }
+  const profile = extractProfile(row)
+  assert.equal(profile.blocked, false)
+  assert.equal(profile.baseURL, 'https://c.example')
+  assert.equal(profile.api, 'anthropic-messages')
+})
+
+test('a claude row is not read through the claude-desktop top-level baseUrl', () => {
+  // The top-level `baseUrl` carrier belongs to claude-desktop. A plain claude
+  // row that happens to carry one must still be reported as missing its base
+  // URL rather than silently importing a field its app type never writes.
+  const row = {
+    id: 'c-2',
+    name: 'C2',
+    app_type: 'claude',
+    settings_config: JSON.stringify({
+      baseUrl: 'https://top-level.example',
+      env: { ANTHROPIC_AUTH_TOKEN: 'sk-token' },
+    }),
+  }
+  const profile = extractProfile(row)
+  assert.equal(profile.blocked, true)
+  assert.equal(profile.blockedCode, BLOCKED.MISSING_ANTHROPIC_BASE_URL)
+})
+
+test('an unknown app type is blocked with the type as detail', () => {
+  const profile = extractProfile({ id: 'u-1', name: 'U', app_type: 'cursor', settings_config: '{}' })
+  assert.equal(profile.blocked, true)
+  assert.equal(profile.blockedCode, BLOCKED.UNSUPPORTED_APP_TYPE)
+  assert.equal(profile.blockedDetail, 'cursor')
 })

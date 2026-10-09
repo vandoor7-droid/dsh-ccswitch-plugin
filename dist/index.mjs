@@ -364,9 +364,32 @@ var BLOCKED = {
   MISSING_CODEX_PROVIDER: "missing-codex-provider",
   MISSING_ANTHROPIC_KEY: "missing-anthropic-key",
   MISSING_ANTHROPIC_BASE_URL: "missing-anthropic-base-url",
+  /** claude-desktop keeps its endpoint at the top level and names the key field. */
+  MISSING_CLAUDE_DESKTOP_KEY: "missing-claude-desktop-key",
+  MISSING_CLAUDE_DESKTOP_BASE_URL: "missing-claude-desktop-base-url",
   MISSING_OPENCODE_KEY: "missing-opencode-key",
   MISSING_OPENCODE_BASE_URL: "missing-opencode-base-url",
   UNSUPPORTED_OPENCODE_ADAPTER: "unsupported-opencode-adapter",
+  /**
+   * gemini rows are never blocked for a missing field — they are blocked on
+   * protocol grounds. cc-switch configures the Gemini CLI, which speaks
+   * Gemini's own protocol, and llm-pi-ai has no adapter for it, so any import
+   * would be a provider that can never answer. `blockedDetail` is the endpoint
+   * host so the row can still name what it would have pointed at.
+   */
+  UNSUPPORTED_GEMINI_PROTOCOL: "unsupported-gemini-protocol",
+  MISSING_HERMES_KEY: "missing-hermes-key",
+  MISSING_HERMES_BASE_URL: "missing-hermes-base-url",
+  MISSING_PI_KEY: "missing-pi-key",
+  MISSING_PI_BASE_URL: "missing-pi-base-url",
+  /** `api` was present but is not one of the three llm-pi-ai protocols. */
+  UNSUPPORTED_PI_API: "unsupported-pi-api",
+  MISSING_MCODE_KEY: "missing-mcode-key",
+  MISSING_MCODE_BASE_URL: "missing-mcode-base-url",
+  UNSUPPORTED_MCODE_API: "unsupported-mcode-api",
+  MISSING_OPENCLAW_KEY: "missing-openclaw-key",
+  MISSING_OPENCLAW_BASE_URL: "missing-openclaw-base-url",
+  UNSUPPORTED_OPENCLAW_API: "unsupported-openclaw-api",
   /** Two selected rows resolve to the same provider key in one batch. */
   DUPLICATE_PROVIDER_KEY: "duplicate-provider-key",
   /** Fallback for a row that is blocked for a reason this build does not know. */
@@ -603,11 +626,69 @@ function parseCodexToml(text) {
 }
 
 // lib/core/extract.js
-var SKIP_OFFICIAL = /* @__PURE__ */ new Set(["codex-official", "claude-official", "claude-desktop-official"]);
-var SKIP_NAMES = /* @__PURE__ */ new Set(["default", "OpenAI Official", "Claude Official", "Claude Desktop Official"]);
+var SKIP_OFFICIAL = /* @__PURE__ */ new Set([
+  "codex-official",
+  "claude-official",
+  "claude-desktop-official",
+  "gemini-official",
+  "grok-official"
+]);
+var SKIP_NAMES = /* @__PURE__ */ new Set([
+  "default",
+  "OpenAI Official",
+  "Claude Official",
+  "Claude Desktop Official",
+  "Google Official",
+  "Grok Official"
+]);
+var DSH_PROTOCOLS = /* @__PURE__ */ new Set(["openai-completions", "openai-responses", "anthropic-messages"]);
 var DEFAULT_CLAUDE_MODEL = "claude-sonnet-4-5";
 var DEFAULT_CODEX_MODEL = "gpt-5.1-codex";
 var DEFAULT_OPENCODE_MODEL = "gpt-4o";
+var DEFAULT_GEMINI_MODEL = "gemini-2.5-pro";
+var DEFAULT_HERMES_MODEL = "gpt-4o";
+var DEFAULT_PI_MODEL = "gpt-4o";
+var DEFAULT_MCODE_MODEL = "gpt-4o";
+var DEFAULT_OPENCLAW_MODEL = "gpt-4o";
+function asText(value) {
+  return typeof value === "string" && value.length > 0 ? value : void 0;
+}
+var HERMES_API_MODES = {
+  chat_completions: "openai-completions",
+  codex_responses: "openai-responses",
+  anthropic_messages: "anthropic-messages",
+  openai_messages: "openai-completions"
+};
+function protocolsLabel() {
+  return [...DSH_PROTOCOLS].join(" / ");
+}
+function withModelFallback(models, fallback, label, warnings) {
+  if (models.length > 0) return models;
+  warnings.push(`${label} \u914D\u7F6E\u4E2D\u6CA1\u6709\u6A21\u578B\u5217\u8868\uFF0C\u5DF2\u56DE\u9000\u4E3A ${fallback}\uFF0C\u5BFC\u5165\u540E\u53EF\u5728 DSH \u4E2D\u4FEE\u6539`);
+  return [{ id: fallback }];
+}
+function modelsFromArray(list, { withContextLength = false } = {}) {
+  if (!Array.isArray(list)) return [];
+  const models = [];
+  for (const entry of list) {
+    if (!entry || typeof entry !== "object") continue;
+    const id = asText(entry.id);
+    if (id === void 0) continue;
+    const model = { id };
+    const name2 = asText(entry.name);
+    if (name2 !== void 0) model.name = name2;
+    if (withContextLength && Number.isFinite(entry.context_length)) model.contextLength = entry.context_length;
+    models.push(model);
+  }
+  return models;
+}
+function modelsFromMap(rawModels) {
+  if (!rawModels || typeof rawModels !== "object" || Array.isArray(rawModels)) return [];
+  return Object.entries(rawModels).filter(([id]) => asText(id) !== void 0).map(([id, meta]) => {
+    const name2 = meta && typeof meta === "object" ? asText(meta.name) : void 0;
+    return name2 ? { id, name: name2 } : { id };
+  });
+}
 function extractProfile(row) {
   const profileId = String(row.id ?? "");
   const profileName = String(row.name ?? "");
@@ -642,8 +723,15 @@ function extractProfile(row) {
     return { ...base, blocked: true, blockedReason: "settings_config \u4E0D\u662F\u5408\u6CD5 JSON", blockedCode: BLOCKED.INVALID_SETTINGS_JSON };
   }
   if (appType === "codex") return extractCodex(base, parsed);
-  if (appType === "claude" || appType === "claude-desktop") return extractClaude(base, parsed);
+  if (appType === "grokbuild") return extractCodex(base, parsed);
+  if (appType === "claude") return extractClaude(base, parsed);
+  if (appType === "claude-desktop") return extractClaudeDesktop(base, parsed);
   if (appType === "opencode") return extractOpencode(base, parsed);
+  if (appType === "gemini") return extractGemini(base, parsed);
+  if (appType === "hermes") return extractHermes(base, parsed);
+  if (appType === "pi") return extractPi(base, parsed);
+  if (appType === "mcode") return extractMcode(base, parsed);
+  if (appType === "openclaw") return extractOpenclaw(base, parsed);
   return { ...base, blocked: true, blockedReason: `\u4E0D\u652F\u6301\u7684 app_type\uFF1A${appType}`, blockedCode: BLOCKED.UNSUPPORTED_APP_TYPE, blockedDetail: appType };
 }
 function extractCodex(base, parsed) {
@@ -683,6 +771,12 @@ function extractCodex(base, parsed) {
     unsupported: []
   };
 }
+function claudeModels(env, profileName, warnings) {
+  if (asText(env?.ANTHROPIC_MODEL) !== void 0) return [env.ANTHROPIC_MODEL];
+  warnings.push(`claude \u914D\u7F6E\u4E2D\u6CA1\u6709\u6A21\u578B\u5B57\u6BB5\uFF0C\u5DF2\u56DE\u9000\u4E3A ${DEFAULT_CLAUDE_MODEL}\uFF0C\u5BFC\u5165\u540E\u53EF\u5728 DSH \u4E2D\u4FEE\u6539`);
+  if (/thinking/i.test(profileName)) return [{ id: DEFAULT_CLAUDE_MODEL, fallbackThinking: true }];
+  return [DEFAULT_CLAUDE_MODEL];
+}
 function extractClaude(base, parsed) {
   const { profileName } = base;
   const env = (parsed && typeof parsed === "object" ? parsed.env : void 0) ?? {};
@@ -690,24 +784,45 @@ function extractClaude(base, parsed) {
   if (apiKey === void 0) {
     return { ...base, blocked: true, blockedReason: "\u672A\u627E\u5230 API key\uFF08env.ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY \u7F3A\u5931\uFF09", blockedCode: BLOCKED.MISSING_ANTHROPIC_KEY };
   }
-  const baseURL = typeof env.ANTHROPIC_BASE_URL === "string" && env.ANTHROPIC_BASE_URL.length > 0 ? env.ANTHROPIC_BASE_URL : void 0;
+  const baseURL = asText(env.ANTHROPIC_BASE_URL);
   if (baseURL === void 0) {
     return { ...base, blocked: true, blockedReason: "\u672A\u627E\u5230 base URL\uFF08env.ANTHROPIC_BASE_URL \u7F3A\u5931\uFF09", blockedCode: BLOCKED.MISSING_ANTHROPIC_BASE_URL };
   }
   const warnings = [];
-  let model = typeof env.ANTHROPIC_MODEL === "string" && env.ANTHROPIC_MODEL.length > 0 ? env.ANTHROPIC_MODEL : DEFAULT_CLAUDE_MODEL;
-  if (!env.ANTHROPIC_MODEL) {
-    warnings.push(`claude \u914D\u7F6E\u4E2D\u6CA1\u6709\u6A21\u578B\u5B57\u6BB5\uFF0C\u5DF2\u56DE\u9000\u4E3A ${DEFAULT_CLAUDE_MODEL}\uFF0C\u5BFC\u5165\u540E\u53EF\u5728 DSH \u4E2D\u4FEE\u6539`);
-    if (/thinking/i.test(profileName)) {
-      model = { id: DEFAULT_CLAUDE_MODEL, fallbackThinking: true };
-    }
-  }
   return {
     ...base,
     apiKey,
     baseURL,
     api: "anthropic-messages",
-    models: [model],
+    models: claudeModels(env, profileName, warnings),
+    modelReasoningEffort: void 0,
+    warnings,
+    unsupported: []
+  };
+}
+function extractClaudeDesktop(base, parsed) {
+  const source = parsed && typeof parsed === "object" ? parsed : {};
+  const env = source.env && typeof source.env === "object" ? source.env : {};
+  const namedField = source.apiKeyField === "ANTHROPIC_AUTH_TOKEN" || source.apiKeyField === "ANTHROPIC_API_KEY" ? source.apiKeyField : void 0;
+  const apiKey = [
+    namedField === void 0 ? void 0 : env[namedField],
+    env.ANTHROPIC_AUTH_TOKEN,
+    env.ANTHROPIC_API_KEY
+  ].find((value) => typeof value === "string" && value.length > 0);
+  if (apiKey === void 0) {
+    return { ...base, blocked: true, blockedReason: "\u672A\u627E\u5230 API key\uFF08baseUrl \u914D\u7F6E\u4E2D\u7F3A\u5C11 ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY\uFF09", blockedCode: BLOCKED.MISSING_CLAUDE_DESKTOP_KEY };
+  }
+  const baseURL = asText(source.baseUrl) ?? asText(env.ANTHROPIC_BASE_URL);
+  if (baseURL === void 0) {
+    return { ...base, blocked: true, blockedReason: "\u672A\u627E\u5230 base URL\uFF08\u7F3A\u5C11\u9876\u7EA7 baseUrl \u4E0E env.ANTHROPIC_BASE_URL\uFF09", blockedCode: BLOCKED.MISSING_CLAUDE_DESKTOP_BASE_URL };
+  }
+  const warnings = [];
+  return {
+    ...base,
+    apiKey,
+    baseURL,
+    api: "anthropic-messages",
+    models: claudeModels(env, base.profileName, warnings),
     modelReasoningEffort: void 0,
     warnings,
     unsupported: []
@@ -715,11 +830,11 @@ function extractClaude(base, parsed) {
 }
 function extractOpencode(base, parsed) {
   const options = (parsed && typeof parsed === "object" ? parsed.options : void 0) ?? {};
-  const apiKey = typeof options.apiKey === "string" && options.apiKey.length > 0 ? options.apiKey : void 0;
+  const apiKey = asText(options.apiKey);
   if (apiKey === void 0) {
     return { ...base, blocked: true, blockedReason: "\u672A\u627E\u5230 API key\uFF08options.apiKey \u7F3A\u5931\uFF09", blockedCode: BLOCKED.MISSING_OPENCODE_KEY };
   }
-  const baseURL = typeof options.baseURL === "string" && options.baseURL.length > 0 ? options.baseURL : void 0;
+  const baseURL = asText(options.baseURL);
   if (baseURL === void 0) {
     return { ...base, blocked: true, blockedReason: "\u672A\u627E\u5230 base URL\uFF08options.baseURL \u7F3A\u5931\uFF09", blockedCode: BLOCKED.MISSING_OPENCODE_BASE_URL };
   }
@@ -728,15 +843,12 @@ function extractOpencode(base, parsed) {
     return { ...base, blocked: true, blockedReason: `\u6682\u4E0D\u652F\u6301\u7684 opencode \u9002\u914D\u5668\uFF1A${npm || "\u672A\u77E5"}\uFF08\u4EC5 @ai-sdk/openai-compatible\uFF09`, blockedCode: BLOCKED.UNSUPPORTED_OPENCODE_ADAPTER, blockedDetail: npm || "unknown" };
   }
   const warnings = [];
-  const rawModels = (parsed && typeof parsed === "object" ? parsed.models : void 0) ?? {};
-  const models = Object.entries(rawModels).filter(([id]) => typeof id === "string" && id.length > 0).map(([id, meta]) => {
-    const name2 = meta && typeof meta === "object" && typeof meta.name === "string" ? meta.name : void 0;
-    return name2 ? { id, name: name2 } : { id };
-  });
-  if (models.length === 0) {
-    models.push({ id: DEFAULT_OPENCODE_MODEL });
-    warnings.push(`opencode \u914D\u7F6E\u4E2D\u6CA1\u6709\u6A21\u578B\u5217\u8868\uFF0C\u5DF2\u56DE\u9000\u4E3A ${DEFAULT_OPENCODE_MODEL}\uFF0C\u5BFC\u5165\u540E\u53EF\u5728 DSH \u4E2D\u4FEE\u6539`);
-  }
+  const models = withModelFallback(
+    modelsFromMap(parsed && typeof parsed === "object" ? parsed.models : void 0),
+    DEFAULT_OPENCODE_MODEL,
+    "opencode",
+    warnings
+  );
   return {
     ...base,
     apiKey,
@@ -748,12 +860,185 @@ function extractOpencode(base, parsed) {
     unsupported: []
   };
 }
+function extractGemini(base, parsed) {
+  const env = (parsed && typeof parsed === "object" ? parsed.env : void 0) ?? {};
+  const apiKey = [env.GEMINI_API_KEY, env.GOOGLE_API_KEY].find((value) => typeof value === "string" && value.length > 0);
+  const baseURL = asText(env.GOOGLE_GEMINI_BASE_URL);
+  const warnings = [];
+  const models = withModelFallback(
+    asText(env.GEMINI_MODEL) === void 0 ? [] : [{ id: env.GEMINI_MODEL }],
+    DEFAULT_GEMINI_MODEL,
+    "gemini",
+    warnings
+  );
+  let host = "";
+  if (baseURL !== void 0) {
+    try {
+      host = new URL(baseURL).host;
+    } catch {
+      host = "";
+    }
+  }
+  return {
+    ...base,
+    apiKey,
+    baseURL: baseURL ?? "",
+    api: void 0,
+    models,
+    modelReasoningEffort: void 0,
+    warnings,
+    unsupported: [],
+    blocked: true,
+    blockedReason: "Gemini CLI \u4F7F\u7528 Gemini \u539F\u751F\u534F\u8BAE\uFF0CDSH \u7684 llm-pi-ai \u6CA1\u6709\u5BF9\u5E94\u9002\u914D\u5668\uFF0C\u5BFC\u5165\u540E\u4F1A\u5F97\u5230\u4E00\u4E2A\u65E0\u6CD5\u5E94\u7B54\u7684 provider\u3002\u8BF7\u6539\u7528 OpenAI \u517C\u5BB9\u7684 Gemini \u4E2D\u8F6C\uFF08Base URL + API Key\uFF09\u5E76\u628A\u5B83\u586B\u6210 openai-completions\u3002",
+    blockedCode: BLOCKED.UNSUPPORTED_GEMINI_PROTOCOL,
+    blockedDetail: host
+  };
+}
+function extractHermes(base, parsed) {
+  const source = parsed && typeof parsed === "object" ? parsed : {};
+  const apiKey = asText(source.api_key);
+  if (apiKey === void 0) {
+    return { ...base, blocked: true, blockedReason: "\u672A\u627E\u5230 API key\uFF08api_key \u7F3A\u5931\uFF09", blockedCode: BLOCKED.MISSING_HERMES_KEY };
+  }
+  const baseURL = asText(source.base_url);
+  if (baseURL === void 0) {
+    return { ...base, blocked: true, blockedReason: "\u672A\u627E\u5230 base URL\uFF08base_url \u7F3A\u5931\uFF09", blockedCode: BLOCKED.MISSING_HERMES_BASE_URL };
+  }
+  const warnings = [];
+  const apiMode = asText(source.api_mode);
+  let api = HERMES_API_MODES[apiMode];
+  if (api === void 0) {
+    warnings.push(`\u672A\u77E5 api_mode "${apiMode ?? "\u7F3A\u5931"}"\uFF0C\u6309 openai-completions \u5904\u7406`);
+    api = "openai-completions";
+  }
+  return {
+    ...base,
+    apiKey,
+    baseURL,
+    api,
+    models: withModelFallback(modelsFromArray(source.models, { withContextLength: true }), DEFAULT_HERMES_MODEL, "hermes", warnings),
+    modelReasoningEffort: void 0,
+    warnings,
+    unsupported: []
+  };
+}
+function extractPi(base, parsed) {
+  const source = parsed && typeof parsed === "object" ? parsed : {};
+  const apiKey = asText(source.apiKey);
+  if (apiKey === void 0) {
+    return { ...base, blocked: true, blockedReason: "\u672A\u627E\u5230 API key\uFF08apiKey \u7F3A\u5931\uFF09", blockedCode: BLOCKED.MISSING_PI_KEY };
+  }
+  const baseURL = asText(source.baseUrl);
+  if (baseURL === void 0) {
+    return { ...base, blocked: true, blockedReason: "\u672A\u627E\u5230 base URL\uFF08baseUrl \u7F3A\u5931\uFF09", blockedCode: BLOCKED.MISSING_PI_BASE_URL };
+  }
+  const api = asText(source.api);
+  if (api === void 0 || !DSH_PROTOCOLS.has(api)) {
+    return {
+      ...base,
+      blocked: true,
+      blockedReason: `pi \u7684 api "${api ?? "\u7F3A\u5931"}" \u4E0D\u662F DSH \u652F\u6301\u7684\u534F\u8BAE\uFF08\u4EC5 ${protocolsLabel()}\uFF09`,
+      blockedCode: BLOCKED.UNSUPPORTED_PI_API,
+      blockedDetail: api ?? "unknown"
+    };
+  }
+  const warnings = [];
+  return {
+    ...base,
+    apiKey,
+    baseURL,
+    api,
+    models: withModelFallback(modelsFromArray(source.models), DEFAULT_PI_MODEL, "pi", warnings),
+    modelReasoningEffort: void 0,
+    warnings,
+    unsupported: []
+  };
+}
+function extractMcode(base, parsed) {
+  const source = parsed && typeof parsed === "object" ? parsed : {};
+  const options = source.options && typeof source.options === "object" ? source.options : {};
+  const apiKey = asText(options.apiKey);
+  if (apiKey === void 0) {
+    return { ...base, blocked: true, blockedReason: "\u672A\u627E\u5230 API key\uFF08options.apiKey \u7F3A\u5931\uFF09", blockedCode: BLOCKED.MISSING_MCODE_KEY };
+  }
+  const baseURL = asText(options.baseURL);
+  if (baseURL === void 0) {
+    return { ...base, blocked: true, blockedReason: "\u672A\u627E\u5230 base URL\uFF08options.baseURL \u7F3A\u5931\uFF09", blockedCode: BLOCKED.MISSING_MCODE_BASE_URL };
+  }
+  const api = asText(source.api);
+  if (api === void 0 || !DSH_PROTOCOLS.has(api)) {
+    return {
+      ...base,
+      blocked: true,
+      blockedReason: `mcode \u7684 api "${api ?? "\u7F3A\u5931"}" \u4E0D\u662F DSH \u652F\u6301\u7684\u534F\u8BAE\uFF08\u4EC5 ${protocolsLabel()}\uFF09`,
+      blockedCode: BLOCKED.UNSUPPORTED_MCODE_API,
+      blockedDetail: api ?? "unknown"
+    };
+  }
+  const warnings = [];
+  return {
+    ...base,
+    apiKey,
+    baseURL,
+    api,
+    models: withModelFallback(modelsFromMap(source.models), DEFAULT_MCODE_MODEL, "mcode", warnings),
+    modelReasoningEffort: void 0,
+    warnings,
+    unsupported: []
+  };
+}
+function extractOpenclaw(base, parsed) {
+  const source = parsed && typeof parsed === "object" ? parsed : {};
+  const apiKey = asText(source.apiKey);
+  if (apiKey === void 0) {
+    return { ...base, blocked: true, blockedReason: "\u672A\u627E\u5230 API key\uFF08apiKey \u7F3A\u5931\uFF09", blockedCode: BLOCKED.MISSING_OPENCLAW_KEY };
+  }
+  const baseURL = asText(source.baseUrl);
+  if (baseURL === void 0) {
+    return { ...base, blocked: true, blockedReason: "\u672A\u627E\u5230 base URL\uFF08baseUrl \u7F3A\u5931\uFF09", blockedCode: BLOCKED.MISSING_OPENCLAW_BASE_URL };
+  }
+  const api = asText(source.api);
+  if (api === void 0 || !DSH_PROTOCOLS.has(api)) {
+    return {
+      ...base,
+      blocked: true,
+      blockedReason: `openclaw \u7684 api "${api ?? "\u7F3A\u5931"}" \u4E0D\u662F DSH \u652F\u6301\u7684\u534F\u8BAE\uFF08\u4EC5 ${protocolsLabel()}\uFF09`,
+      blockedCode: BLOCKED.UNSUPPORTED_OPENCLAW_API,
+      blockedDetail: api ?? "unknown"
+    };
+  }
+  const warnings = [];
+  return {
+    ...base,
+    apiKey,
+    baseURL,
+    api,
+    models: withModelFallback(modelsFromArray(source.models), DEFAULT_OPENCLAW_MODEL, "openclaw", warnings),
+    modelReasoningEffort: void 0,
+    warnings,
+    unsupported: []
+  };
+}
 
 // lib/core/scan.js
 var DEFAULT_DB_CANDIDATES = [
   () => join(homedir(), ".cc-switch", "cc-switch.db")
 ];
-var SUPPORTED_APP_TYPES = ["codex", "claude", "claude-desktop", "opencode"];
+var SUPPORTED_APP_TYPES = [
+  "codex",
+  "claude",
+  "claude-desktop",
+  "opencode",
+  // Added in 4.0.4. `gemini` and `grokbuild` are scanned even though gemini is
+  // always blocked downstream: the row still has to appear so the user learns
+  // why it cannot come across, instead of it silently vanishing from the list.
+  "gemini",
+  "hermes",
+  "grokbuild",
+  "pi",
+  "mcode",
+  "openclaw"
+];
 var SCAN_REASON = {
   NOT_INSTALLED: "not-installed",
   NO_PROFILES: "no-profiles",

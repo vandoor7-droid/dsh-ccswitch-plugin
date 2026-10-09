@@ -38,14 +38,32 @@ function badgeClass(status) {
  * variable detail. Keeping the Chinese strings here as fallbacks means the row
  * still explains itself when the Host translator is unavailable, and the codes
  * stay the single source of truth for which reason is which.
+ *
+ * Exported so a test can assert every code in `BLOCKED_CODES` has an entry:
+ * this map is the one place a new code can silently degrade to the generic
+ * message, and nothing at runtime reports the omission.
  */
-const BLOCKED_FALLBACK = {
+export const BLOCKED_FALLBACK = {
   'invalid-settings-json': '设置内容不是合法 JSON',
   'unsupported-app-type': '不支持的 app 类型：{detail}',
   'missing-openai-key': '缺少 API key（auth.OPENAI_API_KEY）',
   'missing-codex-provider': 'config 里没有可用的 [model_providers.custom] 段',
   'missing-anthropic-key': '缺少 API key（env.ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY）',
   'missing-anthropic-base-url': '缺少 base URL（env.ANTHROPIC_BASE_URL）',
+  'missing-claude-desktop-key': '缺少 API key（env.ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY）',
+  'missing-claude-desktop-base-url': '缺少 base URL（顶级 baseUrl 与 env.ANTHROPIC_BASE_URL 都没有）',
+  'unsupported-gemini-protocol': 'Gemini CLI 使用原生协议，DSH 没有对应适配器：{detail}；请改用 OpenAI 兼容的 Gemini 中转',
+  'missing-hermes-key': '缺少 API key（api_key）',
+  'missing-hermes-base-url': '缺少 base URL（base_url）',
+  'missing-pi-key': '缺少 API key（apiKey）',
+  'missing-pi-base-url': '缺少 base URL（baseUrl）',
+  'unsupported-pi-api': 'pi 的 api 不是 DSH 支持的协议：{detail}',
+  'missing-mcode-key': '缺少 API key（options.apiKey）',
+  'missing-mcode-base-url': '缺少 base URL（options.baseURL）',
+  'unsupported-mcode-api': 'mcode 的 api 不是 DSH 支持的协议：{detail}',
+  'missing-openclaw-key': '缺少 API key（apiKey）',
+  'missing-openclaw-base-url': '缺少 base URL（baseUrl）',
+  'unsupported-openclaw-api': 'openclaw 的 api 不是 DSH 支持的协议：{detail}',
   'missing-opencode-key': '缺少 API key（options.apiKey）',
   'missing-opencode-base-url': '缺少 base URL（options.baseURL）',
   'unsupported-opencode-adapter': '暂不支持的 opencode 适配器：{detail}',

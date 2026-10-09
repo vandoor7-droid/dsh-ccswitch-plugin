@@ -74,7 +74,10 @@ test('scanProfiles includes codex and claude rows, excludes other app_types', ()
   const { dir, dbPath } = makeDb([
     { id: 'c-1', name: 'ClaudeP', settings_config: JSON.stringify({ env: { ANTHROPIC_AUTH_TOKEN: 'sk-c', ANTHROPIC_BASE_URL: 'https://c.example' } }), app_type: 'claude' },
     { id: 'x-1', name: 'CodexP', settings_config: JSON.stringify({ auth: { OPENAI_API_KEY: 'sk-x' }, config: VALID_TOML }) },
-    { id: 'g-1', name: 'GeminiP', settings_config: '{}', app_type: 'gemini' },
+    // A CC Switch app type this importer does not know at all. `gemini` used to
+    // stand in here, but it is a known app type now: it is scanned and blocked
+    // downstream with a reason, which is covered in extract-app-types.test.js.
+    { id: 'u-1', name: 'CursorP', settings_config: '{}', app_type: 'cursor' },
   ])
   try {
     const profiles = scanProfiles(dbPath)

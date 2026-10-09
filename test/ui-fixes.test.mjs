@@ -12,6 +12,7 @@ import { BLOCKED, BLOCKED_CODES } from '../lib/core/safety.js'
 import { extractProfile } from '../lib/core/extract.js'
 import { MESSAGES } from '../src/client/messages.mjs'
 import { createCCSwitchImportController } from '../src/client/import-controller.mjs'
+import { BLOCKED_FALLBACK } from '../src/ui/CCSwitchImportSection.mjs'
 import { makeRoutes } from '../src/host/routes.mjs'
 
 const root = new URL('../', import.meta.url)
@@ -84,9 +85,12 @@ function postImport(body) {
 const BLOCKED_CASES = [
   [
     'unsupported app type',
-    { id: 'g-1', name: 'G', app_type: 'gemini', settings_config: '{"env":{},"config":{}}' },
+    // `gemini` used to stand in here. It is a known app type now — scanned,
+    // and blocked on protocol grounds with its own code — so this case uses an
+    // app type the importer genuinely does not know.
+    { id: 'u-1', name: 'U', app_type: 'cursor', settings_config: '{"env":{},"config":{}}' },
     BLOCKED.UNSUPPORTED_APP_TYPE,
-    'gemini',
+    'cursor',
   ],
   [
     'settings_config that is not JSON',
@@ -216,6 +220,19 @@ test('every blocked code has a translation, including the ones the UI builds dyn
   }
 })
 
+test('the UI fallback covers every blocked code', () => {
+  // BLOCKED_FALLBACK is the last resort when the Host translator is unavailable.
+  // A code missing from it does not fail loudly — the row just falls back to the
+  // generic "该配置无法导入" and the user loses the specific reason. The message
+  // catalogue is asserted above; this covers the other half.
+  const missing = [...BLOCKED_CODES].filter((code) => !Object.hasOwn(BLOCKED_FALLBACK, code))
+  assert.deepEqual(missing, [])
+  // A code that embeds a variable part must interpolate it here too.
+  for (const code of [BLOCKED.UNSUPPORTED_APP_TYPE, BLOCKED.UNSUPPORTED_OPENCODE_ADAPTER, BLOCKED.UNSUPPORTED_GEMINI_PROTOCOL, BLOCKED.UNSUPPORTED_PI_API, BLOCKED.UNSUPPORTED_MCODE_API, BLOCKED.UNSUPPORTED_OPENCLAW_API]) {
+    assert.match(BLOCKED_FALLBACK[code], /\{detail\}/, `${code} lost {detail}`)
+  }
+})
+
 // --- the host passes the code through, whitelisted ------------------------
 
 // A realistic blocked row for the codes that carry no variable part.
@@ -234,13 +251,13 @@ test('scan exposes the blocked code and detail', async () => {
 })
 
 test('scan carries the variable part of a blocked reason as detail', async () => {
-  const row = { id: 'g-1', name: 'G', app_type: 'gemini', settings_config: '{"env":{},"config":{}}' }
+  const row = { id: 'u-1', name: 'U', app_type: 'cursor', settings_config: '{"env":{},"config":{}}' }
   const route = scanRoute(async () => [extractProfile(row)])
   const res = fakeRes()
   await route.handler(fakeReq(), res)
   const profile = bodyOf(res).profiles[0]
   assert.equal(profile.blockedCode, BLOCKED.UNSUPPORTED_APP_TYPE)
-  assert.equal(profile.blockedDetail, 'gemini')
+  assert.equal(profile.blockedDetail, 'cursor')
 })
 
 test('an unknown blocked code degrades to the generic one', async () => {
