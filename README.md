@@ -1,6 +1,6 @@
 # DSH CC Switch 管理器
 
-将 CC Switch 里的 Codex、Claude、Claude Desktop 与 OpenCode provider 导入 DeepSeek Harness，并在同一个「设置 -> 模型」页面管理每个模型的推理深度。
+将 CC Switch 里的 Codex、Claude、Claude Desktop、OpenCode、Gemini、Hermes、Grok Build、Pi、MCode 与 OpenClaw provider 导入 DeepSeek Harness，并在同一个「设置 -> 模型」页面管理每个模型的推理深度。
 
 [English README](./README.en.md)
 
@@ -8,7 +8,7 @@
 
 ## 功能
 
-- 只读扫描 `~/.cc-switch/cc-switch.db`，识别自定义 **Codex**、**Claude**、**Claude Desktop** 与 **OpenCode** provider；官方和默认 profile 会跳过。
+- 只读扫描 `~/.cc-switch/cc-switch.db`，识别 CC Switch 4.0.4 的全部十种自定义 provider：**Codex**、**Claude**、**Claude Desktop**、**OpenCode**、**Gemini**、**Hermes**、**Grok Build**、**Pi**、**MCode** 与 **OpenClaw**；官方和默认 profile 会跳过。其中 **Gemini** 一定会被标记为不可导入——Gemini CLI 走 Google 原生协议，DSH 的 `llm-pi-ai` 没有对应适配器——该行会说明原因并给出它本应指向的端点。
 - 将 endpoint、协议、模型 ID 和 API key 导入 DSH 的 `llm-pi-ai` 设置。
 - API key 只在 Host 进程中读取，并通过 DSH credentials 服务保存为 `apiKeyEnv` 引用；扫描和导入响应不包含 key。
 - 从 Codex TOML 顶层 `model_reasoning_effort` 预填模型推理配置，同时允许之后在 DSH 中修改。
@@ -76,7 +76,7 @@ DSH_CATALOG_ORIGIN=https://catalog.example.com npm run build:catalog
 
 - Host 路由只接受 loopback、same-origin 请求；API key 不进入浏览器、日志、摘要或错误文本。
 - 读取需要 Node.js 22.19 或更高版本，以支持只读 SQLite API。
-- 插件只处理 CCSwitch 的自定义 Codex / Claude / Claude Desktop / OpenCode provider 和当前数据库字段；「测试连接」先请求 `{baseURL}/models`（免费、不发推理请求），只有当上游不提供模型列表（`401`/`403`/`404`/`405`/`501`）时，才对该 provider 真正使用的端点补发一次 **1 token** 的最小请求，用于区分「中转站不暴露 `/models`」与「凭据确实无效」。它不写入任何设置，失败时会把上游自己的错误原文（脱敏后）一并显示。
+- 插件只处理 CCSwitch 的自定义 Codex / Claude / Claude Desktop / OpenCode / Gemini / Hermes / Grok Build / Pi / MCode / OpenClaw provider 和当前数据库字段；「测试连接」先请求 `{baseURL}/models`（免费、不发推理请求），只有当上游不提供模型列表（`401`/`403`/`404`/`405`/`501`）时，才对该 provider 真正使用的端点补发一次 **1 token** 的最小请求，用于区分「中转站不暴露 `/models`」与「凭据确实无效」。它不写入任何设置，失败时会把上游自己的错误原文（脱敏后）一并显示。
 - 未知模型和不合法等级默认关闭，避免向网关发送未确认的 reasoning 参数。
 
 ## 与 dsh-ccswitch-importer-plus 的差异
@@ -98,7 +98,7 @@ DSH_CATALOG_ORIGIN=https://catalog.example.com npm run build:catalog
 
 - peer 依赖改为 `^0.2.0-rc.2`，移除 0.2.0 已废弃的 `@deepseek-ai/dsh-client-runtime` 注入。
 - 适配 0.2.0 的 `{ ok, value }` 远端信封与 `settings.describe()` 命名空间视图。
-- 导入源从 Codex 扩展到 Codex、Claude、Claude Desktop 与 OpenCode。
+- 导入源从 Codex 扩展到 CC Switch 4.0.4 的全部十种 app_type（Codex / Claude / Claude Desktop / OpenCode / Gemini / Hermes / Grok Build / Pi / MCode / OpenClaw）。
 - 新增模型目录回退、模型探测（probe）与 loopback 错误透出。
 - 插件挂载到原生「模型」页面底部的 footer 槽位，与原生 UI 共存。
 

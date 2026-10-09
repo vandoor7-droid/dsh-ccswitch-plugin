@@ -1,6 +1,6 @@
 # DSH CC Switch Manager
 
-Import CC Switch Codex, Claude, Claude Desktop, and OpenCode providers into DeepSeek Harness and manage per-model reasoning depth on the same **Settings -> Models** page.
+Import CC Switch Codex, Claude, Claude Desktop, OpenCode, Gemini, Hermes, Grok Build, Pi, MCode, and OpenClaw providers into DeepSeek Harness and manage per-model reasoning depth on the same **Settings -> Models** page.
 
 [中文 README](./README.md)
 
@@ -8,7 +8,7 @@ Import CC Switch Codex, Claude, Claude Desktop, and OpenCode providers into Deep
 
 ## Features
 
-- Read-only scanning of `~/.cc-switch/cc-switch.db` for custom **Codex**, **Claude**, **Claude Desktop**, and **OpenCode** providers; official and default profiles are skipped.
+- Read-only scanning of `~/.cc-switch/cc-switch.db` for all ten custom provider kinds CC Switch 4.0.4 writes: **Codex**, **Claude**, **Claude Desktop**, **OpenCode**, **Gemini**, **Hermes**, **Grok Build**, **Pi**, **MCode**, and **OpenClaw**. Official and default profiles are skipped. **Gemini** is always reported as unimportable — the Gemini CLI speaks Google's native protocol and DSH's `llm-pi-ai` has no adapter for it — and the row names the endpoint it would have used.
 - Imports endpoints, protocol, model IDs, and API keys into DSH’s `llm-pi-ai` settings.
 - Reads API keys only in the Host process and stores them through DSH credentials as an `apiKeyEnv` reference; scan and import responses are redacted.
 - Prefills reasoning from the top-level Codex TOML field `model_reasoning_effort` while keeping all values editable in DSH.
@@ -76,7 +76,7 @@ DSH_CATALOG_ORIGIN=https://catalog.example.com npm run build:catalog
 
 - Host routes accept only loopback, same-origin requests; API keys never enter the browser, logs, summaries, or error text.
 - Reading requires Node.js 22.19 or newer for the read-only SQLite API.
-- The plugin handles custom CCSwitch Codex / Claude / Claude Desktop / OpenCode providers and the fields currently present in the database. "Test connection" first calls `{baseURL}/models` (free, no inference); only when the upstream does not expose a model list (`401`/`403`/`404`/`405`/`501`) does it send one **1-token** request to the endpoint the provider really uses, to tell "this relay hides `/models`" apart from "this key is genuinely invalid". It writes nothing, and on failure it shows the upstream's own error text (redacted).
+- The plugin handles custom CCSwitch Codex / Claude / Claude Desktop / OpenCode / Gemini / Hermes / Grok Build / Pi / MCode / OpenClaw providers and the fields currently present in the database. "Test connection" first calls `{baseURL}/models` (free, no inference); only when the upstream does not expose a model list (`401`/`403`/`404`/`405`/`501`) does it send one **1-token** request to the endpoint the provider really uses, to tell "this relay hides `/models`" apart from "this key is genuinely invalid". It writes nothing, and on failure it shows the upstream's own error text (redacted).
 - Unknown models and invalid levels default to disabled reasoning to avoid sending unconfirmed parameters to a gateway.
 
 ## Differences from upstream
@@ -87,7 +87,7 @@ Relative to [wtiaw/dsh-ccswitch-importer](https://github.com/wtiaw/dsh-ccswitch-
 
 - Peer dependencies moved to `^0.2.0-rc.2`; the `@deepseek-ai/dsh-client-runtime` injection dropped in 0.2.0 was removed.
 - Adapted to the 0.2.0 `{ ok, value }` remote envelope and the `settings.describe()` namespace view.
-- Import sources expanded from Codex to Codex, Claude, Claude Desktop, and OpenCode.
+- Import sources expanded from Codex to all ten CC Switch 4.0.4 app types (Codex / Claude / Claude Desktop / OpenCode / Gemini / Hermes / Grok Build / Pi / MCode / OpenClaw).
 - Added a model-catalog fallback, model probing, and loopback error surfacing.
 - Mounts into the native Models page footer slot and coexists with the built-in UI.
 
