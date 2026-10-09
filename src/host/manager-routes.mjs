@@ -28,8 +28,11 @@
 import {
   CCS_API_PROTOCOLS,
   activateCCSProvider,
+  currentKeysByApp,
+  effectiveAppType,
   emptyCCSProvider,
   normalizeCCSProvider,
+  orderProviders,
   validateCCSProvider,
 } from '../domain/ccs-provider.mjs'
 import { credentialRefForProviderKey, newProviderKey } from '../../lib/core/ids.js'
@@ -81,10 +84,17 @@ async function readCatalogue(settings) {
   }
 }
 
-/** The key of the provider marked current, if any. */
-function currentKeyOf(providers) {
-  const found = Object.entries(providers).find(([, provider]) => provider?.isCurrent === true)
-  return found === undefined ? undefined : found[0]
+/**
+ * The key of the provider marked current, optionally within one app type.
+ *
+ * With an app type this answers CC Switch's `get_current_provider(app_type)`;
+ * without one it answers "is anything active at all", which is what the list
+ * route reports as `current` for callers that predate the per-app model.
+ */
+function currentKeyOf(providers, appType) {
+  const current = currentKeysByApp(providers)
+  if (typeof appType === 'string' && appType !== '') return current[appType]
+  return Object.values(current)[0]
 }
 
 /**
@@ -251,7 +261,8 @@ export function makeManagerRoutes(deps = {}) {
         if (!methodFence(request, response, isLoopback, 'GET')) return
         try {
           const { providers, revision, exists } = await readCatalogue(settings)
-          const order = Object.keys(providers)
+          // CC Switch's own row order, not the document's insertion order.
+          const order = orderProviders(providers)
           const entries = await Promise.all(
             order.map(async (key) => [
               key,
@@ -262,7 +273,11 @@ export function makeManagerRoutes(deps = {}) {
             exists,
             revision,
             order,
+            // Which provider is active is only answerable per app (CC Switch's
+            // `is_current` is a per-app singleton), so the map is the real
+            // answer. `current` stays for a browser half that predates it.
             current: currentKeyOf(providers),
+            currentByApp: currentKeysByApp(providers),
             providers: Object.fromEntries(entries),
             apiProtocols: [...CCS_API_PROTOCOLS],
           })
@@ -310,7 +325,20 @@ export function makeManagerRoutes(deps = {}) {
               throw Object.assign(new Error('too many providers'), { code: 'TOO_MANY' })
             }
             const apiKeyEnv = credentialRefForProviderKey(key)
+            const existingRecord = existingKey === undefined ? undefined : providers[existingKey]
             const record = { ...draft, apiKeyEnv }
+            // Ordering metadata belongs to the catalogue, not to the form: the
+            // edit form rebuilds a provider from its editable fields and
+            // carries none of it, so taking the draft at face value would
+            // silently reset a provider's position — and its creation time —
+            // on every edit. A brand-new provider is stamped now and takes the
+            // last position, which is where CC Switch puts one too.
+            if (record.sortIndex === undefined && existingRecord?.sortIndex !== undefined) {
+              record.sortIndex = existingRecord.sortIndex
+            }
+            if (record.createdAt === undefined) {
+              record.createdAt = existingRecord?.createdAt ?? Date.now()
+            }
             // The secret is written first and the reference second. The other
             // order would leave the document naming a credential that does not
             // exist yet, which reads as "configured" in the UI while every
@@ -365,7 +393,12 @@ export function makeManagerRoutes(deps = {}) {
             // thing that rewrites it, so removing the row would leave those
             // files naming a provider this plugin can no longer switch away
             // from.
-            if (currentKeyOf(providers) === body.key) return { active: true }
+            // The row's OWN app type decides this, matching CC Switch, whose
+            // `is_referenced` check is scoped to `app_type`. A global test
+            // would refuse to delete a Claude provider merely because some
+            // Codex provider happened to be the active one.
+            const deleted = providers[body.key]
+            if (currentKeyOf(providers, effectiveAppType(deleted)) === body.key) return { active: true }
             const ref = providers[body.key]?.apiKeyEnv
             await settings.mutate(
               MANAGER_NAMESPACE,
@@ -490,6 +523,63 @@ export function makeManagerRoutes(deps = {}) {
           console.error('[dsh-ccswitch-plugin] manager activate failed:', redactText(err))
           writeJson(response, conflict ? 409 : 500, {
             error: conflict ? 'the settings document changed; reload and retry' : 'could not activate the provider',
+          })
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: `${MANAGER_API_BASE}/providers/reorder`,
+      handler: async (request, response) => {
+        if (!methodFence(request, response, isLoopback, 'POST', { requireSameOrigin: true })) return
+        const body = await readJsonBody(request)
+        // The complete new order, not a list of moves. CC Switch's
+        // `update_providers_sort_order` takes explicit per-row indices, which
+        // lets a caller send a half-applied order and leaves the rows it did
+        // not name interleaved with the ones it did. A drag produces a whole
+        // order anyway, and requiring it makes "the list the user sees" and
+        // "the order that gets written" the same list by construction.
+        if (!isRecord(body) || !Array.isArray(body.keys) || body.keys.some((key) => typeof key !== 'string' || key === '')) {
+          writeJson(response, 400, { error: 'body must be { keys: string[] }' })
+          return
+        }
+        const requested = body.keys
+        if (new Set(requested).size !== requested.length) {
+          writeJson(response, 400, { error: 'keys must not repeat' })
+          return
+        }
+        try {
+          await serialize(async () => {
+            const { providers, revision } = await readCatalogue(settings)
+            const present = Object.keys(providers)
+            // Every key exactly once. A shorter list would leave the unnamed
+            // rows holding stale indices, so the resulting order would depend
+            // on numbers the user never saw.
+            if (requested.length !== present.length || requested.some((key) => !Object.hasOwn(providers, key))) {
+              throw Object.assign(new Error('keys must name every provider exactly once'), { code: 'NOT_PERMUTATION' })
+            }
+            const next = Object.fromEntries(
+              // Index by position, which is what CC Switch's `sort_index` is:
+              // an ordinal the list is sorted by.
+              requested.map((key, index) => [key, { ...providers[key], sortIndex: index }]),
+            )
+            await settings.mutate(
+              MANAGER_NAMESPACE,
+              [{ op: 'set', path: ['providers'], value: next }],
+              revisionOf(body) ?? revision,
+            )
+            return next
+          })
+          writeJson(response, 200, { status: 'reordered', order: requested })
+        } catch (err) {
+          if (err?.code === 'NOT_PERMUTATION') {
+            writeJson(response, 400, { error: 'keys must name every provider exactly once' })
+            return
+          }
+          const conflict = /conflict/i.test(String(err?.code ?? '')) || /conflict/i.test(String(err?.message ?? ''))
+          console.error('[dsh-ccswitch-plugin] manager reorder failed:', redactText(err))
+          writeJson(response, conflict ? 409 : 500, {
+            error: conflict ? 'the settings document changed; reload and retry' : 'could not reorder the providers',
           })
         }
       },

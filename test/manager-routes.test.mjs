@@ -365,6 +365,63 @@ test('activating one provider clears every other one', async () => {
   assert.deepEqual(applied, [['b', 'B']])
 })
 
+test('activating a Codex provider leaves the active Claude provider alone', async () => {
+  // CC Switch keeps one active provider PER APP (`set_current_provider` clears
+  // the flag `WHERE app_type = ?`), so the two pointers coexist. A single
+  // global flag would let activating a Codex provider silently deactivate the
+  // Claude provider that Claude Code is still configured to use.
+  const settings = fakeSettings({
+    'ccs-claude-11111111': { ...SAMPLE, displayName: 'Claude', appType: 'claude', isCurrent: true },
+    'ccs-codex-22222222': { ...SAMPLE, displayName: 'Codex', appType: 'codex' },
+  })
+  const routes = makeManagerRoutes({
+    settings,
+    credentials: fakeCredentials(),
+    isLoopback: () => true,
+    applyProvider: async () => [],
+  })
+  await routeOf(routes, `${MANAGER_API_BASE}/providers/activate`).handler(
+    withBody(fakeReq({ method: 'POST', headers: { host: '127.0.0.1:5624', ...POST_HEADERS } }), { key: 'ccs-codex-22222222' }),
+    fakeRes(),
+  )
+  assert.equal(settings.providers['ccs-claude-11111111'].isCurrent, true, 'the claude pointer must survive')
+  assert.equal(settings.providers['ccs-codex-22222222'].isCurrent, true)
+})
+
+test('the list reports the active provider per app type', async () => {
+  const settings = fakeSettings({
+    'ccs-claude-11111111': { ...SAMPLE, appType: 'claude', isCurrent: true },
+    'ccs-codex-22222222': { ...SAMPLE, appType: 'codex', isCurrent: true },
+  })
+  const routes = makeManagerRoutes({ settings, credentials: fakeCredentials(), isLoopback: () => true })
+  const res = fakeRes()
+  await routeOf(routes, `${MANAGER_API_BASE}/providers`).handler(
+    fakeReq({ method: 'GET', url: `${MANAGER_API_BASE}/providers`, headers: { host: '127.0.0.1:5624' } }),
+    res,
+  )
+  assert.equal(statusOf(res), 200)
+  assert.deepEqual(bodyOf(res).currentByApp, {
+    claude: 'ccs-claude-11111111',
+    codex: 'ccs-codex-22222222',
+  })
+})
+
+test('a non-active provider of another app type does not block a delete', async () => {
+  // The guard follows the row's OWN app pointer. A global test would refuse to
+  // delete any provider merely because some unrelated provider was active.
+  const settings = fakeSettings({
+    'ccs-codex-22222222': { ...SAMPLE, appType: 'codex', isCurrent: true, apiKeyEnv: 'DSH_CCSWITCH_22222222_API_KEY' },
+    'ccs-claude-11111111': { ...SAMPLE, appType: 'claude', apiKeyEnv: 'DSH_CCSWITCH_11111111_API_KEY' },
+  })
+  const routes = makeManagerRoutes({ settings, credentials: fakeCredentials(), isLoopback: () => true })
+  const res = fakeRes()
+  await routeOf(routes, `${MANAGER_API_BASE}/providers/delete`).handler(
+    withBody(fakeReq({ method: 'POST', headers: { host: '127.0.0.1:5624', ...POST_HEADERS } }), { key: 'ccs-claude-11111111' }),
+    res,
+  )
+  assert.equal(statusOf(res), 200)
+})
+
 test('a failed projection still reports the activation it did commit', async () => {
   // The catalogue write and the projection into DSH are separate steps. Once
   // the catalogue says "b is active" that is the durable fact; reporting it as
@@ -474,7 +531,101 @@ test('no route uses a dynamic path segment', () => {
     `${MANAGER_API_BASE}/providers/save`,
     `${MANAGER_API_BASE}/providers/delete`,
     `${MANAGER_API_BASE}/providers/activate`,
+    `${MANAGER_API_BASE}/providers/reorder`,
     `${MANAGER_API_BASE}/presets`,
     `${MANAGER_API_BASE}/writers/run`,
   ])
+})
+
+// --- reorder ---------------------------------------------------------------
+
+test('reordering writes the position as an index and reports the new order', async () => {
+  const settings = fakeSettings({
+    a: { ...SAMPLE, displayName: 'A', sortIndex: 0 },
+    b: { ...SAMPLE, displayName: 'B', sortIndex: 1 },
+    c: { ...SAMPLE, displayName: 'C', sortIndex: 2 },
+  })
+  const routes = makeManagerRoutes({ settings, credentials: fakeCredentials(), isLoopback: () => true })
+  const res = fakeRes()
+  await routeOf(routes, `${MANAGER_API_BASE}/providers/reorder`).handler(
+    withBody(fakeReq({ method: 'POST', headers: { host: '127.0.0.1:5624', ...POST_HEADERS } }), { keys: ['c', 'a', 'b'] }),
+    res,
+  )
+  assert.equal(statusOf(res), 200)
+  assert.deepEqual(bodyOf(res).order, ['c', 'a', 'b'])
+  // Positions are the ordinals the list is sorted by, not the keys' document
+  // order — that is what CC Switch's `sort_index` holds.
+  assert.equal(settings.providers.c.sortIndex, 0)
+  assert.equal(settings.providers.a.sortIndex, 1)
+  assert.equal(settings.providers.b.sortIndex, 2)
+})
+
+test('a partial order is refused rather than leaving stale indices behind', async () => {
+  // CC Switch's command takes per-row indices, so a caller may name only some
+  // rows. Here that would interleave the rows it named with the ones it did
+  // not, producing an order the user never saw.
+  const settings = fakeSettings({ a: { ...SAMPLE }, b: { ...SAMPLE }, c: { ...SAMPLE } })
+  const routes = makeManagerRoutes({ settings, credentials: fakeCredentials(), isLoopback: () => true })
+  const res = fakeRes()
+  await routeOf(routes, `${MANAGER_API_BASE}/providers/reorder`).handler(
+    withBody(fakeReq({ method: 'POST', headers: { host: '127.0.0.1:5624', ...POST_HEADERS } }), { keys: ['a'] }),
+    res,
+  )
+  assert.equal(statusOf(res), 400)
+  assert.equal(settings.providers.a.sortIndex, undefined, 'nothing was written')
+})
+
+test('an order naming an unknown provider, or one twice, is refused', async () => {
+  const settings = fakeSettings({ a: { ...SAMPLE }, b: { ...SAMPLE } })
+  const routes = makeManagerRoutes({ settings, credentials: fakeCredentials(), isLoopback: () => true })
+  const post = async (keys) => {
+    const res = fakeRes()
+    await routeOf(routes, `${MANAGER_API_BASE}/providers/reorder`).handler(
+      withBody(fakeReq({ method: 'POST', headers: { host: '127.0.0.1:5624', ...POST_HEADERS } }), { keys }),
+      res,
+    )
+    return statusOf(res)
+  }
+  assert.equal(await post(['a', 'ghost']), 400, 'a key that names no provider')
+  assert.equal(await post(['a', 'a']), 400, 'a repeated key')
+  assert.equal(await post(['a']), 400, 'a partial order')
+})
+
+test('editing a provider keeps the position and creation time the form cannot carry', async () => {
+  // The edit form rebuilds a provider from its editable fields and carries no
+  // ordering metadata, and this route replaces the whole record — so a save
+  // that took the draft at face value would silently reset a provider to the
+  // end of the list on every edit.
+  const settings = fakeSettings({
+    a: { ...SAMPLE, sortIndex: 3, createdAt: 111, apiKeyEnv: 'DSH_CCSWITCH_11111111_API_KEY' },
+  })
+  const routes = makeManagerRoutes({ settings, credentials: fakeCredentials(), isLoopback: () => true })
+  const res = fakeRes()
+  await routeOf(routes, `${MANAGER_API_BASE}/providers/save`).handler(
+    withBody(fakeReq({ method: 'POST', headers: { host: '127.0.0.1:5624', ...POST_HEADERS } }), {
+      key: 'a',
+      provider: { ...SAMPLE, displayName: 'Renamed' },
+    }),
+    res,
+  )
+  assert.equal(statusOf(res), 200)
+  assert.equal(settings.providers.a.displayName, 'Renamed')
+  assert.equal(settings.providers.a.sortIndex, 3, 'the position survives an edit')
+  assert.equal(settings.providers.a.createdAt, 111, 'and so does the creation time')
+})
+
+test('a brand-new provider is stamped and sorts last', async () => {
+  const settings = fakeSettings({ a: { ...SAMPLE, sortIndex: 0 } })
+  const routes = makeManagerRoutes({ settings, credentials: fakeCredentials(), isLoopback: () => true })
+  const res = fakeRes()
+  await routeOf(routes, `${MANAGER_API_BASE}/providers/save`).handler(
+    withBody(fakeReq({ method: 'POST', headers: { host: '127.0.0.1:5624', ...POST_HEADERS } }), {
+      provider: { ...SAMPLE, displayName: 'Fresh' },
+    }),
+    res,
+  )
+  assert.equal(statusOf(res), 200)
+  const created = settings.providers[bodyOf(res).key]
+  assert.ok(Number.isFinite(created.createdAt), 'a creation time is stamped')
+  assert.equal(created.sortIndex, undefined, 'and it has no position until it is ordered')
 })
