@@ -153,21 +153,34 @@ cc-switch 的类型允许四个值：`anthropic`、`openai_chat`、`openai_respo
 除上面的范围裁剪外，还有几处行为差异，都是 DSH 侧约束造成的，不是遗漏：
 
 1. **目录协议只有三种。** CC Switch 还能驱动 Gemini 原生协议、以及各家 OAuth 登录态。
-2. **活跃 provider 是全局单选。** CC Switch 是「每个 app 各有一个当前 provider」；本插件
-   目前用 `isCurrent` 表达全局唯一的一个。多 app 并存时需要改成 per-app 组。
-3. **没有代理模式。** 所以没有 `proxy_projection`、`PROXY_MANAGED` 占位符、也没有
+2. **没有代理模式。** 所以没有 `proxy_projection`、`PROXY_MANAGED` 占位符、也没有
    `stack_default` 那套别名映射。
-4. **没有模型目录生成。** CC Switch 会为 Codex 生成 `cc-switch-model-catalog.json` 并写
+3. **没有模型目录生成。** CC Switch 会为 Codex 生成 `cc-switch-model-catalog.json` 并写
    `model_catalog_json` 指针；本插件不生成目录文件。
-5. **没有 profile 覆盖检测。** CC Switch 在写入 Codex 前会检查
+4. **没有 profile 覆盖检测。** CC Switch 在写入 Codex 前会检查
    `[profiles.<name>]` 是否覆盖了选路键，覆盖时拒绝写入（因为写了也不生效）。本插件
    尚未做这项检查。
-6. **没有 failover 队列的消费方。** `inFailoverQueue`、`costMultiplier`、
+5. **没有 failover 队列的消费方。** `inFailoverQueue`、`costMultiplier`、
    `limitDailyUsd/Monthly` 字段已在 schema 里保留，但没有本地代理去消费它们，所以目前
    只是记录。
-7. **没有残留清理表。** CC Switch 维护一份「自己下发过、且留下来有害」的（键，值）冻结
+6. **没有残留清理表。** CC Switch 维护一份「自己下发过、且留下来有害」的（键，值）冻结
    列表，每次投影时精确命中才删。本插件尚未移植这张表，所以历史遗留的窗口值不会被
    自动清掉。
+
+### 已经对齐的两处
+
+- **活跃 provider 按 app 分组。** CC Switch 的 `is_current` 是 per-app 单例：它的
+  `set_current_provider`（`database/dao/providers.rs`）先 `UPDATE ... WHERE app_type = ?`
+  清零、再给目标行置一，所以「当前 Claude provider」和「当前 Codex provider」并存，
+  切一个不动另一个。本插件此前用一个全局标志表达，激活 Codex provider 会把 Claude
+  provider 一起取消掉；现在是 per-app 组（`activateCCSProvider` / `currentKeysByApp`），
+  删除保护也只盯本行自己的 app 组。
+- **列表顺序按 CC Switch 的排序。** 扫描用
+  `COALESCE(sort_index, 999999), created_at ASC, id ASC`（`database/dao/providers.rs`），
+  目录读取用同一套（`orderProviders`）。`sort_index` 是用户拖动设置出来的稀疏序号，
+  没拖动过的排在拖过的后面；`created_at` 缺失时按 SQLite 的 NULL 语义排在最前。
+  另外，编辑表单不带排序字段，而保存是整条替换，所以路由会把 `sortIndex` / `createdAt`
+  从既有记录里带过来，否则每次编辑都会把位置重置掉。
 
 ## 模块地图
 
