@@ -76,6 +76,7 @@ test('the provider schema declares exactly the CC Switch fields', () => {
     'costMultiplier',
     'createdAt',
     'displayName',
+    'exclusiveEnv',
     'icon',
     'iconColor',
     'inFailoverQueue',
@@ -102,6 +103,40 @@ test('apiKeyEnv is marked as a credential reference, never a literal key', () =>
   assert.ok(schema.dict.apiKeyEnv.calls.some(([name, value]) => name === 'role' && value === 'credential-ref'))
 })
 
+test('exclusiveEnv carries only known Claude keys, and only primitives', () => {
+  // The settings document is plaintext YAML a user can hand-edit, and this
+  // field is read back out into another tool's config file. Two things must
+  // hold: a key the plugin does not own never reaches that file, and a value
+  // that is not a primitive cannot be used as a removal match later.
+  const kept = normalizeCCSProvider({
+    displayName: 'D',
+    exclusiveEnv: {
+      ENABLE_TOOL_SEARCH: 'true',
+      CLAUDE_CODE_MAX_OUTPUT_TOKENS: 16384,
+      CLAUDE_CODE_DISABLE_ARTIFACT: true,
+      ANTHROPIC_MODEL: 'smuggled',
+      NOT_A_REAL_KEY: 'nope',
+      ENABLE_TOOL_SEARCH_BUT_OBJECT: undefined,
+    },
+  })
+  assert.deepEqual(kept.exclusiveEnv, {
+    ENABLE_TOOL_SEARCH: 'true',
+    CLAUDE_CODE_MAX_OUTPUT_TOKENS: 16384,
+    CLAUDE_CODE_DISABLE_ARTIFACT: true,
+  })
+  // Omitted rather than stored empty, so describe() does not report an edit.
+  assert.equal(Object.hasOwn(normalizeCCSProvider({ displayName: 'D' }), 'exclusiveEnv'), false)
+  assert.equal(Object.hasOwn(normalizeCCSProvider({ displayName: 'D', exclusiveEnv: {} }), 'exclusiveEnv'), false)
+  // An object or array value is dropped rather than carried.
+  assert.equal(
+    Object.hasOwn(normalizeCCSProvider({ displayName: 'D', exclusiveEnv: { ENABLE_TOOL_SEARCH: { a: 1 } } }), 'exclusiveEnv'),
+    false,
+  )
+  assert.equal(
+    Object.hasOwn(normalizeCCSProvider({ displayName: 'D', exclusiveEnv: { ENABLE_TOOL_SEARCH: ['true'] } }), 'exclusiveEnv'),
+    false,
+  )
+})
 test('the api union offers exactly the three protocols llm-pi-ai can serve', () => {
   const schema = defineCCSProvider(fakeZ())
   assert.equal(schema.dict.api.type, 'union')

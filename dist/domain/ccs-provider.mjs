@@ -1,3 +1,36 @@
+// lib/core/claude-exclusive.js
+var CLAUDE_EXCLUSIVE_ENV = [
+  "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+  "CLAUDE_CODE_DISABLE_ARTIFACT",
+  "ENABLE_TOOL_SEARCH",
+  "CLAUDE_CODE_DISABLE_THINKING",
+  "DISABLE_INTERLEAVED_THINKING",
+  "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT",
+  "CLAUDE_CODE_EXTRA_BODY",
+  "CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING",
+  "CLAUDE_CODE_AUTO_MODE_SERVER",
+  "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+  "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+  "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+  "CLAUDE_CODE_DISABLE_1M_CONTEXT",
+  "CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT",
+  "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"
+];
+var EXCLUSIVE = new Set(CLAUDE_EXCLUSIVE_ENV);
+function carryable(value) {
+  return typeof value === "string" || typeof value === "number" || typeof value === "boolean";
+}
+function pickClaudeExclusiveEnv(env) {
+  const picked = {};
+  if (env === null || typeof env !== "object" || Array.isArray(env)) return picked;
+  for (const [key, value] of Object.entries(env)) {
+    if (!EXCLUSIVE.has(key)) continue;
+    if (!carryable(value)) continue;
+    picked[key] = value;
+  }
+  return picked;
+}
+
 // src/domain/ccs-provider.mjs
 var CCS_API_PROTOCOLS = Object.freeze([
   "openai-completions",
@@ -36,6 +69,11 @@ function defineCCSProvider(z) {
     baseURL: z.string(),
     apiKeyEnv: z.string().role("credential-ref"),
     models: z.array(defineCCSModel(z)).default([]),
+    // The provider's own Claude Code compatibility switches and window sizes.
+    // Kept as a dict of primitives rather than a fixed key set so a value the
+    // schema does not know yet survives a round-trip; `pickClaudeExclusiveEnv`
+    // is what narrows it to keys this plugin is willing to write.
+    exclusiveEnv: z.dict(z.union([z.string(), z.number(), z.boolean()])),
     notes: z.string(),
     icon: z.string(),
     iconColor: z.string(),
@@ -117,6 +155,8 @@ function normalizeCCSProvider(value) {
     apiKeyEnv: String(source.apiKeyEnv ?? "").trim(),
     models
   };
+  const exclusiveEnv = pickClaudeExclusiveEnv(source.exclusiveEnv);
+  if (Object.keys(exclusiveEnv).length > 0) provider.exclusiveEnv = exclusiveEnv;
   for (const field of ["notes", "icon", "iconColor", "appType", "sourceProfileId"]) {
     const text = nonEmptyText(source[field]);
     if (text !== void 0) provider[field] = text;

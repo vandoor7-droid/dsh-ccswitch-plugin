@@ -5,6 +5,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { extractProfile } from '../lib/core/extract.js'
 import { BLOCKED } from '../lib/core/safety.js'
+import { toCCSProvider } from '../lib/core/mapper.js'
 
 const toml = `model_provider = "custom"
 model = "gpt-5.6-terra"
@@ -152,4 +153,91 @@ test('an unknown app type is blocked with the type as detail', () => {
   assert.equal(profile.blocked, true)
   assert.equal(profile.blockedCode, BLOCKED.UNSUPPORTED_APP_TYPE)
   assert.equal(profile.blockedDetail, 'cursor')
+})
+test('claude: a row carries its own exclusive env keys, and only those', () => {
+  // The compatibility switches and window sizes a third-party upstream needs.
+  // Nothing that is neither floor nor exclusive may come along: the settings
+  // document is plaintext and this is copied into another tool's config file.
+  const row = {
+    id: 'kfc',
+    name: 'Kimi For Coding',
+    app_type: 'claude',
+    settings_config: JSON.stringify({
+      env: {
+        ANTHROPIC_BASE_URL: 'https://api.moonshot.cn/anthropic',
+        ANTHROPIC_AUTH_TOKEN: 'sk-token',
+        ANTHROPIC_MODEL: 'kimi-k2.7-code',
+        CLAUDE_CODE_MAX_CONTEXT_TOKENS: '262144',
+        CLAUDE_CODE_AUTO_COMPACT_WINDOW: '262144',
+        ENABLE_TOOL_SEARCH: 'true',
+        CLAUDE_CODE_MAX_OUTPUT_TOKENS: 16384,
+        SOME_USER_SETTING: 'keep-me-out-of-it',
+      },
+    }),
+  }
+  const profile = extractProfile(row)
+  assert.equal(profile.blocked, false)
+  assert.deepEqual(profile.exclusiveEnv, {
+    CLAUDE_CODE_MAX_CONTEXT_TOKENS: '262144',
+    CLAUDE_CODE_AUTO_COMPACT_WINDOW: '262144',
+    ENABLE_TOOL_SEARCH: 'true',
+    CLAUDE_CODE_MAX_OUTPUT_TOKENS: 16384,
+  })
+})
+
+test('claude: a row with no exclusive keys omits the field entirely', () => {
+  // Omitted rather than empty, so a row that has none cannot blank out keys a
+  // previous import already recorded.
+  const row = {
+    id: 'ds',
+    name: 'DeepSeek',
+    app_type: 'claude',
+    settings_config: JSON.stringify({
+      env: { ANTHROPIC_BASE_URL: 'https://api.deepseek.com/anthropic', ANTHROPIC_AUTH_TOKEN: 'sk' },
+    }),
+  }
+  const profile = extractProfile(row)
+  assert.equal(Object.hasOwn(profile, 'exclusiveEnv'), false)
+})
+
+test('claude: a non-primitive exclusive value is dropped, not carried', () => {
+  // These are switches and window sizes. An object or array here is a
+  // malformed row, and carrying one would break the value-equality rule that
+  // decides whether the key is safe to remove later.
+  const row = {
+    id: 'x',
+    name: 'X',
+    app_type: 'claude',
+    settings_config: JSON.stringify({
+      env: {
+        ANTHROPIC_BASE_URL: 'https://x.test',
+        ANTHROPIC_AUTH_TOKEN: 'sk',
+        ENABLE_TOOL_SEARCH: { nested: true },
+        CLAUDE_CODE_MAX_OUTPUT_TOKENS: ['16384'],
+      },
+    }),
+  }
+  const profile = extractProfile(row)
+  assert.equal(profile.blocked, false)
+  assert.equal(Object.hasOwn(profile, 'exclusiveEnv'), false)
+})
+
+test('claude: the catalogue record carries the exclusive keys', () => {
+  // Two projections of one profile: llm-pi-ai has no field for these, but the
+  // catalogue is what activation reads when it rewrites the file.
+  const profile = extractProfile({
+    id: 'kfc',
+    name: 'Kimi For Coding',
+    app_type: 'claude',
+    settings_config: JSON.stringify({
+      env: {
+        ANTHROPIC_BASE_URL: 'https://api.moonshot.cn/anthropic',
+        ANTHROPIC_AUTH_TOKEN: 'sk',
+        ENABLE_TOOL_SEARCH: 'true',
+      },
+    }),
+  })
+  const record = toCCSProvider(profile, undefined, 'kfc')
+  assert.deepEqual(record.exclusiveEnv, { ENABLE_TOOL_SEARCH: 'true' })
+  assert.equal(record.displayName, 'Kimi For Coding')
 })

@@ -228,7 +228,7 @@ export function makeManagerRoutes(deps = {}) {
    *   the app type, `code: 'NO_CREDENTIAL'` when the provider has no key
    *   stored, or a {@link WriterError} when the target file was refused.
    */
-  const runWriter = async (provider, appType) => {
+  const runWriter = async (provider, appType, outgoing) => {
     if (!WRITER_APP_TYPES.includes(appType)) {
       throw Object.assign(new Error('unsupported app type'), { code: 'UNSUPPORTED' })
     }
@@ -241,7 +241,7 @@ export function makeManagerRoutes(deps = {}) {
     if (apiKey === '') {
       throw Object.assign(new Error('credential is not set'), { code: 'NO_CREDENTIAL' })
     }
-    const written = await writeProviderConfig({ appType, provider, apiKey, home })
+    const written = await writeProviderConfig({ appType, provider, apiKey, home, previous: outgoing })
     return {
       appType,
       files: written.files.map((file) => ({
@@ -461,13 +461,19 @@ export function makeManagerRoutes(deps = {}) {
             // activation is a whole-catalogue edit: the chosen row is marked
             // and every other row is cleared in the same write, which is the
             // only way the invariant survives a concurrent edit.
+            // The provider this one displaces, for its own app type. Needed
+            // because a provider-exclusive key may only be removed while the
+            // file still holds the value that provider wrote, so the writer
+            // has to know who its predecessor was.
+            const outgoingKey = currentKeyOf(providers, effectiveAppType(providers[body.key]))
+            const outgoing = outgoingKey === undefined ? undefined : providers[outgoingKey]
             const next = activateCCSProvider(providers, body.key)
             await settings.mutate(
               MANAGER_NAMESPACE,
               [{ op: 'set', path: ['providers'], value: next }],
               revisionOf(body) ?? revision,
             )
-            return { missing: false, provider: next[body.key] }
+            return { missing: false, provider: next[body.key], outgoing }
           })
           if (outcome.missing) {
             writeJson(response, 404, { error: 'no such provider' })
@@ -499,7 +505,7 @@ export function makeManagerRoutes(deps = {}) {
           let written
           if (WRITER_APP_TYPES.includes(appType)) {
             try {
-              written = await runWriter(provider, appType)
+              written = await runWriter(provider, appType, outcome.outgoing)
               warnings.push(...written.warnings)
             } catch (err) {
               console.error('[dsh-ccswitch-plugin] writing the tool configuration failed:', redactText(err))

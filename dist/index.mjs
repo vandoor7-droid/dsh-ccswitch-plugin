@@ -318,6 +318,42 @@ function isThinkingModel(modelId) {
   return THINKING_ID_PATTERN.test(key) || THINKING_FAMILY_PATTERN.test(key);
 }
 
+// lib/core/claude-exclusive.js
+var CLAUDE_EXCLUSIVE_ENV = [
+  "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+  "CLAUDE_CODE_DISABLE_ARTIFACT",
+  "ENABLE_TOOL_SEARCH",
+  "CLAUDE_CODE_DISABLE_THINKING",
+  "DISABLE_INTERLEAVED_THINKING",
+  "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT",
+  "CLAUDE_CODE_EXTRA_BODY",
+  "CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING",
+  "CLAUDE_CODE_AUTO_MODE_SERVER",
+  "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+  "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+  "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+  "CLAUDE_CODE_DISABLE_1M_CONTEXT",
+  "CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT",
+  "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"
+];
+var EXCLUSIVE = new Set(CLAUDE_EXCLUSIVE_ENV);
+function carryable(value) {
+  return typeof value === "string" || typeof value === "number" || typeof value === "boolean";
+}
+function pickClaudeExclusiveEnv(env) {
+  const picked = {};
+  if (env === null || typeof env !== "object" || Array.isArray(env)) return picked;
+  for (const [key, value] of Object.entries(env)) {
+    if (!EXCLUSIVE.has(key)) continue;
+    if (!carryable(value)) continue;
+    picked[key] = value;
+  }
+  return picked;
+}
+function claudeExclusiveEnvOf(provider) {
+  return pickClaudeExclusiveEnv(provider?.exclusiveEnv);
+}
+
 // src/domain/ccs-provider.mjs
 var CCS_API_PROTOCOLS = Object.freeze([
   "openai-completions",
@@ -356,6 +392,11 @@ function defineCCSProvider(z2) {
     baseURL: z2.string(),
     apiKeyEnv: z2.string().role("credential-ref"),
     models: z2.array(defineCCSModel(z2)).default([]),
+    // The provider's own Claude Code compatibility switches and window sizes.
+    // Kept as a dict of primitives rather than a fixed key set so a value the
+    // schema does not know yet survives a round-trip; `pickClaudeExclusiveEnv`
+    // is what narrows it to keys this plugin is willing to write.
+    exclusiveEnv: z2.dict(z2.union([z2.string(), z2.number(), z2.boolean()])),
     notes: z2.string(),
     icon: z2.string(),
     iconColor: z2.string(),
@@ -437,6 +478,8 @@ function normalizeCCSProvider(value) {
     apiKeyEnv: String(source.apiKeyEnv ?? "").trim(),
     models
   };
+  const exclusiveEnv = pickClaudeExclusiveEnv(source.exclusiveEnv);
+  if (Object.keys(exclusiveEnv).length > 0) provider.exclusiveEnv = exclusiveEnv;
   for (const field of ["notes", "icon", "iconColor", "appType", "sourceProfileId"]) {
     const text = nonEmptyText(source[field]);
     if (text !== void 0) provider[field] = text;
@@ -662,7 +705,11 @@ function toCCSProvider(profile, existing, providerKeyValue) {
     ...profile.profileId === void 0 ? {} : { sourceProfileId: profile.profileId },
     ...profile.notes === void 0 ? {} : { notes: profile.notes },
     ...profile.icon === void 0 ? {} : { icon: profile.icon },
-    ...profile.iconColor === void 0 ? {} : { iconColor: profile.iconColor }
+    ...profile.iconColor === void 0 ? {} : { iconColor: profile.iconColor },
+    // Carried through the catalogue so activation can put the provider's own
+    // compatibility switches into the file it rewrites. `normalizeCCSProvider`
+    // filters the key set, so a row cannot smuggle an arbitrary key in here.
+    ...profile.exclusiveEnv === void 0 ? {} : { exclusiveEnv: profile.exclusiveEnv }
   });
 }
 function redactSummary(profile, key, status, extraWarnings = []) {
@@ -1647,12 +1694,14 @@ function extractClaude(base, parsed) {
     return { ...base, blocked: true, blockedReason: "\u672A\u627E\u5230 base URL\uFF08env.ANTHROPIC_BASE_URL \u7F3A\u5931\uFF09", blockedCode: BLOCKED.MISSING_ANTHROPIC_BASE_URL };
   }
   const warnings = [];
+  const exclusiveEnv = pickClaudeExclusiveEnv(env);
   return {
     ...base,
     apiKey,
     baseURL,
     api: "anthropic-messages",
     models: claudeModels(env, profileName, warnings),
+    ...Object.keys(exclusiveEnv).length > 0 ? { exclusiveEnv } : {},
     modelReasoningEffort: void 0,
     warnings,
     unsupported: []
@@ -2810,9 +2859,11 @@ function claudeProjection(provider, apiKey) {
   };
   const model = primaryModelId(provider);
   if (model !== void 0) env.ANTHROPIC_MODEL = model;
-  return { top: {}, env };
+  const exclusive = claudeExclusiveEnvOf(provider);
+  for (const [key, value] of Object.entries(exclusive)) env[key] = value;
+  return { top: {}, env, exclusive };
 }
-function applyClaudePatch(doc, top, env, path) {
+function applyClaudePatch(doc, top, env, path, outgoingExclusive = {}) {
   if (doc.env !== void 0 && !isRecord(doc.env)) {
     throw new WriterError(
       `${path} has a non-object "env" member; refusing to overwrite it`,
@@ -2839,6 +2890,14 @@ function applyClaudePatch(doc, top, env, path) {
     const current = doc.env?.[key];
     if (current === void 0) continue;
     if (!residueValues(values).includes(current)) continue;
+    delete doc.env[key];
+    removed.push(`env.${key}`);
+  }
+  for (const [key, value] of Object.entries(outgoingExclusive)) {
+    if (envTargets.has(key)) continue;
+    const current = doc.env?.[key];
+    if (current === void 0) continue;
+    if (current !== value) continue;
     delete doc.env[key];
     removed.push(`env.${key}`);
   }
@@ -3385,7 +3444,7 @@ function protocolWarnings(appType, provider) {
   }
   return [];
 }
-async function writeClaudeConfig({ provider, apiKey, home, io, backupRoot } = {}) {
+async function writeClaudeConfig({ provider, apiKey, home, io, backupRoot, previous } = {}) {
   const key = requireApiKey(apiKey);
   const path = join2(home ?? homedir2(), ".claude", "settings.json");
   const fileIo = io ?? defaultIo;
@@ -3394,7 +3453,7 @@ async function writeClaudeConfig({ provider, apiKey, home, io, backupRoot } = {}
     const raw = await fileIo.read(path);
     const { doc, style } = parseJsonDocument(raw, path);
     const { top, env } = claudeProjection(provider, key);
-    const removed = applyClaudePatch(doc, top, env, path);
+    const removed = applyClaudePatch(doc, top, env, path, claudeExclusiveEnvOf(previous));
     await ensureFirstWriteBackup(path, raw, backups, fileIo);
     await fileIo.write(path, serializeJson(doc, style), 384);
     return {
@@ -3459,8 +3518,8 @@ async function restoreBytes(path, previous, fileIo) {
   } catch {
   }
 }
-async function writeProviderConfig({ appType, provider, apiKey, home, io } = {}) {
-  if (appType === "claude") return writeClaudeConfig({ provider, apiKey, home, io });
+async function writeProviderConfig({ appType, provider, apiKey, home, io, previous } = {}) {
+  if (appType === "claude") return writeClaudeConfig({ provider, apiKey, home, io, previous });
   if (appType === "codex") return writeCodexConfig({ provider, apiKey, home, io });
   throw new WriterError(`no writer for app type "${appType}"`, { kind: "unsupported" });
 }
@@ -3564,7 +3623,7 @@ function makeManagerRoutes(deps = {}) {
     queue = next.then(() => void 0, () => void 0);
     return next;
   };
-  const runWriter = async (provider, appType) => {
+  const runWriter = async (provider, appType, outgoing) => {
     if (!WRITER_APP_TYPES.includes(appType)) {
       throw Object.assign(new Error("unsupported app type"), { code: "UNSUPPORTED" });
     }
@@ -3573,7 +3632,7 @@ function makeManagerRoutes(deps = {}) {
     if (apiKey === "") {
       throw Object.assign(new Error("credential is not set"), { code: "NO_CREDENTIAL" });
     }
-    const written = await writeProviderConfig({ appType, provider, apiKey, home });
+    const written = await writeProviderConfig({ appType, provider, apiKey, home, previous: outgoing });
     return {
       appType,
       files: written.files.map((file) => ({
@@ -3751,13 +3810,15 @@ function makeManagerRoutes(deps = {}) {
           const outcome = await serialize(async () => {
             const { providers, revision } = await readCatalogue(settings);
             if (!Object.hasOwn(providers, body.key)) return { missing: true };
+            const outgoingKey = currentKeyOf(providers, effectiveAppType(providers[body.key]));
+            const outgoing = outgoingKey === void 0 ? void 0 : providers[outgoingKey];
             const next = activateCCSProvider(providers, body.key);
             await settings.mutate(
               MANAGER_NAMESPACE,
               [{ op: "set", path: ["providers"], value: next }],
               revisionOf(body) ?? revision
             );
-            return { missing: false, provider: next[body.key] };
+            return { missing: false, provider: next[body.key], outgoing };
           });
           if (outcome.missing) {
             writeJson(response, 404, { error: "no such provider" });
@@ -3777,7 +3838,7 @@ function makeManagerRoutes(deps = {}) {
           let written;
           if (WRITER_APP_TYPES.includes(appType)) {
             try {
-              written = await runWriter(provider, appType);
+              written = await runWriter(provider, appType, outcome.outgoing);
               warnings.push(...written.warnings);
             } catch (err) {
               console.error("[dsh-ccswitch-plugin] writing the tool configuration failed:", redactText(err));

@@ -1,6 +1,8 @@
 // dsh-ccswitch-plugin — derivative of 2995288295/dsh-ccswitch-importer-plus
 // (Apache-2.0), which is itself a derivative of wtiaw/dsh-ccswitch-importer.
 // Reworked for DSH 0.2.0-rc.2. See NOTICE for the full attribution chain.
+import { pickClaudeExclusiveEnv } from '../../lib/core/claude-exclusive.js'
+
 /**
  * The provider shape this plugin stores in its own settings namespace, plus the
  * pure functions that normalise and validate one.
@@ -74,6 +76,11 @@ export function defineCCSProvider(z) {
     baseURL: z.string(),
     apiKeyEnv: z.string().role('credential-ref'),
     models: z.array(defineCCSModel(z)).default([]),
+    // The provider's own Claude Code compatibility switches and window sizes.
+    // Kept as a dict of primitives rather than a fixed key set so a value the
+    // schema does not know yet survives a round-trip; `pickClaudeExclusiveEnv`
+    // is what narrows it to keys this plugin is willing to write.
+    exclusiveEnv: z.dict(z.union([z.string(), z.number(), z.boolean()])),
     notes: z.string(),
     icon: z.string(),
     iconColor: z.string(),
@@ -191,6 +198,10 @@ export function normalizeCCSProvider(value) {
     apiKeyEnv: String(source.apiKeyEnv ?? '').trim(),
     models,
   }
+  // Only known keys, only primitive values: this is what stops an edited
+  // settings document from steering an arbitrary key into another tool's file.
+  const exclusiveEnv = pickClaudeExclusiveEnv(source.exclusiveEnv)
+  if (Object.keys(exclusiveEnv).length > 0) provider.exclusiveEnv = exclusiveEnv
   for (const field of ['notes', 'icon', 'iconColor', 'appType', 'sourceProfileId']) {
     const text = nonEmptyText(source[field])
     if (text !== undefined) provider[field] = text

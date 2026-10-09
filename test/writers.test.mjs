@@ -1470,3 +1470,118 @@ function parseTomlish(text) {
   }
   return { top, sections }
 }
+// --- Claude: provider-exclusive env keys ------------------------------------
+
+// A row that needs one of these cannot be recognised from its endpoint: an
+// upstream that rejects experimental beta headers, or validates tool schemas
+// strictly enough that the Artifact tool 400s, looks like any other URL.
+const EXCLUSIVE_PROVIDER = {
+  ...CLAUDE_PROVIDER,
+  exclusiveEnv: { ENABLE_TOOL_SEARCH: 'true', CLAUDE_CODE_MAX_OUTPUT_TOKENS: 16384 },
+}
+
+test('claude: a provider exclusive keys are written with it', async () => {
+  const fixture = makeHome()
+  try {
+    const result = await writeClaudeConfig({ provider: EXCLUSIVE_PROVIDER, apiKey: 'sk-new', home: fixture.home })
+    const env = JSON.parse(fixture.read('.claude/settings.json')).env
+    assert.equal(env.ENABLE_TOOL_SEARCH, 'true')
+    assert.equal(env.CLAUDE_CODE_MAX_OUTPUT_TOKENS, 16384, 'the JSON type survives, not stringified')
+    assert.ok(result.files[0].keys.includes('env.ENABLE_TOOL_SEARCH'))
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('claude: switching away removes them while they still hold that value', async () => {
+  const fixture = makeHome()
+  try {
+    await writeClaudeConfig({ provider: EXCLUSIVE_PROVIDER, apiKey: 'sk-new', home: fixture.home })
+    const result = await writeClaudeConfig({
+      provider: CLAUDE_PROVIDER,
+      apiKey: 'sk-two',
+      home: fixture.home,
+      previous: EXCLUSIVE_PROVIDER,
+    })
+    const env = JSON.parse(fixture.read('.claude/settings.json')).env
+    assert.equal(env.ENABLE_TOOL_SEARCH, undefined, 'the outgoing switch is removed')
+    assert.equal(env.CLAUDE_CODE_MAX_OUTPUT_TOKENS, undefined)
+    assert.ok(result.files[0].removed.includes('env.ENABLE_TOOL_SEARCH'))
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('claude: an exclusive key the user has edited survives the switch away', async () => {
+  // The removal rule is value equality, exactly like the residue table: a key
+  // whose value no longer matches what the provider wrote cannot be proven to
+  // be that provider own, so it is left alone.
+  const fixture = makeHome()
+  try {
+    fixture.write('.claude/settings.json', JSON.stringify({
+      env: { ENABLE_TOOL_SEARCH: 'false' },
+    }, null, 2))
+    await writeClaudeConfig({
+      provider: CLAUDE_PROVIDER,
+      apiKey: 'sk-two',
+      home: fixture.home,
+      previous: EXCLUSIVE_PROVIDER,
+    })
+    const env = JSON.parse(fixture.read('.claude/settings.json')).env
+    assert.equal(env.ENABLE_TOOL_SEARCH, 'false', 'a user edit is not mistaken for ours')
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('claude: an exclusive key the incoming provider writes is never removed', async () => {
+  // Both providers write ENABLE_TOOL_SEARCH, so the incoming value must win in
+  // place rather than be deleted by the outgoing provider cleanup.
+  const fixture = makeHome()
+  try {
+    await writeClaudeConfig({ provider: EXCLUSIVE_PROVIDER, apiKey: 'sk-new', home: fixture.home })
+    const other = { ...CLAUDE_PROVIDER, exclusiveEnv: { ENABLE_TOOL_SEARCH: 'yes' } }
+    const result = await writeClaudeConfig({
+      provider: other,
+      apiKey: 'sk-two',
+      home: fixture.home,
+      previous: EXCLUSIVE_PROVIDER,
+    })
+    const env = JSON.parse(fixture.read('.claude/settings.json')).env
+    assert.equal(env.ENABLE_TOOL_SEARCH, 'yes', 'the incoming value wins in place')
+    assert.ok(!result.files[0].removed.includes('env.ENABLE_TOOL_SEARCH'), 'and is not claimed as removed')
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('claude: a provider with no exclusive keys removes no exclusive key', async () => {
+  // The fixture carries floor keys, which a switch is *supposed* to clear.
+  // What must not happen is an exclusive key being claimed by a provider that
+  // never wrote one.
+  const fixture = claudeFixture()
+  try {
+    const result = await writeClaudeConfig({ provider: CLAUDE_PROVIDER, apiKey: 'sk-new', home: fixture.home })
+    const exclusive = result.files[0].removed.filter((key) => key.startsWith('env.CLAUDE_CODE_') || key === 'env.ENABLE_TOOL_SEARCH')
+    assert.deepEqual(exclusive, [], 'no exclusive key is claimed')
+    assert.ok(result.files[0].removed.includes('env.AWS_REGION'), 'the floor is still cleared')
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('claude: a key outside the exclusive set is not carried or cleared', async () => {
+  // The set is the boundary. A row carrying something else must not be able to
+  // steer an arbitrary key into another tool config file, nor delete one.
+  const fixture = makeHome()
+  try {
+    fixture.write('.claude/settings.json', JSON.stringify({ env: { MY_OWN_KEY: 'mine' } }, null, 2))
+    const rogue = { ...CLAUDE_PROVIDER, exclusiveEnv: { MY_OWN_KEY: 'hijacked', ENABLE_TOOL_SEARCH: 'true' } }
+    await writeClaudeConfig({ provider: rogue, apiKey: 'sk-new', home: fixture.home, previous: rogue })
+    const env = JSON.parse(fixture.read('.claude/settings.json')).env
+    assert.equal(env.MY_OWN_KEY, 'mine', 'an unknown key is neither written nor removed')
+    assert.equal(env.ENABLE_TOOL_SEARCH, 'true', 'while a known one still is written')
+  } finally {
+    fixture.cleanup()
+  }
+})

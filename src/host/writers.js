@@ -38,6 +38,7 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { parseCodexToml } from '../../lib/core/toml.js'
+import { claudeExclusiveEnvOf } from '../../lib/core/claude-exclusive.js'
 
 /**
  * The app types that have a writer. `appType` on a CC Switch row is a wider
@@ -547,7 +548,12 @@ function claudeProjection(provider, apiKey) {
   }
   const model = primaryModelId(provider)
   if (model !== undefined) env.ANTHROPIC_MODEL = model
-  return { top: {}, env }
+  // The provider's own compatibility switches and window sizes go in through
+  // the same map: on the way *in* they are ordinary writes. What differs is
+  // the way out, which is the removal pass in {@link applyClaudePatch}.
+  const exclusive = claudeExclusiveEnvOf(provider)
+  for (const [key, value] of Object.entries(exclusive)) env[key] = value
+  return { top: {}, env, exclusive }
 }
 
 /**
@@ -558,7 +564,7 @@ function claudeProjection(provider, apiKey) {
  * remaining keys in order, so unlike serde's `swap_remove` there is no
  * last-key-into-the-gap hazard to work around.)
  */
-function applyClaudePatch(doc, top, env, path) {
+function applyClaudePatch(doc, top, env, path, outgoingExclusive = {}) {
   if (doc.env !== undefined && !isRecord(doc.env)) {
     // cc-switch refuses here too: rewriting a non-object `env` would discard
     // whatever the user meant by it.
@@ -594,6 +600,21 @@ function applyClaudePatch(doc, top, env, path) {
     const current = doc.env?.[key]
     if (current === undefined) continue
     if (!residueValues(values).includes(current)) continue
+    delete doc.env[key]
+    removed.push(`env.${key}`)
+  }
+  // Exclusive cleanup, the other half of cc-switch's `remove_if`. A key the
+  // outgoing provider wrote is deleted only while the file still holds the
+  // value it wrote; a value the user has since edited no longer matches, and
+  // the key stays. A key the incoming provider writes is skipped here and wins
+  // in place below, which is what "the target's own value stays in place"
+  // means. Primitives only, so `===` is the right comparison — a string "1" and
+  // a number 1 are different values and cc-switch treats them as such.
+  for (const [key, value] of Object.entries(outgoingExclusive)) {
+    if (envTargets.has(key)) continue
+    const current = doc.env?.[key]
+    if (current === undefined) continue
+    if (current !== value) continue
     delete doc.env[key]
     removed.push(`env.${key}`)
   }
@@ -1561,7 +1582,7 @@ function protocolWarnings(appType, provider) {
  * @returns {Promise<{files: Array<{path: string, keys: string[], removed: string[]}>, warnings: string[]}>}
  * @throws {WriterError} when the existing file cannot be understood.
  */
-export async function writeClaudeConfig({ provider, apiKey, home, io, backupRoot } = {}) {
+export async function writeClaudeConfig({ provider, apiKey, home, io, backupRoot, previous } = {}) {
   const key = requireApiKey(apiKey)
   const path = join(home ?? homedir(), '.claude', 'settings.json')
   const fileIo = io ?? defaultIo
@@ -1570,7 +1591,11 @@ export async function writeClaudeConfig({ provider, apiKey, home, io, backupRoot
     const raw = await fileIo.read(path)
     const { doc, style } = parseJsonDocument(raw, path)
     const { top, env } = claudeProjection(provider, key)
-    const removed = applyClaudePatch(doc, top, env, path)
+    // `previous` is whoever this provider replaces, when the caller knows.
+    // Only its *exclusive* keys matter: the floor is defined by ownership and
+    // is cleared unconditionally, but an exclusive key can come out only while
+    // its value still matches what that provider wrote.
+    const removed = applyClaudePatch(doc, top, env, path, claudeExclusiveEnvOf(previous))
     await ensureFirstWriteBackup(path, raw, backups, fileIo)
     await fileIo.write(path, serializeJson(doc, style), 0o600)
     return {
@@ -1703,8 +1728,8 @@ async function restoreBytes(path, previous, fileIo) {
  *   type, so the route can name what is supported instead of reporting success
  *   for a write that never happened.
  */
-export async function writeProviderConfig({ appType, provider, apiKey, home, io } = {}) {
-  if (appType === 'claude') return writeClaudeConfig({ provider, apiKey, home, io })
+export async function writeProviderConfig({ appType, provider, apiKey, home, io, previous } = {}) {
+  if (appType === 'claude') return writeClaudeConfig({ provider, apiKey, home, io, previous })
   if (appType === 'codex') return writeCodexConfig({ provider, apiKey, home, io })
   throw new WriterError(`no writer for app type "${appType}"`, { kind: 'unsupported' })
 }
