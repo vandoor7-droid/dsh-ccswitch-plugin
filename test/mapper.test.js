@@ -3,8 +3,9 @@
 // Reworked for DSH 0.2.0-rc.2. See NOTICE for the full attribution chain.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { toProviderProfile, redactSummary, classifyProfiles, resolveProviderKey, normalizeBaseUrl } from '../lib/core/mapper.js'
-import { providerKey, credentialRefFor, variantKey } from '../lib/core/ids.js'
+import { toProviderProfile, toCCSProvider, redactSummary, classifyProfiles, resolveProviderKey, normalizeBaseUrl } from '../lib/core/mapper.js'
+import { providerKey, credentialRefFor, credentialRefForProviderKey, variantKey } from '../lib/core/ids.js'
+import { validateCCSProvider } from '../src/domain/ccs-provider.mjs'
 
 const profile = {
   profileId: '星渡-1786264467316',
@@ -145,4 +146,105 @@ test('classifyProfiles blocks the second profile sharing a provider key', () => 
 test('normalizeBaseUrl strips trailing slash and keeps path', () => {
   assert.equal(normalizeBaseUrl('https://aiwtiaw.top/'), 'https://aiwtiaw.top')
   assert.equal(normalizeBaseUrl('https://x.example/v1'), 'https://x.example/v1')
+})
+
+// --- the plugin's own catalogue record ------------------------------------
+
+test('toCCSProvider maps to the catalogue shape the manager UI reads', () => {
+  const key = providerKey(profile.profileId, profile.profileName)
+  const record = toCCSProvider(profile, undefined, key)
+  assert.equal(record.displayName, '星渡')
+  assert.equal(record.api, 'openai-responses')
+  assert.equal(record.baseURL, 'https://aiwtiaw.top')
+  assert.equal(record.apiKeyEnv, credentialRefForProviderKey(key))
+  assert.equal(record.sourceProfileId, profile.profileId)
+  assert.equal(record.appType, undefined)
+  assert.equal(record.models[0].id, 'gpt-5.6-terra')
+  // The catalogue is a settings document too: reference only, never the key.
+  assert.ok(!JSON.stringify(record).includes('sk-SUPER-SECRET'))
+  // And it must be loadable by the manager, which is a stricter shape than
+  // llm-pi-ai's — a record that fails here would list as a broken row.
+  assert.deepEqual(validateCCSProvider(record), { ok: true })
+})
+
+test('toCCSProvider carries appType and hand-managed fields through', () => {
+  const key = providerKey(profile.profileId, profile.profileName)
+  const existing = {
+    displayName: '星渡',
+    api: 'openai-responses',
+    baseURL: 'https://aiwtiaw.top',
+    apiKeyEnv: credentialRefForProviderKey(key),
+    models: [],
+    notes: '手动备注',
+    icon: 'star',
+    iconColor: '#ff0000',
+    isCurrent: true,
+    inFailoverQueue: true,
+    costMultiplier: 0.5,
+    limitDailyUsd: 3,
+    limitMonthlyUsd: 30,
+  }
+  const record = toCCSProvider({ ...profile, appType: 'claude' }, existing, key)
+  assert.equal(record.appType, 'claude')
+  assert.equal(record.notes, '手动备注')
+  assert.equal(record.icon, 'star')
+  assert.equal(record.iconColor, '#ff0000')
+  // The failover and cost columns are hand-managed, so an import must not reset
+  // them just because the profile says nothing about them.
+  assert.equal(record.isCurrent, true)
+  assert.equal(record.inFailoverQueue, true)
+  assert.equal(record.costMultiplier, 0.5)
+  assert.equal(record.limitDailyUsd, 3)
+  assert.equal(record.limitMonthlyUsd, 30)
+})
+
+test('toCCSProvider produces a record the catalogue validator accepts', () => {
+  const key = providerKey(profile.profileId, profile.profileName)
+  const record = toCCSProvider(profile, undefined, key)
+  assert.equal(validateCCSProvider(record).ok, true)
+})
+
+test('toCCSProvider keeps the profile route and the catalogue route in step', () => {
+  const key = providerKey(profile.profileId, profile.profileName)
+  // Same profile, same endpoint, same models — the two namespaces describe one
+  // provider, so a model added to one and not the other would route somewhere
+  // the manager table does not show.
+  const route = toProviderProfile(profile, undefined, key)
+  const record = toCCSProvider(profile, undefined, key)
+  assert.equal(record.baseURL, route.baseURL)
+  assert.equal(record.api, route.api)
+  assert.equal(record.apiKeyEnv, route.apiKeyEnv)
+  assert.deepEqual(record.models.map((m) => m.id), route.models.map((m) => m.id))
+})
+
+test('toCCSProvider does not mutate the profile it is given', () => {
+  const input = { ...profile }
+  const snapshot = JSON.parse(JSON.stringify(input))
+  toCCSProvider(input, undefined, providerKey(profile.profileId, profile.profileName))
+  assert.deepEqual(input, snapshot)
+})
+
+test('classifyProfiles calls a route-correct but catalogue-missing profile an update', () => {
+  const key = providerKey(profile.profileId, profile.profileName)
+  const existing = { [key]: toProviderProfile(profile) }
+  // Without the catalogue the preview cannot know any better, and this is the
+  // behaviour every existing caller gets — a single-argument call must not change.
+  assert.equal(classifyProfiles([profile], existing)[0].status, 'unchanged')
+  // With it, the profile is not up to date: the import would write the catalogue.
+  assert.equal(classifyProfiles([profile], existing, {})[0].status, 'update')
+  // And once the catalogue matches too, it settles back to unchanged.
+  const catalogue = { [key]: toCCSProvider(profile, undefined, key) }
+  assert.equal(classifyProfiles([profile], existing, catalogue)[0].status, 'unchanged')
+})
+
+test('classifyProfiles keeps a new profile new when the catalogue is readable', () => {
+  const classified = classifyProfiles([profile], {}, {})
+  assert.equal(classified[0].status, 'new')
+})
+
+test('classifyProfiles ignores catalogue entries for other providers', () => {
+  const key = providerKey(profile.profileId, profile.profileName)
+  const existing = { [key]: toProviderProfile(profile) }
+  const catalogue = { 'ccs-someone-else-deadbeef': { displayName: 'other' } }
+  assert.equal(classifyProfiles([profile], existing, catalogue)[0].status, 'update')
 })

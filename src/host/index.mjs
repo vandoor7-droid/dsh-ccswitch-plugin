@@ -6,7 +6,7 @@ import { importProfiles } from '../../lib/core/importer.js'
 import { toProviderProfile } from '../../lib/core/mapper.js'
 import { defineCCSConfig } from '../domain/ccs-provider.mjs'
 import { PROVIDER_PRESETS } from '../domain/presets.mjs'
-import { makeManagerRoutes } from './manager-routes.mjs'
+import { makeManagerRoutes, MANAGER_NAMESPACE } from './manager-routes.mjs'
 import { makeRoutes } from './routes.mjs'
 
 export const name = 'dsh-ccswitch-plugin'
@@ -44,13 +44,19 @@ export function apply(ctx) {
     child.effect(() => child.settings.configure({ auto: false }, ctx.fiber))
   })
 
+  // 0.2.0 SettingsForms has no get(); describe() returns per-namespace views.
+  // `describe()` is synchronous, so the read is wrapped only to keep one shape.
+  const providersOf = (ns) => async () => {
+    const namespaces = await ctx.settings.describe()
+    const namespace = (Array.isArray(namespaces) ? namespaces : []).find((entry) => entry.ns === ns)
+    return namespace?.value?.providers ?? {}
+  }
+
   const routes = makeRoutes({
-    // 0.2.0 SettingsForms has no get(); describe() returns per-namespace views.
-    getProviders: async () => {
-      const namespaces = ctx.settings.describe()
-      const namespace = namespaces.find((entry) => entry.ns === 'llm-pi-ai')
-      return namespace?.value?.providers ?? {}
-    },
+    getProviders: providersOf('llm-pi-ai'),
+    // The importer writes this namespace too, so the scan preview has to
+    // classify against it — see the note in routes.mjs.
+    getCatalogue: providersOf(MANAGER_NAMESPACE),
     settings: ctx.settings,
     credentials: ctx.credentials,
     importProfiles,

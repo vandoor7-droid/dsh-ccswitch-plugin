@@ -5,7 +5,7 @@ import { discoverSources, scanSource, defaultSourcePath, SCAN_REASON } from '../
 import { classifyProfiles } from '../../lib/core/mapper.js'
 import { importProfiles as runImport } from '../../lib/core/importer.js'
 import { probeModels, probeConnection, PROBE_REASON, PROBE_REASONS, PROBE_CHECK, PROBE_CHECKS } from '../../lib/core/probe.js'
-import { redactText, BLOCKED, BLOCKED_CODES } from '../../lib/core/safety.js'
+import { redactText, BLOCKED, BLOCKED_CODES, IMPORT_FAILURE } from '../../lib/core/safety.js'
 
 export const API_BASE = '/api/dsh-ccswitch'
 const MAX_JSON_BODY_BYTES = 64 * 1024
@@ -13,6 +13,10 @@ const MAX_JSON_BODY_BYTES = 64 * 1024
 // request cannot turn this endpoint into an outbound request storm.
 const MAX_PROBE_TARGETS = 50
 const SAFE_STATUSES = new Set(['new', 'update', 'updated', 'unchanged', 'blocked', 'failed', 'skipped'])
+// Machine-readable failure kinds the browser is allowed to act on. Checked
+// against a closed set rather than forwarded: `errorCode` reaches the client
+// verbatim, and an unrecognised value would be an invitation to render it.
+const SAFE_FAILURE_CODES = new Set(Object.values(IMPORT_FAILURE))
 const SAFE_REASONING = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
 const SAFE_SCAN_REASONS = new Set(Object.values(SCAN_REASON))
 
@@ -106,7 +110,14 @@ function publicResult(result, secrets = []) {
     status,
     warnings: publicWarnings(result?.warnings),
   }
-  if (status === 'failed') output.error = publicErrorDetail(result?.error, secrets)
+  if (status === 'failed') {
+    output.error = publicErrorDetail(result?.error, secrets)
+    // The prose above is localized/redacted and meant for a human; the code is
+    // what lets the caller tell "the key could not be stored" apart from "the
+    // route landed but the catalogue did not", which need opposite responses —
+    // retry the whole import, or just repair the catalogue.
+    if (SAFE_FAILURE_CODES.has(result?.errorCode)) output.errorCode = result.errorCode
+  }
   if (status === 'blocked') {
     output.error = 'profile blocked'
     output.blockedCode = BLOCKED_CODES.has(result?.blockedCode) ? result.blockedCode : BLOCKED.UNKNOWN
@@ -221,6 +232,16 @@ export function makeRoutes(deps = {}) {
   const scan = deps.scan ?? defaultScan
   const getProviders = deps.getProviders ?? (async () => ({}))
   const importProfiles = deps.importProfiles ?? runImport
+  /**
+   * This plugin's own catalogue, for classifying a scan against BOTH halves.
+   *
+   * A profile can be correct in the DSH route and absent from the catalogue —
+   * that is exactly the state a pre-manager import left behind — and
+   * `classifyProfiles` reports "unchanged" for it unless it is given the
+   * catalogue. Without this the preview promises "nothing to do" for the rows
+   * the import is about to write.
+   */
+  const getCatalogue = deps.getCatalogue ?? (async () => undefined)
   const probe = deps.probe ?? probeConnection
   const isLoopback = deps.isLoopback ?? isLoopbackRequest
   const settings = deps.settings
@@ -233,7 +254,12 @@ export function makeRoutes(deps = {}) {
         if (!methodFence(request, response, isLoopback, 'GET')) return
         try {
           const { profiles, reason, dbPath } = normalizeScanResult(await scan())
-          const classified = classifyProfiles(profiles, await getProviders())
+          const [route, catalogue] = await Promise.all([getProviders(), getCatalogue()])
+          const classified = catalogue === undefined
+            ? classifyProfiles(profiles, route)
+            // Three arguments, so a profile that is already correct in the
+            // route but missing from the catalogue reads as work to do.
+            : classifyProfiles(profiles, route, catalogue)
           const body = { profiles: classified.map((item) => publicSummary(item.summary)) }
           if (SAFE_SCAN_REASONS.has(reason)) {
             body.source = reason
