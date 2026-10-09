@@ -1,0 +1,3 @@
+# Build output is generated with LF and committed as-is; without this, every
+# `npm run build` re-dirties dist/ through core.autocrlf and shows up as noise.
+dist/** -text

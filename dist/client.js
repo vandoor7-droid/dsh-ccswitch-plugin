@@ -1,5 +1,5 @@
 window.__ModuleLoader__.load({
-	id: "dsh-ccswitch-importer-plus",
+	id: "dsh-ccswitch-plugin",
 	factory: (require) => {
 		var module = { exports: {} };
 		var exports = module.exports;
@@ -604,7 +604,7 @@ window.__ModuleLoader__.load({
 		// src/client/registration.mjs
 		var MODELS_FOOTER_SLOT = "settings.models.footer";
 		function registerReasoningSettings(ctx, { controller, importer, component, t }) {
-		  ctx.locale?.register?.("dsh-ccswitch-importer-plus", MESSAGES);
+		  ctx.locale?.register?.("dsh-ccswitch-plugin", MESSAGES);
 		  ctx.slots.inject(MODELS_FOOTER_SLOT, () => ctx.slots.register({
 		    name: MODELS_FOOTER_SLOT,
 		    id: "ccswitch-importer",
@@ -681,7 +681,7 @@ window.__ModuleLoader__.load({
 		}
 
 		// src/ui/collapse-state.mjs
-		var COLLAPSE_KEY = "dsh-ccswitch-importer-plus:collapse:v1";
+		var COLLAPSE_KEY = "dsh-ccswitch-plugin:collapse:v1";
 		var EMPTY = Object.freeze({
 		  reasoningPanel: false,
 		  importPanel: false,
@@ -1408,7 +1408,7 @@ window.__ModuleLoader__.load({
 		}
 
 		// src/client/styles.mjs
-		var STYLE_ID = "dsh-ccswitch-importer-plus-styles";
+		var STYLE_ID = "dsh-ccswitch-plugin-styles";
 		var CSS = `button[class*="navCell"]:has(span[class*="navLabel"]:empty){display:none;}
 		.dsh-reasoning-composite{display:flex;flex-direction:column;gap:20px;}
 		.dsh-reasoning-embed{border-top:1px solid var(--dsw-alias-border-l2);padding-top:16px;}
@@ -1520,7 +1520,7 @@ window.__ModuleLoader__.load({
 		}
 
 		// src/client/index.mjs
-		var name = "dsh-ccswitch-importer-plus";
+		var name = "dsh-ccswitch-plugin";
 		var inject = [
 		  "slots",
 		  "locale",
@@ -1539,7 +1539,7 @@ window.__ModuleLoader__.load({
 		      await importer.scan({ keepResults: true });
 		    }
 		  });
-		  const t = ctx.locale.bind("dsh-ccswitch-importer-plus");
+		  const t = ctx.locale.bind("dsh-ccswitch-plugin");
 		  const removeStyles = installEmbedStyles();
 		  const dispose = registerReasoningSettings(ctx, {
 		    controller,
@@ -1553,7 +1553,7 @@ window.__ModuleLoader__.load({
 		      dispose();
 		      removeStyles();
 		    };
-		  }, "dsh-ccswitch-importer-plus.lifecycle");
+		  }, "dsh-ccswitch-plugin.lifecycle");
 		}
 		// Annotate the CommonJS export names for ESM import in node:
 		0 && (module.exports = {

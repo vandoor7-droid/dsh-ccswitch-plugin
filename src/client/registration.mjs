@@ -1,7 +1,6 @@
-// dsh-ccswitch-importer-plus — derivative of dsh-ccswitch-importer
-// (Apache-2.0, https://github.com/wtiaw/dsh-ccswitch-importer).
-// Changed for DSH 0.2.0-rc.2. See NOTICE and the README section
-// "与上游的差异 / Differences from upstream".
+// dsh-ccswitch-plugin — derivative of 2995288295/dsh-ccswitch-importer-plus
+// (Apache-2.0), which is itself a derivative of wtiaw/dsh-ccswitch-importer.
+// Reworked for DSH 0.2.0-rc.2. See NOTICE for the full attribution chain.
 import { MESSAGES } from "./messages.mjs";
 
 export const MODELS_FOOTER_SLOT = "settings.models.footer";
@@ -15,7 +14,7 @@ export const MODELS_FOOTER_SLOT = "settings.models.footer";
 export function registerReasoningSettings(ctx, { controller, importer, component, t }) {
   // Register the whole catalogue, not just `nav`: every string the panels render
   // resolves through these keys, so a locale switch translates the entire UI.
-  ctx.locale?.register?.("dsh-ccswitch-importer-plus", MESSAGES);
+  ctx.locale?.register?.("dsh-ccswitch-plugin", MESSAGES);
 
   ctx.slots.inject(MODELS_FOOTER_SLOT, () => ctx.slots.register({
     name: MODELS_FOOTER_SLOT,

@@ -1,10 +1,10 @@
-# DSH CCSwitch 导入器（社区增强版）
+# DSH CC Switch 管理器
 
-将 CCSwitch 里的 Codex、Claude、Claude Desktop 与 OpenCode provider 导入 DeepSeek Harness，并在同一个「设置 -> 模型」页面管理每个模型的推理深度。
+将 CC Switch 里的 Codex、Claude、Claude Desktop 与 OpenCode provider 导入 DeepSeek Harness，并在同一个「设置 -> 模型」页面管理每个模型的推理深度。
 
 [English README](./README.en.md)
 
-> **衍生作品说明**：本插件是 [wtiaw/dsh-ccswitch-importer](https://github.com/wtiaw/dsh-ccswitch-importer)（Apache-2.0）的**衍生版**，由第三方维护，**不是原作者的官方版本**。上游版本面向 DSH 0.1.x；本版本针对 **DSH 0.2.0-rc.2** 重写了 Host/Client 接线，并修复了批量导入、凭据脱敏、多语言等问题。npm 包名为 `dsh-ccswitch-importer-plus`，插件 ID 与 loader ID 与包名一致。完整变更清单见[与上游的差异](#与上游的差异)。
+> **衍生作品说明**：本插件是 [2995288295/dsh-ccswitch-importer-plus](https://github.com/2995288295/dsh-ccswitch-importer-plus)（Apache-2.0）的**衍生版**，而后者又是 [wtiaw/dsh-ccswitch-importer](https://github.com/wtiaw/dsh-ccswitch-importer)（Apache-2.0）的衍生版。本版本由第三方维护，**不是任何上游作者的官方版本**。原始版本面向 DSH 0.1.x；中间 fork 针对 **DSH 0.2.0-rc.2** 重写了 Host/Client 接线；本版本在此基础上继续开发。npm 包名为 `dsh-ccswitch-plugin`，插件 ID 与 loader ID 与包名一致。完整归属链见 [NOTICE](./NOTICE)。
 
 ## 功能
 
@@ -24,13 +24,13 @@ CCSwitch 是只读导入源。首次导入后，DSH 设置和 credentials 服务
 从 GitHub 安装：
 
 ```bash
-dsh plugin --profile desktop add github:2995288295/dsh-ccswitch-importer-plus
+dsh plugin --profile desktop add github:vandoor7-droid/dsh-ccswitch-plugin
 ```
 
 从本地源码安装：
 
 ```bash
-dsh plugin --profile desktop add ./dsh-ccswitch-importer-plus
+dsh plugin --profile desktop add ./dsh-ccswitch-plugin
 ```
 
 安装或更新后刷新 DSH Web 页面，打开 **设置 -> 模型**。
@@ -78,6 +78,17 @@ DSH_CATALOG_ORIGIN=https://catalog.example.com npm run build:catalog
 - 读取需要 Node.js 22.19 或更高版本，以支持只读 SQLite API。
 - 插件只处理 CCSwitch 的自定义 Codex / Claude / Claude Desktop / OpenCode provider 和当前数据库字段；「测试连接」先请求 `{baseURL}/models`（免费、不发推理请求），只有当上游不提供模型列表（`401`/`403`/`404`/`405`/`501`）时，才对该 provider 真正使用的端点补发一次 **1 token** 的最小请求，用于区分「中转站不暴露 `/models`」与「凭据确实无效」。它不写入任何设置，失败时会把上游自己的错误原文（脱敏后）一并显示。
 - 未知模型和不合法等级默认关闭，避免向网关发送未确认的 reasoning 参数。
+
+## 与 dsh-ccswitch-importer-plus 的差异
+
+本版本（`dsh-ccswitch-plugin`）基于 [2995288295/dsh-ccswitch-importer-plus](https://github.com/2995288295/dsh-ccswitch-importer-plus)，继承了它针对 DSH 0.2.0-rc.2 的全部重写工作。当前相对它的增量：
+
+- 包名、插件 ID、loader ID、locale 命名空间、样式 ID、折叠偏好键统一从 `dsh-ccswitch-importer-plus` 改为 `dsh-ccswitch-plugin`。
+- `package.json` 的 `author` 改为本项目维护者，`contributors` 保留中间 fork 作者与原 upstream 作者，`repository`/`bugs`/`homepage` 指向本仓库。
+- `NOTICE` 重写为三代归属链（本仓库 -> `2995288295/dsh-ccswitch-importer-plus` -> `wtiaw/dsh-ccswitch-importer`）。
+- 每个被改动源文件的头部注释同步为完整归属链。
+
+> 折叠偏好键改名意味着升级后浏览器里旧的折叠状态会被重置一次，属于预期行为。
 
 ## 与上游的差异
 

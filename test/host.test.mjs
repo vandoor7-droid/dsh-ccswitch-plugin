@@ -1,7 +1,6 @@
-// dsh-ccswitch-importer-plus — derivative of dsh-ccswitch-importer
-// (Apache-2.0, https://github.com/wtiaw/dsh-ccswitch-importer).
-// Changed for DSH 0.2.0-rc.2. See NOTICE and the README section
-// "与上游的差异 / Differences from upstream".
+// dsh-ccswitch-plugin — derivative of 2995288295/dsh-ccswitch-importer-plus
+// (Apache-2.0), which is itself a derivative of wtiaw/dsh-ccswitch-importer.
+// Reworked for DSH 0.2.0-rc.2. See NOTICE for the full attribution chain.
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { apply, inject, name } from '../src/host/index.mjs'
@@ -20,12 +19,12 @@ test('Host apply registers injected routes and disposes them', () => {
       },
     },
     effect(effect, label) {
-      assert.equal(label, 'dsh-ccswitch-importer-plus: routes')
+      assert.equal(label, 'dsh-ccswitch-plugin: routes')
       effectCleanup = effect()
     },
   }
 
-  assert.equal(name, 'dsh-ccswitch-importer-plus')
+  assert.equal(name, 'dsh-ccswitch-plugin')
   assert.deepEqual(inject, ['webServer', 'settings', 'credentials'])
   apply(ctx)
   assert.deepEqual(registered.map((route) => route.path), [

@@ -4,7 +4,7 @@
 # Requirements (one of):
 #   - npx wrangler login  (one-time browser authorization), or
 #   - CLOUDFLARE_API_TOKEN with Pages:Edit permission
-#   - DSH_CATALOG_ORIGIN set to the final pages.dev URL, e.g. https://dsh-ccswitch-importer-plus-catalog.pages.dev
+#   - DSH_CATALOG_ORIGIN set to the final pages.dev URL, e.g. https://dsh-ccswitch-plugin-catalog.pages.dev
 set -euo pipefail
 
 # Windows: wrangler may store its OAuth config under a non-default XDG path.
@@ -24,7 +24,7 @@ mkdir -p catalog
 printf "/v1/plugins\n  Content-Type: application/json\n" > catalog/_headers
 printf "/v1/plugins  /v1/plugins.json  200\n" > catalog/_redirects
 
-PROJECT="${DSH_CATALOG_PROJECT:-dsh-ccswitch-importer-plus-catalog}"
+PROJECT="${DSH_CATALOG_PROJECT:-dsh-ccswitch-plugin-catalog}"
 # Create the project on first deploy; ignore the "already exists" error on later runs.
 npx --yes wrangler@latest pages project create "$PROJECT" --production-branch main >/dev/null 2>&1 || true
 npx --yes wrangler@latest pages deploy catalog --project-name "$PROJECT" --branch main

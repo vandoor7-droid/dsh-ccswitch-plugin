@@ -791,7 +791,7 @@ function defaultSourcePath() {
   return DEFAULT_DB_CANDIDATES[0]?.();
 }
 function defaultLogger(message) {
-  console.error("[dsh-ccswitch-importer-plus]", message);
+  console.error("[dsh-ccswitch-plugin]", message);
 }
 function scanFailureMessage(err, dbPath) {
   const reason = err?.code ?? err?.name ?? "error";
@@ -1344,7 +1344,7 @@ function makeRoutes(deps = {}) {
           writeJson(response, 200, { results: results.map((result) => publicResult(result, knownSecretsFor(result, secretByProfileId))) });
         } catch (err) {
           const label = err instanceof Error ? err.name : typeof err;
-          console.error("[dsh-ccswitch-importer-plus] import failed:", `${label}: ${redactText(err, knownSecrets)}`);
+          console.error("[dsh-ccswitch-plugin] import failed:", `${label}: ${redactText(err, knownSecrets)}`);
           writeJson(response, 500, { error: "import failed" });
         }
       }
@@ -1386,7 +1386,7 @@ function makeRoutes(deps = {}) {
           writeJson(response, 200, { results });
         } catch (err) {
           const label = err instanceof Error ? err.name : typeof err;
-          console.error("[dsh-ccswitch-importer-plus] probe failed:", `${label}: ${redactText(err, knownSecrets)}`);
+          console.error("[dsh-ccswitch-plugin] probe failed:", `${label}: ${redactText(err, knownSecrets)}`);
           writeJson(response, 500, { error: "probe failed" });
         }
       }
@@ -1402,7 +1402,7 @@ function knownSecretsFor(result, secretByProfileId) {
 }
 
 // src/host/index.mjs
-var name = "dsh-ccswitch-importer-plus";
+var name = "dsh-ccswitch-plugin";
 var inject = ["webServer", "settings", "credentials"];
 function apply(ctx) {
   const routes = makeRoutes({
@@ -1421,7 +1421,7 @@ function apply(ctx) {
     return () => {
       for (const dispose of disposers) if (typeof dispose === "function") dispose();
     };
-  }, "dsh-ccswitch-importer-plus: routes");
+  }, "dsh-ccswitch-plugin: routes");
 }
 export {
   apply,

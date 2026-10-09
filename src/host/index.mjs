@@ -1,11 +1,10 @@
-// dsh-ccswitch-importer-plus — derivative of dsh-ccswitch-importer
-// (Apache-2.0, https://github.com/wtiaw/dsh-ccswitch-importer).
-// Changed for DSH 0.2.0-rc.2. See NOTICE and the README section
-// "与上游的差异 / Differences from upstream".
+// dsh-ccswitch-plugin — derivative of 2995288295/dsh-ccswitch-importer-plus
+// (Apache-2.0), which is itself a derivative of wtiaw/dsh-ccswitch-importer.
+// Reworked for DSH 0.2.0-rc.2. See NOTICE for the full attribution chain.
 import { importProfiles } from '../../lib/core/importer.js'
 import { makeRoutes } from './routes.mjs'
 
-export const name = 'dsh-ccswitch-importer-plus'
+export const name = 'dsh-ccswitch-plugin'
 export const inject = ['webServer', 'settings', 'credentials']
 
 export function apply(ctx) {
@@ -25,5 +24,5 @@ export function apply(ctx) {
     return () => {
       for (const dispose of disposers) if (typeof dispose === 'function') dispose()
     }
-  }, 'dsh-ccswitch-importer-plus: routes')
+  }, 'dsh-ccswitch-plugin: routes')
 }

@@ -1,7 +1,6 @@
-// dsh-ccswitch-importer-plus — derivative of dsh-ccswitch-importer
-// (Apache-2.0, https://github.com/wtiaw/dsh-ccswitch-importer).
-// Changed for DSH 0.2.0-rc.2. See NOTICE and the README section
-// "与上游的差异 / Differences from upstream".
+// dsh-ccswitch-plugin — derivative of 2995288295/dsh-ccswitch-importer-plus
+// (Apache-2.0), which is itself a derivative of wtiaw/dsh-ccswitch-importer.
+// Reworked for DSH 0.2.0-rc.2. See NOTICE for the full attribution chain.
 import { discoverSources, scanSource, defaultSourcePath, SCAN_REASON } from '../../lib/core/scan.js'
 import { classifyProfiles } from '../../lib/core/mapper.js'
 import { importProfiles as runImport } from '../../lib/core/importer.js'
@@ -292,7 +291,7 @@ export function makeRoutes(deps = {}) {
           // Never log the raw error object: it can carry request bodies and
           // credentials straight past every redactor in this file.
           const label = err instanceof Error ? err.name : typeof err
-          console.error('[dsh-ccswitch-importer-plus] import failed:', `${label}: ${redactText(err, knownSecrets)}`)
+          console.error('[dsh-ccswitch-plugin] import failed:', `${label}: ${redactText(err, knownSecrets)}`)
           writeJson(response, 500, { error: 'import failed' })
         }
       },
@@ -341,7 +340,7 @@ export function makeRoutes(deps = {}) {
           writeJson(response, 200, { results })
         } catch (err) {
           const label = err instanceof Error ? err.name : typeof err
-          console.error('[dsh-ccswitch-importer-plus] probe failed:', `${label}: ${redactText(err, knownSecrets)}`)
+          console.error('[dsh-ccswitch-plugin] probe failed:', `${label}: ${redactText(err, knownSecrets)}`)
           writeJson(response, 500, { error: 'probe failed' })
         }
       },

@@ -1,10 +1,10 @@
-# DSH CCSwitch Importer (community edition)
+# DSH CC Switch Manager
 
-Import CCSwitch Codex, Claude, Claude Desktop, and OpenCode providers into DeepSeek Harness and manage per-model reasoning depth on the same **Settings -> Models** page.
+Import CC Switch Codex, Claude, Claude Desktop, and OpenCode providers into DeepSeek Harness and manage per-model reasoning depth on the same **Settings -> Models** page.
 
 [中文 README](./README.md)
 
-> **Derivative work notice**: this plugin is a **derivative** of [wtiaw/dsh-ccswitch-importer](https://github.com/wtiaw/dsh-ccswitch-importer) (Apache-2.0), maintained by a third party. It is **not the original author's official release**. The upstream version targets DSH 0.1.x; this version reworks the Host/Client wiring for **DSH 0.2.0-rc.2** and fixes batch import, secret redaction, and localization. The npm package is `dsh-ccswitch-importer-plus`; the plugin id and loader id match the package name. See [Differences from upstream](#differences-from-upstream).
+> **Derivative work notice**: this plugin is a **derivative** of [2995288295/dsh-ccswitch-importer-plus](https://github.com/2995288295/dsh-ccswitch-importer-plus) (Apache-2.0), which is itself a derivative of [wtiaw/dsh-ccswitch-importer](https://github.com/wtiaw/dsh-ccswitch-importer) (Apache-2.0). It is maintained by a third party and is **not any upstream author's official release**. The original version targets DSH 0.1.x; the intermediate fork reworked the Host/Client wiring for **DSH 0.2.0-rc.2**; this version continues from there. The npm package is `dsh-ccswitch-plugin`; the plugin id and loader id match the package name. See [NOTICE](./NOTICE) for the full attribution chain.
 
 ## Features
 
@@ -24,13 +24,13 @@ CCSwitch is a read-only import source. After import, DSH settings and the creden
 Install from GitHub:
 
 ```bash
-dsh plugin --profile desktop add github:2995288295/dsh-ccswitch-importer-plus
+dsh plugin --profile desktop add github:vandoor7-droid/dsh-ccswitch-plugin
 ```
 
 Install from a local checkout:
 
 ```bash
-dsh plugin --profile desktop add ./dsh-ccswitch-importer-plus
+dsh plugin --profile desktop add ./dsh-ccswitch-plugin
 ```
 
 After installing or updating, reload DSH Web and open **Settings -> Models**.

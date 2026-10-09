@@ -1,7 +1,7 @@
 {
-  "name": "dsh-ccswitch-importer-plus",
-  "version": "0.2.0-rc.6",
-  "description": "Import CC Switch Codex, Claude and OpenCode providers into DeepSeek Harness and configure per-model reasoning depth.",
+  "name": "dsh-ccswitch-plugin",
+  "version": "0.1.0",
+  "description": "Manage CC Switch provider profiles inside DeepSeek Harness: import, add, edit, switch, and configure per-model reasoning depth.",
   "keywords": [
     "dsh",
     "dsh-plugin",
@@ -11,14 +11,19 @@
     "codex",
     "claude",
     "opencode",
+    "provider-manager",
     "provider-import",
     "reasoning-effort"
   ],
   "author": {
-    "name": "灰老大",
-    "url": "https://github.com/2995288295"
+    "name": "vandoor7-droid",
+    "url": "https://github.com/vandoor7-droid"
   },
   "contributors": [
+    {
+      "name": "灰老大 (dsh-ccswitch-importer-plus)",
+      "url": "https://github.com/2995288295"
+    },
     {
       "name": "wtiaw (original dsh-ccswitch-importer)",
       "url": "https://github.com/wtiaw"
@@ -88,12 +93,12 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/2995288295/dsh-ccswitch-importer-plus.git"
+    "url": "git+https://github.com/vandoor7-droid/dsh-ccswitch-plugin.git"
   },
   "bugs": {
-    "url": "https://github.com/2995288295/dsh-ccswitch-importer-plus/issues"
+    "url": "https://github.com/vandoor7-droid/dsh-ccswitch-plugin/issues"
   },
-  "homepage": "https://github.com/2995288295/dsh-ccswitch-importer-plus#readme",
+  "homepage": "https://github.com/vandoor7-droid/dsh-ccswitch-plugin#readme",
   "publishConfig": {
     "access": "public"
   },

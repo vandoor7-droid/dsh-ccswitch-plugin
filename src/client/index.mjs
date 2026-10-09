@@ -1,14 +1,13 @@
-// dsh-ccswitch-importer-plus — derivative of dsh-ccswitch-importer
-// (Apache-2.0, https://github.com/wtiaw/dsh-ccswitch-importer).
-// Changed for DSH 0.2.0-rc.2. See NOTICE and the README section
-// "与上游的差异 / Differences from upstream".
+// dsh-ccswitch-plugin — derivative of 2995288295/dsh-ccswitch-importer-plus
+// (Apache-2.0), which is itself a derivative of wtiaw/dsh-ccswitch-importer.
+// Reworked for DSH 0.2.0-rc.2. See NOTICE for the full attribution chain.
 import { createReasoningSettingsController } from "./controller.mjs";
 import { createCCSwitchImportController } from "./import-controller.mjs";
 import { registerReasoningSettings } from "./registration.mjs";
 import { ModelsFooterPanel } from "../ui/ModelsFooterPanel.mjs";
 import { installEmbedStyles } from "./styles.mjs";
 
-export const name = "dsh-ccswitch-importer-plus";
+export const name = "dsh-ccswitch-plugin";
 
 // 0.2.0: remote settings/credentials namespaces are mounted by dsh-api-remotes;
 // dsh-client-runtime no longer exists and connection.api is gone.
@@ -31,7 +30,7 @@ export function apply(ctx) {
       await importer.scan({ keepResults: true });
     },
   });
-  const t = ctx.locale.bind("dsh-ccswitch-importer-plus");
+  const t = ctx.locale.bind("dsh-ccswitch-plugin");
   const removeStyles = installEmbedStyles();
   const dispose = registerReasoningSettings(ctx, {
     controller,
@@ -45,5 +44,5 @@ export function apply(ctx) {
       dispose();
       removeStyles();
     };
-  }, "dsh-ccswitch-importer-plus.lifecycle");
+  }, "dsh-ccswitch-plugin.lifecycle");
 }

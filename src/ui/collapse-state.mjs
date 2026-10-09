@@ -1,7 +1,6 @@
-// dsh-ccswitch-importer-plus — derivative of dsh-ccswitch-importer
-// (Apache-2.0, https://github.com/wtiaw/dsh-ccswitch-importer).
-// Changed for DSH 0.2.0-rc.2. See NOTICE and the README section
-// "与上游的差异 / Differences from upstream".
+// dsh-ccswitch-plugin — derivative of 2995288295/dsh-ccswitch-importer-plus
+// (Apache-2.0), which is itself a derivative of wtiaw/dsh-ccswitch-importer.
+// Reworked for DSH 0.2.0-rc.2. See NOTICE for the full attribution chain.
 /**
  * Collapse preferences for the reasoning editor panels, persisted in localStorage.
  *
@@ -10,7 +9,7 @@
  * to the browser localStorage when available.
  */
 
-export const COLLAPSE_KEY = "dsh-ccswitch-importer-plus:collapse:v1";
+export const COLLAPSE_KEY = "dsh-ccswitch-plugin:collapse:v1";
 
 const EMPTY = Object.freeze({
   reasoningPanel: false,

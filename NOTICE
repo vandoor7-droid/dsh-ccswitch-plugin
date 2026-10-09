@@ -1,14 +1,22 @@
-dsh-ccswitch-importer-plus
-Copyright 2026 灰老大 (https://github.com/2995288295)
+dsh-ccswitch-plugin
+Copyright 2026 vandoor7-droid (https://github.com/vandoor7-droid)
 
 This product is a derivative work of
-  dsh-ccswitch-importer  (https://github.com/wtiaw/dsh-ccswitch-importer)
+  dsh-ccswitch-importer-plus
+  (https://github.com/2995288295/dsh-ccswitch-importer-plus)
+  Copyright 2026 灰老大
+  Licensed under the Apache License, Version 2.0.
+
+  which is itself a derivative work of
+  dsh-ccswitch-importer
+  (https://github.com/wtiaw/dsh-ccswitch-importer)
   Copyright 2026 wtiaw
   Licensed under the Apache License, Version 2.0.
 
-The original work targets DeepSeek Harness 0.1.x. This derivative was
-reworked for DeepSeek Harness 0.2.0-rc.2 and carries additional fixes.
-Every source file that was changed carries a header notice; the full list of
-changes is in the README section "与上游的差异 / Differences from upstream".
+The original work targets DeepSeek Harness 0.1.x. The intermediate fork was
+reworked for DeepSeek Harness 0.2.0-rc.2 and carries additional fixes. This
+derivative keeps that 0.2.0-rc.2 wiring and extends the plugin into a full
+CC Switch provider manager. Every source file that was changed carries a
+header notice.
 
 The original license text is kept unmodified in LICENSE.
