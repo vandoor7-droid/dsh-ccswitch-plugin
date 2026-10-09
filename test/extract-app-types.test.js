@@ -181,7 +181,7 @@ test('hermes maps every api_mode onto a DSH protocol', () => {
   }
 })
 
-test('hermes keeps id, name and contextLength from the models array', () => {
+test('hermes keeps id, name and contextWindow from the models array', () => {
   const profile = extractProfile(row('hermes', {
     base_url: 'https://hermes.example/v1',
     api_key: 'sk-hermes',
@@ -191,8 +191,11 @@ test('hermes keeps id, name and contextLength from the models array', () => {
       { id: 'm-2' },
     ],
   }))
+  // hermes spells it `context_length`; llm-pi-ai's model profile reads
+  // `contextWindow`. An unmapped key would be dropped by the schema, so the
+  // assertion is on the DSH spelling, not the source one.
   assert.deepEqual(profile.models, [
-    { id: 'm-1', name: 'Model One', contextLength: 200000 },
+    { id: 'm-1', name: 'Model One', contextWindow: 200000 },
     { id: 'm-2' },
   ])
 })
