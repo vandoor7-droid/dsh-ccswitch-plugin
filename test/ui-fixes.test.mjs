@@ -213,7 +213,7 @@ test('every blocked code has a translation, including the ones the UI builds dyn
 
   // Codes whose reason embeds a variable part must take the {detail} placeholder
   // in both locales, otherwise the detail is silently dropped.
-  for (const code of [BLOCKED.UNSUPPORTED_APP_TYPE, BLOCKED.UNSUPPORTED_OPENCODE_ADAPTER, BLOCKED.UNSUPPORTED_GEMINI_PROTOCOL, BLOCKED.UNSUPPORTED_PI_API, BLOCKED.UNSUPPORTED_MCODE_API, BLOCKED.UNSUPPORTED_OPENCLAW_API, BLOCKED.UNSUPPORTED_CLAUDE_DESKTOP_PROTOCOL]) {
+  for (const code of [BLOCKED.UNSUPPORTED_APP_TYPE, BLOCKED.UNSUPPORTED_OPENCODE_ADAPTER, BLOCKED.UNSUPPORTED_GEMINI_PROTOCOL, BLOCKED.UNSUPPORTED_PI_API, BLOCKED.UNSUPPORTED_MCODE_API, BLOCKED.UNSUPPORTED_OPENCLAW_API, BLOCKED.UNSUPPORTED_CLAUDE_DESKTOP_PROTOCOL, BLOCKED.UNSUPPORTED_GROK_API_BACKEND]) {
     for (const locale of ['zh', 'en']) {
       assert.match(MESSAGES[locale][`importer.blocked.${code}`], /\{detail\}/, `${locale}: ${code} lost {detail}`)
     }
@@ -228,7 +228,7 @@ test('the UI fallback covers every blocked code', () => {
   const missing = [...BLOCKED_CODES].filter((code) => !Object.hasOwn(BLOCKED_FALLBACK, code))
   assert.deepEqual(missing, [])
   // A code that embeds a variable part must interpolate it here too.
-  for (const code of [BLOCKED.UNSUPPORTED_APP_TYPE, BLOCKED.UNSUPPORTED_OPENCODE_ADAPTER, BLOCKED.UNSUPPORTED_GEMINI_PROTOCOL, BLOCKED.UNSUPPORTED_PI_API, BLOCKED.UNSUPPORTED_MCODE_API, BLOCKED.UNSUPPORTED_OPENCLAW_API, BLOCKED.UNSUPPORTED_CLAUDE_DESKTOP_PROTOCOL]) {
+  for (const code of [BLOCKED.UNSUPPORTED_APP_TYPE, BLOCKED.UNSUPPORTED_OPENCODE_ADAPTER, BLOCKED.UNSUPPORTED_GEMINI_PROTOCOL, BLOCKED.UNSUPPORTED_PI_API, BLOCKED.UNSUPPORTED_MCODE_API, BLOCKED.UNSUPPORTED_OPENCLAW_API, BLOCKED.UNSUPPORTED_CLAUDE_DESKTOP_PROTOCOL, BLOCKED.UNSUPPORTED_GROK_API_BACKEND]) {
     assert.match(BLOCKED_FALLBACK[code], /\{detail\}/, `${code} lost {detail}`)
   }
 })

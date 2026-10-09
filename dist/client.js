@@ -173,6 +173,17 @@ window.__ModuleLoader__.load({
 		   * host so the row can still name what it would have pointed at.
 		   */
 		  UNSUPPORTED_GEMINI_PROTOCOL: "unsupported-gemini-protocol",
+		  /**
+		   * grokbuild rows hold Grok Build's own TOML, whose model table is selected by
+		   * `[models] default`. These are the ways a stored row can fail to yield one
+		   * usable endpoint. An `env_key` credential is deliberately not resolved (see
+		   * `extractGrokbuild`) and reports as MISSING_GROK_KEY.
+		   */
+		  MISSING_GROK_MODEL: "missing-grok-model",
+		  MISSING_GROK_BASE_URL: "missing-grok-base-url",
+		  MISSING_GROK_KEY: "missing-grok-key",
+		  /** `api_backend` was present but is neither responses nor chat_completions. */
+		  UNSUPPORTED_GROK_API_BACKEND: "unsupported-grok-api-backend",
 		  MISSING_HERMES_KEY: "missing-hermes-key",
 		  MISSING_HERMES_BASE_URL: "missing-hermes-base-url",
 		  MISSING_PI_KEY: "missing-pi-key",
@@ -1019,6 +1030,10 @@ window.__ModuleLoader__.load({
 		    "importer.blocked.missing-claude-desktop-base-url": "\u7F3A\u5C11 base URL\uFF08\u9876\u7EA7 baseUrl \u4E0E env.ANTHROPIC_BASE_URL \u90FD\u6CA1\u6709\uFF09",
 		    "importer.blocked.unsupported-claude-desktop-protocol": "claude-desktop \u7684 apiFormat \u4E0D\u662F DSH \u652F\u6301\u7684\u534F\u8BAE\uFF1A{detail}",
 		    "importer.blocked.unsupported-gemini-protocol": "Gemini CLI \u4F7F\u7528\u539F\u751F\u534F\u8BAE\uFF0CDSH \u6CA1\u6709\u5BF9\u5E94\u9002\u914D\u5668\uFF1A{detail}\uFF1B\u8BF7\u6539\u7528 OpenAI \u517C\u5BB9\u7684 Gemini \u4E2D\u8F6C",
+		    "importer.blocked.missing-grok-model": "Grok \u914D\u7F6E\u91CC\u6CA1\u6709\u53EF\u7528\u7684\u6A21\u578B\u8868\uFF08[models] default \u672A\u6307\u5411\u4EFB\u4F55\u6A21\u578B\u8868\uFF09",
+		    "importer.blocked.missing-grok-base-url": "Grok \u914D\u7F6E\u7684\u6A21\u578B\u8868\u7F3A\u5C11 base_url",
+		    "importer.blocked.missing-grok-key": "Grok \u914D\u7F6E\u7684\u6A21\u578B\u8868\u7F3A\u5C11 api_key\uFF08env_key \u6307\u5411\u73AF\u5883\u53D8\u91CF\uFF0C\u5BFC\u5165\u65F6\u4E0D\u4F1A\u4EE3\u8BFB\uFF09",
+		    "importer.blocked.unsupported-grok-api-backend": "Grok \u7684 api_backend \u4E0D\u662F DSH \u652F\u6301\u7684\u534F\u8BAE\uFF1A{detail}",
 		    "importer.blocked.missing-hermes-key": "\u7F3A\u5C11 API key\uFF08api_key\uFF09",
 		    "importer.blocked.missing-hermes-base-url": "\u7F3A\u5C11 base URL\uFF08base_url\uFF09",
 		    "importer.blocked.missing-pi-key": "\u7F3A\u5C11 API key\uFF08apiKey\uFF09",
@@ -1233,6 +1248,10 @@ window.__ModuleLoader__.load({
 		    "importer.blocked.missing-claude-desktop-base-url": "missing base URL (neither top-level baseUrl nor env.ANTHROPIC_BASE_URL)",
 		    "importer.blocked.unsupported-claude-desktop-protocol": "claude-desktop's apiFormat is not a protocol DSH supports: {detail}",
 		    "importer.blocked.unsupported-gemini-protocol": "the Gemini CLI speaks the Gemini-native protocol and DSH has no adapter for it: {detail}; use an OpenAI-compatible Gemini relay instead",
+		    "importer.blocked.missing-grok-model": "the Grok configuration has no usable model table ([models] default names none)",
+		    "importer.blocked.missing-grok-base-url": "the Grok model table has no base_url",
+		    "importer.blocked.missing-grok-key": "the Grok model table has no api_key (env_key names an environment variable, which is not read on import)",
+		    "importer.blocked.unsupported-grok-api-backend": "the Grok api_backend is not a protocol DSH supports: {detail}",
 		    "importer.blocked.missing-hermes-key": "missing API key (api_key)",
 		    "importer.blocked.missing-hermes-base-url": "missing base URL (base_url)",
 		    "importer.blocked.missing-pi-key": "missing API key (apiKey)",
@@ -1934,6 +1953,10 @@ window.__ModuleLoader__.load({
 		  "missing-claude-desktop-base-url": "\u7F3A\u5C11 base URL\uFF08\u9876\u7EA7 baseUrl \u4E0E env.ANTHROPIC_BASE_URL \u90FD\u6CA1\u6709\uFF09",
 		  "unsupported-claude-desktop-protocol": "claude-desktop \u7684 apiFormat \u4E0D\u662F DSH \u652F\u6301\u7684\u534F\u8BAE\uFF1A{detail}",
 		  "unsupported-gemini-protocol": "Gemini CLI \u4F7F\u7528\u539F\u751F\u534F\u8BAE\uFF0CDSH \u6CA1\u6709\u5BF9\u5E94\u9002\u914D\u5668\uFF1A{detail}\uFF1B\u8BF7\u6539\u7528 OpenAI \u517C\u5BB9\u7684 Gemini \u4E2D\u8F6C",
+		  "missing-grok-model": "Grok \u914D\u7F6E\u91CC\u6CA1\u6709\u53EF\u7528\u7684\u6A21\u578B\u8868\uFF08[models] default \u672A\u6307\u5411\u4EFB\u4F55\u6A21\u578B\u8868\uFF09",
+		  "missing-grok-base-url": "Grok \u914D\u7F6E\u7684\u6A21\u578B\u8868\u7F3A\u5C11 base_url",
+		  "missing-grok-key": "Grok \u914D\u7F6E\u7684\u6A21\u578B\u8868\u7F3A\u5C11 api_key\uFF08env_key \u6307\u5411\u73AF\u5883\u53D8\u91CF\uFF0C\u5BFC\u5165\u65F6\u4E0D\u4F1A\u4EE3\u8BFB\uFF09",
+		  "unsupported-grok-api-backend": "Grok \u7684 api_backend \u4E0D\u662F DSH \u652F\u6301\u7684\u534F\u8BAE\uFF1A{detail}",
 		  "missing-hermes-key": "\u7F3A\u5C11 API key\uFF08api_key\uFF09",
 		  "missing-hermes-base-url": "\u7F3A\u5C11 base URL\uFF08base_url\uFF09",
 		  "missing-pi-key": "\u7F3A\u5C11 API key\uFF08apiKey\uFF09",

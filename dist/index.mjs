@@ -1247,6 +1247,17 @@ var BLOCKED = {
    * host so the row can still name what it would have pointed at.
    */
   UNSUPPORTED_GEMINI_PROTOCOL: "unsupported-gemini-protocol",
+  /**
+   * grokbuild rows hold Grok Build's own TOML, whose model table is selected by
+   * `[models] default`. These are the ways a stored row can fail to yield one
+   * usable endpoint. An `env_key` credential is deliberately not resolved (see
+   * `extractGrokbuild`) and reports as MISSING_GROK_KEY.
+   */
+  MISSING_GROK_MODEL: "missing-grok-model",
+  MISSING_GROK_BASE_URL: "missing-grok-base-url",
+  MISSING_GROK_KEY: "missing-grok-key",
+  /** `api_backend` was present but is neither responses nor chat_completions. */
+  UNSUPPORTED_GROK_API_BACKEND: "unsupported-grok-api-backend",
   MISSING_HERMES_KEY: "missing-hermes-key",
   MISSING_HERMES_BASE_URL: "missing-hermes-base-url",
   MISSING_PI_KEY: "missing-pi-key",
@@ -1540,6 +1551,64 @@ function parseCodexToml(text) {
   }
   return { model, reasoningEffort, provider };
 }
+function parseGrokToml(text) {
+  if (typeof text !== "string" || text.trim() === "") {
+    return { defaultModel: void 0, models: {} };
+  }
+  const models = {};
+  let defaultModel;
+  let section = null;
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (line === "" || line.startsWith("#")) continue;
+    const header = line.match(/^\[([^\]]+)\]$/);
+    if (header) {
+      const name2 = header[1];
+      if (name2 === "models") {
+        section = { kind: "models" };
+        continue;
+      }
+      const modelTable = name2.match(/^model\.(?:"([^"]*)"|'([^']*)'|(.+))$/);
+      if (modelTable) {
+        const modelName = modelTable[1] ?? modelTable[2] ?? modelTable[3];
+        section = { kind: "model", name: modelName };
+        models[modelName] = {
+          model: void 0,
+          baseUrl: void 0,
+          name: void 0,
+          apiKey: void 0,
+          envKey: void 0,
+          apiBackend: void 0,
+          contextWindow: void 0
+        };
+        continue;
+      }
+      section = { kind: "other" };
+      continue;
+    }
+    const eq = line.indexOf("=");
+    if (eq === -1) continue;
+    const key = line.slice(0, eq).trim();
+    const rawValue = line.slice(eq + 1).trim();
+    if (section !== null && section.kind === "models" && key === "default") {
+      defaultModel = unquote(rawValue);
+      continue;
+    }
+    if (section === null || section.kind !== "model") continue;
+    const entry = models[section.name];
+    if (key === "model") entry.model = unquote(rawValue);
+    else if (key === "base_url") entry.baseUrl = unquote(rawValue);
+    else if (key === "name") entry.name = unquote(rawValue);
+    else if (key === "api_key") entry.apiKey = unquote(rawValue);
+    else if (key === "env_key") entry.envKey = unquote(rawValue);
+    else if (key === "api_backend") entry.apiBackend = unquote(rawValue);
+    else if (key === "context_window") {
+      const size = Number(unquote(rawValue));
+      if (Number.isInteger(size) && size > 0) entry.contextWindow = size;
+    }
+  }
+  return { defaultModel, models };
+}
 
 // lib/core/extract.js
 var SKIP_OFFICIAL = /* @__PURE__ */ new Set([
@@ -1646,7 +1715,7 @@ function extractProfile(row) {
     return { ...base, blocked: true, blockedReason: "settings_config \u4E0D\u662F\u5408\u6CD5 JSON", blockedCode: BLOCKED.INVALID_SETTINGS_JSON };
   }
   if (appType === "codex") return extractCodex(base, parsed);
-  if (appType === "grokbuild") return extractCodex(base, parsed);
+  if (appType === "grokbuild") return extractGrokbuild(base, parsed);
   if (appType === "claude") return extractClaude(base, parsed);
   if (appType === "claude-desktop") return extractClaudeDesktop(base, parsed);
   if (appType === "opencode") return extractOpencode(base, parsed);
@@ -1690,6 +1759,77 @@ function extractCodex(base, parsed) {
     api,
     models: [{ id: model }],
     modelReasoningEffort: reasoningEffort,
+    warnings,
+    unsupported: []
+  };
+}
+function extractGrokbuild(base, parsed) {
+  const source = parsed && typeof parsed === "object" ? parsed : {};
+  const { defaultModel, models } = parseGrokToml(asText(source.config) ?? "");
+  const names = Object.keys(models);
+  const declared = asText(defaultModel);
+  const selectedName = declared !== void 0 && models[declared] !== void 0 ? declared : names.length === 1 ? names[0] : void 0;
+  if (selectedName === void 0) {
+    return {
+      ...base,
+      blocked: true,
+      blockedReason: declared === void 0 ? "Grok \u914D\u7F6E\u91CC\u6CA1\u6709 [models] default\uFF0C\u4E5F\u6CA1\u6709\u552F\u4E00\u7684\u6A21\u578B\u8868\u53EF\u7528\u4E8E\u5BFC\u5165" : `Grok \u914D\u7F6E\u7684 [models] default "${declared}" \u6CA1\u6709\u5BF9\u5E94\u7684\u6A21\u578B\u8868`,
+      blockedCode: BLOCKED.MISSING_GROK_MODEL,
+      blockedDetail: declared
+    };
+  }
+  const selected = models[selectedName];
+  const baseURL = asText(selected.baseUrl);
+  if (baseURL === void 0) {
+    return {
+      ...base,
+      blocked: true,
+      blockedReason: `Grok \u914D\u7F6E\u7684\u6A21\u578B\u8868 "${selectedName}" \u7F3A\u5C11 base_url`,
+      blockedCode: BLOCKED.MISSING_GROK_BASE_URL,
+      blockedDetail: selectedName
+    };
+  }
+  const apiKey = asText(selected.apiKey);
+  if (apiKey === void 0) {
+    const viaEnv = asText(selected.envKey);
+    return {
+      ...base,
+      blocked: true,
+      blockedReason: viaEnv === void 0 ? `Grok \u914D\u7F6E\u7684\u6A21\u578B\u8868 "${selectedName}" \u7F3A\u5C11 api_key` : `Grok \u914D\u7F6E\u7684\u6A21\u578B\u8868 "${selectedName}" \u628A\u5BC6\u94A5\u653E\u5728\u73AF\u5883\u53D8\u91CF ${viaEnv} \u91CC\uFF1B\u5BFC\u5165\u4E0D\u4F1A\u4EE3\u8BFB\u5B83\uFF0C\u8BF7\u6539\u586B api_key`,
+      blockedCode: BLOCKED.MISSING_GROK_KEY,
+      blockedDetail: selectedName
+    };
+  }
+  const warnings = [];
+  const backend = asText(selected.apiBackend);
+  let api;
+  if (backend === void 0) {
+    api = "openai-responses";
+    warnings.push("Grok \u914D\u7F6E\u6CA1\u6709 api_backend\uFF0C\u5DF2\u6309 responses \u5904\u7406");
+  } else if (backend === "responses") {
+    api = "openai-responses";
+  } else if (backend === "chat_completions") {
+    api = "openai-completions";
+  } else {
+    return {
+      ...base,
+      blocked: true,
+      blockedReason: `Grok \u7684 api_backend "${backend}" \u4E0D\u662F DSH \u652F\u6301\u7684\u534F\u8BAE\uFF08\u4EC5 responses / chat_completions\uFF09`,
+      blockedCode: BLOCKED.UNSUPPORTED_GROK_API_BACKEND,
+      blockedDetail: backend
+    };
+  }
+  const model = { id: asText(selected.model) ?? selectedName };
+  if (Number.isInteger(selected.contextWindow) && selected.contextWindow > 0) {
+    model.contextWindow = selected.contextWindow;
+  }
+  return {
+    ...base,
+    apiKey,
+    baseURL,
+    api,
+    models: [model],
+    modelReasoningEffort: void 0,
     warnings,
     unsupported: []
   };

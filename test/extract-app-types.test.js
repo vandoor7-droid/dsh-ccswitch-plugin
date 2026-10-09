@@ -276,40 +276,100 @@ test('hermes with no models falls back to a default id', () => {
   assert.match(profile.warnings.join('\n'), /gpt-4o/)
 })
 
-// --- grokbuild: the codex carrier ------------------------------------------
+// --- grokbuild: Grok Build's own config.toml --------------------------------
+//
+// A stored row is `{ config: "<TOML>" }` holding Grok's OWN shape: a
+// `[models] default` pointer plus a `[model."<name>"]` table keyed by
+// `api_backend`. It is NOT the Codex carrier the preset template starts from —
+// the form unpacks that template and rebuilds this shape before saving, so a
+// stored row has no `auth.OPENAI_API_KEY` and no `wire_api`. These fixtures
+// mirror cc-switch's own `valid_config()` (src-tauri/src/grok_config.rs).
 
-test('grokbuild rides the codex path and maps wire_api responses to openai-responses', () => {
-  const profile = extractProfile(row('grokbuild', {
-    auth: { OPENAI_API_KEY: 'sk-grok' },
-    apiFormat: 'responses',
-    config: [
-      'model_provider = "custom"',
-      'model = "grok-4"',
-      '[model_providers.custom]',
-      'name = "Grok"',
-      'base_url = "https://grok.example/v1"',
-      'wire_api = "responses"',
-      'requires_openai_auth = true',
-      '',
-    ].join('\n'),
-  }))
+const GROK_TOML = [
+  '[models]',
+  'default = "grok-4.5"',
+  '',
+  '[model."grok-4.5"]',
+  'model = "grok-4.5"',
+  'base_url = "https://api.x.ai/v1"',
+  'name = "Grok"',
+  'api_key = "xai-secret"',
+  'api_backend = "responses"',
+  'context_window = 500000',
+  '',
+].join('\n')
+
+/** A stored grokbuild row, in Grok's own shape. */
+function grokRow(toml, overrides = {}) {
+  return row('grokbuild', { config: toml }, overrides)
+}
+
+test('grokbuild reads Grok-native TOML and maps api_backend to a DSH protocol', () => {
+  const profile = extractProfile(grokRow(GROK_TOML))
   assert.equal(profile.blocked, false)
   assert.equal(profile.api, 'openai-responses')
-  assert.equal(profile.baseURL, 'https://grok.example/v1')
-  assert.equal(profile.apiKey, 'sk-grok')
-  assert.deepEqual(profile.models, [{ id: 'grok-4' }])
-  // Proof it really is the codex extractor, warnings and all.
-  assert.match(profile.warnings.join('\n'), /requires_openai_auth/)
+  assert.equal(profile.baseURL, 'https://api.x.ai/v1')
+  assert.equal(profile.apiKey, 'xai-secret')
+  // The upstream model id comes from the table, and its window travels with it.
+  assert.deepEqual(profile.models, [{ id: 'grok-4.5', contextWindow: 500000 }])
 })
 
-test('grokbuild reports the codex blocked codes', () => {
-  const noKey = extractProfile(row('grokbuild', { config: 'model = "m"\n' }))
-  assert.equal(noKey.blockedCode, BLOCKED.MISSING_OPENAI_KEY)
-  const noProvider = extractProfile(row('grokbuild', {
-    auth: { OPENAI_API_KEY: 'sk-grok' },
-    config: 'model = "m"\n',
-  }))
-  assert.equal(noProvider.blockedCode, BLOCKED.MISSING_CODEX_PROVIDER)
+test('grokbuild maps api_backend chat_completions onto openai-completions', () => {
+  const profile = extractProfile(grokRow(GROK_TOML.replace('"responses"', '"chat_completions"')))
+  assert.equal(profile.blocked, false)
+  assert.equal(profile.api, 'openai-completions')
+})
+
+test('grokbuild follows cc-switch default when api_backend is absent, with a warning', () => {
+  // DEFAULT_API_BACKEND is "responses"; following it is what makes a
+  // hand-written row importable at all.
+  const profile = extractProfile(grokRow(GROK_TOML.replace('api_backend = "responses"\n', '')))
+  assert.equal(profile.blocked, false)
+  assert.equal(profile.api, 'openai-responses')
+  assert.match(profile.warnings.join('\n'), /api_backend/)
+})
+
+test('grokbuild refuses an api_backend it cannot serve, by name', () => {
+  const profile = extractProfile(grokRow(GROK_TOML.replace('"responses"', '"grpc"')))
+  assert.equal(profile.blocked, true)
+  assert.equal(profile.blockedCode, BLOCKED.UNSUPPORTED_GROK_API_BACKEND)
+  assert.equal(profile.blockedDetail, 'grpc')
+})
+
+test('grokbuild falls back to a lone model table when [models] default resolves to nothing', () => {
+  const profile = extractProfile(grokRow(GROK_TOML.replace('default = "grok-4.5"', 'default = "absent"')))
+  assert.equal(profile.blocked, false)
+  assert.equal(profile.baseURL, 'https://api.x.ai/v1')
+})
+
+test('grokbuild refuses two unnameable tables rather than importing an arbitrary one', () => {
+  const two = GROK_TOML
+    + '\n[model."other"]\nmodel = "other"\nbase_url = "https://other.example"\n'
+    + 'name = "Other"\napi_key = "k"\napi_backend = "responses"\ncontext_window = 1\n'
+  const profile = extractProfile(grokRow(two.replace('default = "grok-4.5"', 'default = "absent"')))
+  assert.equal(profile.blocked, true)
+  assert.equal(profile.blockedCode, BLOCKED.MISSING_GROK_MODEL)
+})
+
+test('grokbuild does not resolve an env_key into a credential', () => {
+  // Reading env_key would read the DSH process's environment rather than
+  // Grok's, so the indirection is reported instead of followed.
+  const envOnly = GROK_TOML
+    .replace('api_key = "xai-secret"\n', '')
+    .replace('api_backend', 'env_key = "MY_GROK_KEY"\napi_backend')
+  const profile = extractProfile(grokRow(envOnly))
+  assert.equal(profile.blocked, true)
+  assert.equal(profile.blockedCode, BLOCKED.MISSING_GROK_KEY)
+  assert.match(profile.blockedReason, /MY_GROK_KEY/)
+  assert.equal(profile.apiKey, undefined)
+})
+
+test('grokbuild blocked paths each name their own code', () => {
+  assert.equal(extractProfile(grokRow('')).blockedCode, BLOCKED.MISSING_GROK_MODEL)
+  const noUrl = GROK_TOML.replace('base_url = "https://api.x.ai/v1"\n', '')
+  assert.equal(extractProfile(grokRow(noUrl)).blockedCode, BLOCKED.MISSING_GROK_BASE_URL)
+  const noKey = GROK_TOML.replace('api_key = "xai-secret"\n', '')
+  assert.equal(extractProfile(grokRow(noKey)).blockedCode, BLOCKED.MISSING_GROK_KEY)
 })
 
 test('grok-official and Grok Official are skipped outright', () => {
@@ -478,6 +538,10 @@ const NEW_CODES = [
   BLOCKED.UNSUPPORTED_GEMINI_PROTOCOL,
   BLOCKED.MISSING_CLAUDE_DESKTOP_KEY,
   BLOCKED.MISSING_CLAUDE_DESKTOP_BASE_URL,
+  BLOCKED.MISSING_GROK_MODEL,
+  BLOCKED.MISSING_GROK_BASE_URL,
+  BLOCKED.MISSING_GROK_KEY,
+  BLOCKED.UNSUPPORTED_GROK_API_BACKEND,
   BLOCKED.MISSING_HERMES_KEY,
   BLOCKED.MISSING_HERMES_BASE_URL,
   BLOCKED.MISSING_PI_KEY,
@@ -513,6 +577,7 @@ test('every blocked row from the new app types carries prose and a detail-free c
     row('mcode', { api: 'nope', options: { baseURL: 'https://m.example', apiKey: 'sk-k' } }),
     row('openclaw', { baseUrl: 'https://c.example', api: 'nope', apiKey: 'sk-k' }),
     row('grokbuild', { config: 'model = "m"\n' }),
+    row('grokbuild', { config: GROK_TOML.replace('"responses"', '"grpc"') }),
   ]
   for (const blockedRow of blockedRows) {
     const profile = extractProfile(blockedRow)
