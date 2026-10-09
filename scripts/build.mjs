@@ -11,6 +11,15 @@ export const PLUGIN_ID = "dsh-ccswitch-plugin";
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const DIST = resolve(ROOT, "dist");
 const CLIENT_EXTERNALS = ["react", "react-dom", "@deepseek-ai/*"];
+// `@deepseek-ai/schemastery` is externalized rather than bundled: the plugin's
+// Config schema is what makes its settings namespace exist, and DSH validates
+// configuration against that schema with its own copy, so the two must be the
+// same build. It is a peer dependency for the same reason. (Bundling would
+// happen to work today — the volatile marker is a `Symbol.for`, so it survives
+// a copy boundary — but it would silently pin the schema to whatever version
+// this repo resolved, which is the kind of drift that surfaces much later as
+// "saves report success and change nothing".)
+const HOST_EXTERNALS = ["@deepseek-ai/schemastery"];
 
 export function createLoaderBundle(id, commonJs) {
   const body = commonJs.trimEnd().split("\n").map((line) => line ? `\t\t${line}` : "").join("\n");
@@ -42,6 +51,7 @@ export async function buildAll() {
   await bundleEntry("src/host/index.mjs", "dist/index.mjs", {
     format: "esm",
     platform: "node",
+    external: HOST_EXTERNALS,
   });
 
   const client = await build({

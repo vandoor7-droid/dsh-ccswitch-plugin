@@ -1,3 +1,6 @@
+// src/host/index.mjs
+import z from "@deepseek-ai/schemastery";
+
 // lib/core/ids.js
 import { createHash } from "node:crypto";
 function shortHash(input, length) {
@@ -549,6 +552,62 @@ async function restoreCredential(credentials, ref, previous) {
   if (!previous.configured) return credentials.unset(ref);
 }
 
+// src/domain/ccs-provider.mjs
+var CCS_API_PROTOCOLS = Object.freeze([
+  "openai-completions",
+  "openai-responses",
+  "anthropic-messages"
+]);
+var CCS_REASONING_LEVELS = Object.freeze([
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max"
+]);
+var PROTOCOL_SET = new Set(CCS_API_PROTOCOLS);
+var LEVEL_SET = new Set(CCS_REASONING_LEVELS);
+function defineCCSModel(z2) {
+  return z2.object({
+    id: z2.string().required(),
+    name: z2.string(),
+    contextWindow: z2.number().step(1).min(1),
+    maxTokens: z2.number().step(1).min(1),
+    // `false` disables reasoning for this model; a dict maps each level to the
+    // wire spelling the endpoint expects, or null for "send nothing".
+    reasoningEfforts: z2.union([
+      z2.const(false),
+      z2.dict(z2.union([z2.string(), z2.const(null)]))
+    ])
+  });
+}
+function defineCCSProvider(z2) {
+  return z2.object({
+    displayName: z2.string(),
+    api: z2.union([...CCS_API_PROTOCOLS]),
+    baseURL: z2.string(),
+    apiKeyEnv: z2.string().role("credential-ref"),
+    models: z2.array(defineCCSModel(z2)).default([]),
+    notes: z2.string(),
+    icon: z2.string(),
+    iconColor: z2.string(),
+    appType: z2.string(),
+    sourceProfileId: z2.string(),
+    isCurrent: z2.boolean().default(false),
+    inFailoverQueue: z2.boolean().default(false),
+    costMultiplier: z2.number().min(0),
+    limitDailyUsd: z2.number().min(0),
+    limitMonthlyUsd: z2.number().min(0)
+  });
+}
+function defineCCSConfig(z2) {
+  return z2.object({
+    providers: z2.dict(defineCCSProvider(z2)).default({}).volatile()
+  });
+}
+
 // lib/core/scan.js
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -677,7 +736,10 @@ function modelsFromArray(list, { withContextLength = false } = {}) {
     const model = { id };
     const name2 = asText(entry.name);
     if (name2 !== void 0) model.name = name2;
-    if (withContextLength && Number.isFinite(entry.context_length)) model.contextLength = entry.context_length;
+    if (withContextLength) {
+      const context = entry.context_length;
+      if (Number.isFinite(context) && context >= 1) model.contextWindow = Math.trunc(context);
+    }
     models.push(model);
   }
   return models;
@@ -1689,7 +1751,11 @@ function knownSecretsFor(result, secretByProfileId) {
 // src/host/index.mjs
 var name = "dsh-ccswitch-plugin";
 var inject = ["webServer", "settings", "credentials"];
+var Config = defineCCSConfig(z);
 function apply(ctx) {
+  ctx.inject(["settings"], (child) => {
+    child.effect(() => child.settings.configure({ auto: false }, ctx.fiber));
+  });
   const routes = makeRoutes({
     // 0.2.0 SettingsForms has no get(); describe() returns per-namespace views.
     getProviders: async () => {
@@ -1709,6 +1775,7 @@ function apply(ctx) {
   }, "dsh-ccswitch-plugin: routes");
 }
 export {
+  Config,
   apply,
   inject,
   name
