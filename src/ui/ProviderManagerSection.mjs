@@ -14,10 +14,35 @@
  * empty or partial table rather than a thrown render.
  */
 import React, { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { makeTranslator } from "../client/i18n.mjs";
+import { makeTranslator, messagesFor } from "../client/i18n.mjs";
+import { DEFAULT_LOCALE } from "../client/messages.mjs";
+import { groupPresetsByCategory, presetVersionKeys } from "../domain/presets.mjs";
 import { draftFromPreset, draftFromProvider, emptyDraft, ProviderEditModal } from "./ProviderEditModal.mjs";
 
 const h = React.createElement;
+
+/**
+ * The fallback locale's catalogue, read once for the preset labels.
+ *
+ * Those three families — group, plan and region — are data-driven: the key is
+ * built from the preset's own field, so there is nowhere to write a literal
+ * fallback the way the static strings do. Reading them from the catalogue keeps
+ * one copy of each; the host translator still wins whenever one is wired.
+ */
+const FALLBACK = messagesFor(DEFAULT_LOCALE);
+
+/**
+ * What one preset looks like in the picker: its name, plus the version suffix
+ * CC Switch appends when a vendor sells several plans or serves two regions.
+ *
+ * A preset that declares neither dimension is shown by its name alone, which is
+ * what CC Switch does — every such entry in this catalogue is the only preset
+ * for its vendor, so there is no sibling to tell it apart from.
+ */
+export function presetOptionLabel(preset, tr) {
+  const parts = presetVersionKeys(preset).map((key) => tr(key, FALLBACK[key]));
+  return parts.length === 0 ? String(preset?.displayName ?? "") : `${preset.displayName} · ${parts.join(" · ")}`;
+}
 
 /**
  * How a failed row action is worded, per operation.
@@ -80,10 +105,114 @@ export function providerRowView(provider, snapshot) {
     credentialFound: provider?.credential === 'found',
     modelCount: Array.isArray(provider?.models) ? provider.models.length : 0,
     inFailoverQueue: provider?.inFailoverQueue === true,
+    // Whether this row can be probed at all. The probe route reads CC Switch's
+    // database and is addressed by the `profileId` a scan produced, so a
+    // provider the user added by hand or from a preset has no row to probe.
+    // The button is hidden rather than shown-and-failing: there is no action
+    // the user could take to make it work, and offering it would read as a
+    // broken feature rather than a limit of what was imported.
+    probeable: typeof provider?.sourceProfileId === 'string' && provider.sourceProfileId !== '',
     pending,
     action: pending ? snapshot?.pendingAction : undefined,
     disabled: snapshot?.status === 'busy' || snapshot?.status === 'loading',
   };
+}
+
+/**
+ * Whether one provider matches a search query — CC Switch's `ProviderList`
+ * filter, transcribed.
+ *
+ * CC Switch builds one lowercased haystack per provider out of
+ * `[name, notes, websiteUrl, extractProviderBaseUrl(settingsConfig)]` and asks
+ * whether it contains the trimmed, lowercased query. That is a plain substring
+ * test, not a word or prefix match, so "api.deep" and "deepseek" both hit the
+ * same row. This plugin stores no website, so the equivalent haystack is the
+ * display name, the notes, and the endpoint.
+ *
+ * The provider key is deliberately not searched. CC Switch keys its list by id
+ * but never shows it, so its search cannot match one; here the key is derived
+ * from the display name (`newProviderKey`), so a search for the name finds the
+ * row anyway and adding the key would only widen what matches.
+ *
+ * An empty query matches everything, which is what lets the caller run every
+ * row through this without a separate "is searching" branch.
+ *
+ * Exported so a test can pin the searched fields without a DOM.
+ */
+export function providerMatches(provider, query) {
+  const needle = String(query ?? "").trim().toLowerCase();
+  if (needle === "") return true;
+  return [provider?.displayName, provider?.notes, provider?.baseURL]
+    .filter((value) => typeof value === "string" && value !== "")
+    .join("\n")
+    .toLowerCase()
+    .includes(needle);
+}
+
+/**
+ * The fallback wording per probe reason.
+ *
+ * Same keys and same sentences as `CCSwitchImportSection`'s map, because the
+ * Host sends the same reason codes and the catalogue entries are shared. The
+ * two are separate constants only so a change to one tab's phrasing does not
+ * silently rewrite the other's.
+ */
+const PROBE_FALLBACK = {
+  ok: "连通 · {count} 个模型 · {ms}ms",
+  'ok-minimal': "连通 · 最小请求 · {ms}ms",
+  empty: "连通 · 上游没返回模型",
+  'http-error': "失败 · HTTP {status}",
+  'no-credentials': "无法测试：缺少凭据或 base URL",
+  timeout: "失败 · 超时",
+  network: "失败 · 网络错误",
+};
+
+/**
+ * Same normalization the reasoning panel uses before building a DOM id.
+ */
+function domIdPart(value) {
+  return String(value ?? "").replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 60);
+}
+
+/**
+ * How a probe verdict reads on a row.
+ *
+ * The importer's `probeLabel` handles the same Host payload and the same
+ * `importer.probe.*` catalogue; it is re-implemented rather than imported only
+ * because that one falls back to its own literal Chinese strings, and this tab
+ * needs the two extra states below. The reason codes and the shape of the
+ * outcome are identical, so the two read alike on screen.
+ */
+function probeLabel(probe, tr) {
+  if (probe?.phase === 'error') {
+    // The row cannot be probed at all, which is a different statement from a
+    // probe that ran and failed: a hand-added provider has no CC Switch row
+    // behind it, and no amount of retrying will give it one.
+    if (probe.unprobeable === true) {
+      return tr('manager.probeUnprobeable', '无法测试：该 provider 不是从 CC Switch 导入的，没有可探测的源记录');
+    }
+    const base = tr('importer.probe.requestFailed', '失败 · {message}', { message: probe.message ?? '' });
+    // A 4xx from the probe route itself means the Host half is older than this
+    // bundle and does not know the endpoint yet.
+    return probe.staleHost
+      ? `${base} · ${tr('importer.probe.hostStale', '宿主未加载该接口，重启 DSH 后重试')}`
+      : base;
+  }
+  // A connection proved by the 1-token fallback has no model list to count.
+  const reason = probe?.check === 'minimal' && probe?.ok === true
+    ? 'ok-minimal'
+    : typeof probe?.reason === 'string' && PROBE_FALLBACK[probe.reason] ? probe.reason : 'network';
+  const base = tr(`importer.probe.${reason}`, PROBE_FALLBACK[reason], {
+    count: probe?.modelCount ?? 0,
+    ms: probe?.latencyMs ?? 0,
+    status: probe?.httpStatus ?? 0,
+  });
+  // The upstream's own words are the actionable part of a failure.
+  return typeof probe?.detail === 'string' && probe.detail.length > 0 ? `${base} · ${probe.detail}` : base;
+}
+
+function probeKind(probe) {
+  return probe?.phase !== 'error' && probe?.ok === true ? 'ok' : 'error';
 }
 
 /**
@@ -130,6 +259,9 @@ export function ProviderManagerSection({ controller, t }) {
     () => controller.clearSaveFeedback?.(),
   );
   const [presetKey, setPresetKey] = useState("");
+  // The search term lives here rather than in the controller: it filters what
+  // this tab draws and has no bearing on the settings document.
+  const [query, setQuery] = useState("");
   // Per-row failure text, keyed by provider, so one row's error does not blank
   // the whole table. The controller reports the operation, not which row it was
   // for, because it cannot know how the tab groups its rows.
@@ -212,6 +344,10 @@ export function ProviderManagerSection({ controller, t }) {
   };
 
   const rows = order.map((key) => providers[key]).filter(Boolean);
+  // Filtered for display only. `rows` is still what the empty states are
+  // decided from: "this plugin has no providers" and "nothing matched your
+  // search" are different situations and must not share a sentence.
+  const visibleRows = rows.filter((provider) => providerMatches(provider, query));
 
   return h("section", { className: "dsh-ccswitch-manager", "aria-labelledby": "dsh-ccswitch-manager-title" },
     h("div", { className: "dsh-ccswitch-manager__header" },
@@ -229,7 +365,17 @@ export function ProviderManagerSection({ controller, t }) {
               onChange: (event) => applyPreset(event.target.value),
             },
               h("option", { value: "" }, tr("manager.presetNone", "自定义（空白）")),
-              ...presets.map((preset) => h("option", { key: preset.key, value: preset.key }, preset.displayName)),
+              // Grouped the way CC Switch's "add provider" list is sectioned.
+              // A `<select>` cannot show the section names any other way, and
+              // with 25-odd entries an ungrouped list is a wall.
+              ...groupPresetsByCategory(presets).map((section) => h("optgroup", {
+                key: section.group,
+                // `optgroup` takes a `label` attribute, not children.
+                label: tr(`manager.group.${section.group}`, FALLBACK[`manager.group.${section.group}`]),
+              },
+                ...section.presets.map((preset) => h("option", { key: preset.key, value: preset.key },
+                  presetOptionLabel(preset, tr))),
+              )),
             ),
           )
           : null,
@@ -294,6 +440,45 @@ export function ProviderManagerSection({ controller, t }) {
       )
       : null,
 
+    // The field only appears once there is something to narrow. On a tab with
+    // no providers it would be a control that cannot do anything, and it would
+    // sit above the empty state that is trying to explain how to get one.
+    rows.length > 0
+      ? h("div", {
+        // Laid out inline rather than through a stylesheet rule: every other
+        // class this tab uses lives in `src/client/styles.mjs`, which this
+        // change does not own. Hoisting these three declarations into a
+        // `.dsh-ccswitch-manager__search` rule there is the tidier home and is
+        // worth doing the next time that file is open.
+        style: { display: "flex", alignItems: "center", gap: "8px", minWidth: 0 },
+      },
+        h("input", {
+          // `text`, not `search`: the latter draws the browser's own clear
+          // affordance, which would sit beside the button below and clear the
+          // field twice.
+          type: "text",
+          // The edit form's own input class, so the two controls cannot drift
+          // apart in border, focus ring or font. Its `width:100%` is overridden
+          // below, because in a flex row it would push the clear button onto a
+          // second line.
+          className: "dsh-ccswitch-form__input",
+          style: { flex: "1 1 auto", width: "auto", minWidth: 0, maxWidth: "360px" },
+          value: query,
+          placeholder: tr("manager.searchPlaceholder", "按名称/备注/请求地址搜索供应商…"),
+          "aria-label": tr("manager.searchAriaLabel", "搜索供应商"),
+          disabled: busy,
+          onChange: (event) => setQuery(event.target.value),
+        }),
+        query === ""
+          ? null
+          : h("button", {
+            type: "button",
+            className: "dsh-ccswitch-import__link",
+            onClick: () => setQuery(""),
+          }, tr("manager.searchClear", "清除")),
+      )
+      : null,
+
     rows.length === 0
       ? (() => {
         const state = emptyState(snapshot);
@@ -309,10 +494,18 @@ export function ProviderManagerSection({ controller, t }) {
           ? tr("manager.empty", "还没有 provider，点击「新增 provider」开始。")
           : tr("manager.emptyNoNamespace", "本插件尚未创建设置命名空间；添加第一个 provider 时会一并创建。"));
       })()
-      : h("div", { className: "dsh-ccswitch-manager__list" },
-        ...rows.map((provider) => {
+      // "Nothing matched" is not "nothing here": the catalogue is non-empty, so
+      // neither empty state above would be true, and telling the user there are
+      // no providers while a search is hiding them would be a lie.
+      : visibleRows.length === 0
+        ? h("p", { role: "status", className: "dsh-ccswitch-manager__empty" },
+          tr("manager.noSearchResults", "没有符合搜索条件的供应商。"))
+        : h("div", { className: "dsh-ccswitch-manager__list" },
+        ...visibleRows.map((provider) => {
           const view = providerRowView(provider, snapshot);
           const { name, pending, action } = view;
+          const probe = snapshot.probes?.[view.key];
+          const testing = probe?.phase === 'testing';
           return h("div", {
             key: view.key,
             className: "dsh-ccswitch-manager__row"
@@ -348,6 +541,28 @@ export function ProviderManagerSection({ controller, t }) {
                 : null,
             ),
             h("div", { className: "dsh-ccswitch-manager__row-actions", role: "group", "aria-label": tr("manager.rowActionsAria", "{name} 的操作", { name }) },
+              // Only a provider that came through an import has a CC Switch row
+              // behind it, so only one of those can be probed — see
+              // `providerRowView.probeable`. The button is hidden rather than
+              // shown-and-disabled: there is nothing the user could do to make
+              // it work, and a permanently dead control reads as a bug.
+              view.probeable
+                ? h("button", {
+                  type: "button",
+                  className: "dsh-ccswitch-import__link dsh-ccswitch-import__probe-btn",
+                  disabled: testing || view.disabled,
+                  "aria-label": tr("importer.probe.testAria", "测试 {name} 的连接", { name }),
+                  onClick: () => { Promise.resolve(controller.probeOne(view.key)).catch(() => {}); },
+                }, testing ? tr("importer.probe.testing", "测试中…") : tr("importer.probe.test", "测试连接"))
+                : null,
+              // Sitting beside the button rather than under the row, so the
+              // verdict reads as the answer to the click that asked for it.
+              probe && !testing
+                ? h("span", {
+                  role: "status",
+                  className: `dsh-ccswitch-import__probe dsh-ccswitch-import__probe--${probeKind(probe)}`,
+                }, probeLabel(probe, tr))
+                : null,
               h("button", {
                 type: "button",
                 className: "dsh-ccswitch-import__link",

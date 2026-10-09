@@ -549,3 +549,213 @@ test('getSnapshot returns a stable reference between publishes', async () => {
   // reference changes on every read.
   assert.equal(controller.getSnapshot(), controller.getSnapshot())
 })
+
+// --- preset sanitization: the CC Switch fields the picker groups by ---------
+//
+// The picker groups and labels presets from data rather than from literals, so
+// these fields have to survive the Host boundary intact — a `category` dropped
+// here would silently file every preset under one heading.
+
+test('sanitizePresets carries the CC Switch fields the picker groups and labels by', async () => {
+  const fetchImpl = stubFetch({
+    [PROVIDERS]: providersBody(),
+    [PRESETS]: { body: { presets: [
+      {
+        key: 'kimi-claude',
+        displayName: 'Kimi',
+        api: 'anthropic-messages',
+        baseURL: 'https://api.moonshot.cn/anthropic',
+        models: ['kimi-k2.7-code'],
+        family: 'kimi',
+        planKey: 'payg',
+        regionKey: 'cn',
+        category: 'cn_official',
+        isPartner: true,
+        icon: 'kimi',
+        iconColor: '#6366F1',
+      },
+      // A preset carrying none of them must come through with them absent
+      // rather than dropped or given invented values.
+      { key: 'plain', displayName: 'Plain', api: 'openai-completions', baseURL: 'https://x.test', models: ['m'] },
+    ] } },
+  })
+  const controller = createCCSwitchManagerController({ fetchImpl })
+  await controller.refresh()
+  await controller.loadPresets()
+  const [kimi, plain] = controller.getSnapshot().presets
+
+  assert.equal(kimi.family, 'kimi')
+  assert.equal(kimi.planKey, 'payg')
+  assert.equal(kimi.regionKey, 'cn')
+  assert.equal(kimi.category, 'cn_official')
+  assert.equal(kimi.isPartner, true)
+  assert.equal(kimi.icon, 'kimi')
+  assert.equal(kimi.iconColor, '#6366F1')
+
+  assert.equal(plain.family, undefined)
+  assert.equal(plain.category, undefined)
+  // Anything other than an explicit `true` is not a partner flag.
+  assert.equal(plain.isPartner, false)
+})
+
+// --- the per-row connection probe -------------------------------------------
+//
+// The manager reuses the importer's read-only probe route rather than growing a
+// second definition of "can this endpoint answer?". These pin the two things
+// that reuse depends on: the row is addressed by the `profileId` the importer
+// recorded, and a row with no such record is refused rather than guessed at.
+
+const PROBE = '/api/dsh-ccswitch/probe'
+
+/** A probe outcome as the Host sends one. */
+function probeResult(overrides = {}) {
+  return {
+    profileId: 'deepseek-1',
+    ok: true,
+    reason: 'ok',
+    check: 'models',
+    httpStatus: 200,
+    latencyMs: 42,
+    modelCount: 3,
+    message: '模型探测成功',
+    ...overrides,
+  }
+}
+
+test('probing a row reuses the importer route, addressed by sourceProfileId', async () => {
+  const fetchImpl = stubFetch({
+    [PROVIDERS]: providersBody({ providers: {
+      'ccs-deepseek-ab12cd34': hostProvider({ sourceProfileId: 'deepseek-1' }),
+    } }),
+    [PROBE]: { body: { results: [probeResult()] } },
+  })
+  const controller = createCCSwitchManagerController({ fetchImpl })
+  await controller.refresh()
+  await controller.probeOne('ccs-deepseek-ab12cd34')
+
+  const probe = controller.getSnapshot().probes['ccs-deepseek-ab12cd34']
+  assert.equal(probe.phase, 'done')
+  assert.equal(probe.ok, true)
+  assert.equal(probe.reason, 'ok')
+  assert.equal(probe.check, 'models')
+  assert.equal(probe.latencyMs, 42)
+  assert.equal(probe.modelCount, 3)
+
+  const call = fetchImpl.calls.find((entry) => entry.url === PROBE)
+  assert.ok(call, 'the probe route was called')
+  // Addressed by the profileId, not by the provider key: the route reads CC
+  // Switch's database, which has never heard of this plugin's keys.
+  assert.deepEqual(JSON.parse(call.init.body), { profileIds: ['deepseek-1'] })
+})
+
+test('a provider with no CC Switch row is refused rather than probed', async () => {
+  // A hand-added or preset-created provider was never in CC Switch, so there is
+  // no profileId to address. Inventing one would silently probe whichever
+  // provider happened to share it and report its verdict on the wrong row.
+  const fetchImpl = stubFetch({
+    [PROVIDERS]: providersBody({ providers: {
+      'ccs-hand-ab12cd34': hostProvider({ key: 'ccs-hand-ab12cd34' }),
+    } }),
+    [PROBE]: { body: { results: [] } },
+  })
+  const controller = createCCSwitchManagerController({ fetchImpl })
+  await controller.refresh()
+  await controller.probeOne('ccs-hand-ab12cd34')
+
+  const probe = controller.getSnapshot().probes['ccs-hand-ab12cd34']
+  assert.equal(probe.phase, 'error')
+  assert.equal(probe.unprobeable, true)
+  assert.equal(fetchImpl.calls.some((entry) => entry.url === PROBE), false, 'the route was not called')
+})
+
+test('a probe the Host rejects is reported, and a stale Host is named', async () => {
+  // A 404 from the probe *route* means the Host half predates the endpoint, not
+  // that the provider is unreachable — the two need different wording because
+  // only one of them is worth retrying after a restart.
+  const fetchImpl = stubFetch({
+    [PROVIDERS]: providersBody({ providers: {
+      'ccs-deepseek-ab12cd34': hostProvider({ sourceProfileId: 'deepseek-1' }),
+    } }),
+    [PROBE]: { status: 404, body: { error: 'HTTP 404' } },
+  })
+  const controller = createCCSwitchManagerController({ fetchImpl })
+  await controller.refresh()
+  await controller.probeOne('ccs-deepseek-ab12cd34')
+
+  const probe = controller.getSnapshot().probes['ccs-deepseek-ab12cd34']
+  assert.equal(probe.phase, 'error')
+  assert.equal(probe.staleHost, true)
+})
+
+test('a probe that answers with no verdict for this row is an error, not a pass', async () => {
+  // The route can legitimately return nothing — the CC Switch row was deleted,
+  // or it is one the scan blocks. Either way no connection was proven, so this
+  // must not be dressed up as a successful probe.
+  const fetchImpl = stubFetch({
+    [PROVIDERS]: providersBody({ providers: {
+      'ccs-deepseek-ab12cd34': hostProvider({ sourceProfileId: 'gone' }),
+    } }),
+    [PROBE]: { body: { results: [] } },
+  })
+  const controller = createCCSwitchManagerController({ fetchImpl })
+  await controller.refresh()
+  await controller.probeOne('ccs-deepseek-ab12cd34')
+
+  const probe = controller.getSnapshot().probes['ccs-deepseek-ab12cd34']
+  assert.equal(probe.phase, 'error')
+  assert.equal(probe.staleHost, false)
+})
+
+test('a second click while a probe is in flight does not start another', async () => {
+  let release
+  const pending = new Promise((resolve) => { release = resolve })
+  const seen = []
+  const fetchImpl = stubFetch({
+    [PROVIDERS]: providersBody({ providers: {
+      'ccs-deepseek-ab12cd34': hostProvider({ sourceProfileId: 'deepseek-1' }),
+    } }),
+    [PROBE]: async () => {
+      seen.push(1)
+      await pending
+      return { body: { results: [probeResult()] } }
+    },
+  })
+  const controller = createCCSwitchManagerController({ fetchImpl })
+  await controller.refresh()
+
+  const first = controller.probeOne('ccs-deepseek-ab12cd34')
+  // Immediately re-click while the first is still waiting on the Host.
+  const second = controller.probeOne('ccs-deepseek-ab12cd34')
+  release()
+  await Promise.all([first, second])
+
+  assert.equal(seen.length, 1, 'the endpoint was probed once')
+  assert.equal(controller.getSnapshot().probes['ccs-deepseek-ab12cd34'].phase, 'done')
+})
+
+test('a verdict is dropped when the row it describes goes away', async () => {
+  // A provider deleted in another tab must not leave a green "connected" badge
+  // behind for a row that could be re-created under the same key.
+  const providers = { 'ccs-deepseek-ab12cd34': hostProvider({ sourceProfileId: 'deepseek-1' }) }
+  let listing = { ...providers }
+  const fetchImpl = stubFetch({
+    [PROVIDERS]: () => ({ body: { ...providersBody().body, providers: { ...listing } } }),
+    [PROBE]: { body: { results: [probeResult()] } },
+  })
+  const controller = createCCSwitchManagerController({ fetchImpl })
+  await controller.refresh()
+  await controller.probeOne('ccs-deepseek-ab12cd34')
+  assert.equal(controller.getSnapshot().probes['ccs-deepseek-ab12cd34'].phase, 'done')
+
+  // The row disappears from the next read.
+  listing = {}
+  await controller.refresh()
+  assert.equal(controller.getSnapshot().probes['ccs-deepseek-ab12cd34'], undefined)
+
+  // And `clearProbe` drops one without waiting for a re-read.
+  listing = { ...providers }
+  await controller.refresh()
+  await controller.probeOne('ccs-deepseek-ab12cd34')
+  controller.clearProbe('ccs-deepseek-ab12cd34')
+  assert.equal(controller.getSnapshot().probes['ccs-deepseek-ab12cd34'], undefined)
+})

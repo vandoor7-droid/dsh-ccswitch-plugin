@@ -17,7 +17,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import React from 'react'
 import { createCCSwitchManagerController } from '../src/client/manager-controller.mjs'
-import { ProviderManagerSection, emptyState, providerRowView } from '../src/ui/ProviderManagerSection.mjs'
+import { ProviderManagerSection, emptyState, presetOptionLabel, providerMatches, providerRowView } from '../src/ui/ProviderManagerSection.mjs'
 import {
   ProviderEditModal,
   draftFromPreset,
@@ -28,6 +28,8 @@ import {
   numberField,
   validateDraft,
 } from '../src/ui/ProviderEditModal.mjs'
+import { MESSAGES } from '../src/client/messages.mjs'
+import { PROVIDER_PRESETS, presetGroup, presetVersionKeys } from '../src/domain/presets.mjs'
 import { MODELS_FOOTER_SLOT, PLUGINS_TAB_SLOT, registerReasoningSettings } from '../src/client/registration.mjs'
 
 const INTERNALS = React.__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED
@@ -978,4 +980,313 @@ test('no manager means no manager tab, and the importer keeps working', () => {
   // A tab with no controller behind it would render an empty page.
   assert.equal(registrations.length, 1)
   assert.equal(registrations[0].name, MODELS_FOOTER_SLOT)
+})
+
+// --- search: CC Switch's ProviderList filter --------------------------------
+//
+// CC Switch builds one lowercased haystack per provider out of
+// `[name, notes, websiteUrl, extractProviderBaseUrl(settingsConfig)]` and asks
+// whether it contains the trimmed, lowercased query — a plain substring test,
+// not a word or prefix match. These pin the fields this plugin has an
+// equivalent for, and the two states a search can put the table into.
+
+test('providerMatches searches name, notes and endpoint, case-insensitively', () => {
+  const provider = {
+    displayName: 'DeepSeek',
+    notes: '备用线路',
+    baseURL: 'https://api.deepseek.com/anthropic',
+  }
+  // Empty and whitespace-only queries match everything: that is what lets the
+  // caller run every row through this without a separate "is searching" branch.
+  assert.equal(providerMatches(provider, ''), true)
+  assert.equal(providerMatches(provider, '   '), true)
+  assert.equal(providerMatches(provider, undefined), true)
+
+  assert.equal(providerMatches(provider, 'deep'), true, 'name')
+  assert.equal(providerMatches(provider, 'DEEPSEEK'), true, 'case-insensitive')
+  assert.equal(providerMatches(provider, '备用'), true, 'notes')
+  assert.equal(providerMatches(provider, 'api.deepseek.com'), true, 'endpoint')
+  assert.equal(providerMatches(provider, 'seek.com'), true, 'mid-string substring')
+  assert.equal(providerMatches(provider, 'moonshot'), false)
+  // A provider missing an optional field must not throw, and must not match on
+  // the literal string "undefined" the way a template would.
+  assert.equal(providerMatches({ displayName: 'X' }, 'x'), true)
+  assert.equal(providerMatches({ displayName: 'X' }, 'undefined'), false)
+  assert.equal(providerMatches(undefined, 'x'), false)
+})
+
+test('the search box narrows the table and has its own empty state', async () => {
+  const controller = await readyController({
+    'ccs-a-ab12cd34': hostProvider({ key: 'ccs-a-ab12cd34', displayName: 'Alpha' }),
+    'ccs-b-ab12cd34': hostProvider({ key: 'ccs-b-ab12cd34', displayName: 'Beta' }),
+  })
+  const harness = createHarness()
+  const render = () => harness.render(React.createElement(ProviderManagerSection, { controller, t }))
+  const rowsOf = (tree) => findAll(tree, (node) => typeof node.props?.className === 'string'
+    && node.props.className.includes('dsh-ccswitch-manager__row')
+    && !node.props.className.includes('__row-actions')
+    && !node.props.className.includes('__row-error'))
+
+  const tree = render()
+  assert.equal(rowsOf(tree).length, 2, 'both rows render before searching')
+  const input = findAll(tree, (node) => node.props?.['aria-label'] === '搜索供应商')[0]
+  assert.ok(input, 'the search box rendered')
+  assert.equal(input.props.type, 'text')
+
+  input.props.onChange({ target: { value: 'beta' } })
+  const filtered = render()
+  assert.equal(rowsOf(filtered).length, 1, 'only the matching row remains')
+  assert.match(textOf(rowsOf(filtered)[0]), /Beta/)
+
+  // A query nothing matches must say so. Rendering the "no providers yet" line
+  // here would be a lie: the catalogue is non-empty, the search is hiding it.
+  input.props.onChange({ target: { value: 'zzz' } })
+  const none = render()
+  assert.equal(rowsOf(none).length, 0)
+  assert.match(textOf(none), /没有符合搜索条件的供应商/)
+  assert.doesNotMatch(textOf(none), /还没有 provider/)
+
+  input.props.onChange({ target: { value: '' } })
+  assert.equal(rowsOf(render()).length, 2, 'clearing restores the full list')
+})
+
+test('the search box is absent while there is nothing to search', async () => {
+  const empty = createCCSwitchManagerController({
+    fetchImpl: stubFetch({ [PROVIDERS_PATH]: { body: { exists: true, revision: 1, order: [], providers: {}, apiProtocols: [] } } }),
+  })
+  await empty.refresh()
+  const harness = createHarness()
+  const tree = harness.render(React.createElement(ProviderManagerSection, { controller: empty, t }))
+  // A control that cannot do anything, sitting above the sentence explaining
+  // how to get a provider, is worse than no control.
+  assert.equal(findAll(tree, (node) => node.props?.['aria-label'] === '搜索供应商').length, 0)
+})
+
+// --- the preset picker: CC Switch's groups and version labels ---------------
+
+test('presetOptionLabel appends the version suffix CC Switch shows', () => {
+  const tr = (_key, fallback) => fallback
+  // Plan then region, joined with the same separator CC Switch's
+  // `presetVersionLabel` uses.
+  assert.equal(presetOptionLabel({ displayName: 'Kimi', planKey: 'payg', regionKey: 'cn' }, tr), 'Kimi · 按量付费 · 国内')
+  assert.equal(presetOptionLabel({ displayName: 'Kimi', planKey: 'coding', regionKey: 'intl' }, tr), 'Kimi · 编程订阅 · 海外')
+  // One dimension only.
+  assert.equal(presetOptionLabel({ displayName: 'SiliconFlow', regionKey: 'cn' }, tr), 'SiliconFlow · 国内')
+  assert.equal(presetOptionLabel({ displayName: '火山', planKey: 'agentPlan' }, tr), '火山 · Agent Plan')
+  // Neither: the name alone, which is what CC Switch falls back to for a vendor
+  // with no sibling version to be told apart from.
+  assert.equal(presetOptionLabel({ displayName: 'DeepSeek' }, tr), 'DeepSeek')
+  assert.equal(presetOptionLabel({ displayName: 'DeepSeek', planKey: '', regionKey: '' }, tr), 'DeepSeek')
+  assert.equal(presetOptionLabel(undefined, tr), '')
+})
+
+test('the preset picker groups presets the way CC Switch sections its list', async () => {
+  const controller = await readyController({ 'ccs-a-ab12cd34': hostProvider() }, {
+    routes: {
+      '/api/dsh-ccswitch-manager/presets': { body: { presets: [
+        { key: 'deepseek-claude', displayName: 'DeepSeek', api: 'anthropic-messages', baseURL: 'https://api.deepseek.com/anthropic', models: ['deepseek-flash'], category: 'cn_official' },
+        { key: 'openrouter-claude', displayName: 'OpenRouter', api: 'anthropic-messages', baseURL: 'https://openrouter.ai/api', models: ['x'], category: 'aggregator', isPartner: true },
+      ] } },
+    },
+  })
+  await controller.loadPresets()
+  const harness = createHarness()
+  const tree = harness.render(React.createElement(ProviderManagerSection, { controller, t }))
+
+  const groups = byType(tree, 'optgroup')
+  assert.deepEqual(groups.map((group) => group.props.label), ['模型厂商', '第三方平台'], 'one section per CC Switch group')
+  const valuesIn = (group) => findAll(group, (node) => node.type === 'option').map((option) => option.props.value)
+  assert.deepEqual(valuesIn(groups[0]), ['deepseek-claude'])
+  assert.deepEqual(valuesIn(groups[1]), ['openrouter-claude'])
+  // The blank entry stays outside the groups, and stays first: it is not a
+  // vendor, and the select has to open on something.
+  assert.equal(byType(tree, 'option')[0].props.value, '')
+})
+
+test('every group, plan and region key the picker can ask for exists in both locales', () => {
+  // These three families are built from preset data rather than written as
+  // literals, so the static `tr("…")` scan in test/i18n.test.mjs cannot see
+  // them. Assert the real catalogue here instead.
+  const keys = new Set()
+  for (const preset of PROVIDER_PRESETS) {
+    keys.add(`manager.group.${presetGroup(preset)}`)
+    for (const key of presetVersionKeys(preset)) keys.add(key)
+  }
+  // Every key the vocabulary allows, not only the ones this catalogue happens
+  // to use today: a newly tagged preset must not be able to render a raw key.
+  for (const plan of ['payg', 'coding', 'codingPlan', 'agentPlan', 'tokenPlan', 'enterpriseLite', 'enterprisePro', 'stepPlan', 'aksk', 'apiKey']) {
+    keys.add(`manager.plan.${plan}`)
+  }
+  for (const region of ['cn', 'intl']) keys.add(`manager.region.${region}`)
+  for (const group of ['login', 'vendor', 'thirdparty', 'cloud', 'plugin']) keys.add(`manager.group.${group}`)
+
+  const missing = []
+  for (const key of keys) {
+    for (const locale of ['zh', 'en']) {
+      if (!Object.hasOwn(MESSAGES[locale], key)) missing.push(`${locale}: ${key}`)
+    }
+  }
+  assert.deepEqual(missing, [])
+})
+
+test('the picker distinguishes two versions of one vendor', async () => {
+  // Rendering the bare display name twice would give the user two options they
+  // cannot tell apart — which is the whole reason CC Switch appends a suffix.
+  const controller = await readyController({ 'ccs-a-ab12cd34': hostProvider() }, {
+    routes: {
+      '/api/dsh-ccswitch-manager/presets': { body: { presets: [
+        { key: 'kimi-claude', displayName: 'Kimi', api: 'anthropic-messages', baseURL: 'https://api.moonshot.cn/anthropic', models: ['kimi-k2.7-code'], family: 'kimi', planKey: 'payg', regionKey: 'cn', category: 'cn_official' },
+        { key: 'kimi-coding', displayName: 'Kimi', api: 'anthropic-messages', baseURL: 'https://api.moonshot.cn/anthropic', models: ['kimi-k2.7-code'], family: 'kimi', planKey: 'coding', regionKey: 'intl', category: 'cn_official' },
+      ] } },
+    },
+  })
+  await controller.loadPresets()
+  const harness = createHarness()
+  const tree = harness.render(React.createElement(ProviderManagerSection, { controller, t }))
+  const labels = byType(tree, 'option').map((option) => textOf(option).trim())
+  assert.ok(labels.includes('Kimi · 按量付费 · 国内'), `labels were ${JSON.stringify(labels)}`)
+  assert.ok(labels.includes('Kimi · 编程订阅 · 海外'), `labels were ${JSON.stringify(labels)}`)
+})
+
+// --- the per-row connection probe -------------------------------------------
+//
+// The manager reuses the importer's read-only probe route. The button is shown
+// only where that route can actually answer — a provider that came through an
+// import — because a control that can never succeed reads as a bug rather than
+// as a limit of what was imported.
+
+const PROBE_PATH = '/api/dsh-ccswitch/probe'
+
+/** A probe outcome as the Host sends one. */
+function probeOutcome(overrides = {}) {
+  return {
+    profileId: 'deepseek-1',
+    ok: true,
+    reason: 'ok',
+    check: 'models',
+    httpStatus: 200,
+    latencyMs: 42,
+    modelCount: 3,
+    message: '模型探测成功',
+    ...overrides,
+  }
+}
+
+test('the probe button appears only where the probe route can answer', async () => {
+  const controller = await readyController({
+    'ccs-imported-ab12cd34': hostProvider({ key: 'ccs-imported-ab12cd34', displayName: 'Imported', sourceProfileId: 'deepseek-1' }),
+    'ccs-hand-ab12cd34': hostProvider({ key: 'ccs-hand-ab12cd34', displayName: 'HandAdded' }),
+  })
+  const harness = createHarness()
+  const tree = harness.render(React.createElement(ProviderManagerSection, { controller, t }))
+
+  const probes = findAll(tree, (node) => node.type === 'button' && textOf(node).includes('测试连接'))
+  assert.equal(probes.length, 1, 'only the imported row offers a probe')
+
+  const rows = findAll(tree, (node) => typeof node.props?.className === 'string'
+    && node.props.className.includes('dsh-ccswitch-manager__row')
+    && !node.props.className.includes('__row-actions')
+    && !node.props.className.includes('__row-error'))
+  const imported = rows.find((row) => textOf(row).includes('Imported'))
+  const hand = rows.find((row) => textOf(row).includes('HandAdded'))
+  assert.equal(findAll(imported, (node) => textOf(node).includes('测试连接')).length > 0, true)
+  assert.equal(findAll(hand, (node) => textOf(node).includes('测试连接')).length, 0)
+  // The hand-added row still renders its other actions.
+  assert.ok(findAll(hand, (node) => node.props?.['aria-label'] === '启用 HandAdded')[0])
+})
+
+test('a probe result renders inline on the row that asked for it', async () => {
+  const controller = await readyController({
+    'ccs-imported-ab12cd34': hostProvider({ key: 'ccs-imported-ab12cd34', displayName: 'Imported', sourceProfileId: 'deepseek-1' }),
+    'ccs-other-ab12cd34': hostProvider({ key: 'ccs-other-ab12cd34', displayName: 'Other', sourceProfileId: 'deepseek-2' }),
+  }, {
+    routes: { [PROBE_PATH]: { body: { results: [probeOutcome()] } } },
+  })
+  const harness = createHarness()
+  const render = () => harness.render(React.createElement(ProviderManagerSection, { controller, t }))
+
+  const button = findAll(render(), (node) => node.type === 'button' && textOf(node).includes('测试连接'))[0]
+  assert.ok(button, 'the probe button rendered')
+  button.props.onClick()
+  // The click kicks off an async request; let it settle before re-rendering.
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  const tree = render()
+
+  const status = findAll(tree, (node) => node.props?.role === 'status'
+    && typeof node.props?.className === 'string'
+    && node.props.className.includes('dsh-ccswitch-import__probe'))
+  assert.equal(status.length, 1, 'exactly one row shows a verdict')
+  // Model count and latency, in the same wording the import tab uses.
+  assert.match(textOf(status[0]), /连通/)
+  assert.match(textOf(status[0]), /42ms/)
+
+  // The verdict belongs to the row that asked for it, not to its neighbour.
+  const rows = findAll(tree, (node) => typeof node.props?.className === 'string'
+    && node.props.className.includes('dsh-ccswitch-manager__row')
+    && !node.props.className.includes('__row-actions')
+    && !node.props.className.includes('__row-error'))
+  const other = rows.find((row) => textOf(row).includes('Other'))
+  assert.doesNotMatch(textOf(other), /连通/)
+})
+
+test('a failed probe says why, and a stale Host is named', async () => {
+  const controller = await readyController({
+    'ccs-imported-ab12cd34': hostProvider({ key: 'ccs-imported-ab12cd34', displayName: 'Imported', sourceProfileId: 'deepseek-1' }),
+  }, {
+    routes: { [PROBE_PATH]: { body: { results: [
+      probeOutcome({ ok: false, reason: 'http-error', check: 'none', httpStatus: 401, detail: 'Invalid token', latencyMs: 12 }),
+    ] } } },
+  })
+  const harness = createHarness()
+  const render = () => harness.render(React.createElement(ProviderManagerSection, { controller, t }))
+
+  findAll(render(), (node) => node.type === 'button' && textOf(node).includes('测试连接'))[0].props.onClick()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  const text = textOf(render())
+  assert.match(text, /失败/)
+  assert.match(text, /HTTP 401/)
+  // The upstream's own words are the actionable part of a failure.
+  assert.match(text, /Invalid token/)
+})
+
+test('a probe the Host does not know about says so instead of blaming the provider', async () => {
+  // A 404 from the probe *route* means the Host half predates the endpoint.
+  // Reporting that as "network error" would send the user hunting a problem
+  // that is not there.
+  const controller = await readyController({
+    'ccs-imported-ab12cd34': hostProvider({ key: 'ccs-imported-ab12cd34', displayName: 'Imported', sourceProfileId: 'deepseek-1' }),
+  }, {
+    routes: { [PROBE_PATH]: { status: 404, body: { error: 'HTTP 404' } } },
+  })
+  const harness = createHarness()
+  const render = () => harness.render(React.createElement(ProviderManagerSection, { controller, t }))
+
+  findAll(render(), (node) => node.type === 'button' && textOf(node).includes('测试连接'))[0].props.onClick()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  const text = textOf(render())
+  assert.match(text, /宿主未加载该接口/)
+})
+
+test('the search box and the probe survive each other', async () => {
+  // The search filters the rows; a verdict is stored against a provider key, so
+  // narrowing the table must not drop it, and a probe must not clear the query.
+  const controller = await readyController({
+    'ccs-a-ab12cd34': hostProvider({ key: 'ccs-a-ab12cd34', displayName: 'Alpha', sourceProfileId: 'a-1' }),
+    'ccs-b-ab12cd34': hostProvider({ key: 'ccs-b-ab12cd34', displayName: 'Beta', sourceProfileId: 'b-1' }),
+  }, {
+    routes: { [PROBE_PATH]: { body: { results: [probeOutcome({ profileId: 'a-1' })] } } },
+  })
+  const harness = createHarness()
+  const render = () => harness.render(React.createElement(ProviderManagerSection, { controller, t }))
+
+  findAll(render(), (node) => node.type === 'button' && textOf(node).includes('测试连接'))[0].props.onClick()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+
+  const input = findAll(render(), (node) => node.props?.['aria-label'] === '搜索供应商')[0]
+  input.props.onChange({ target: { value: 'alpha' } })
+  const filtered = render()
+  assert.match(textOf(filtered), /连通/, 'the verdict survives filtering to its own row')
+  // And it is still there when the filter is cleared.
+  input.props.onChange({ target: { value: '' } })
+  assert.match(textOf(render()), /连通/)
 })

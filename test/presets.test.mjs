@@ -10,7 +10,18 @@
 // change what a preset points at.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { PROVIDER_PRESETS, presetByKey, providerFromPreset } from '../src/domain/presets.mjs'
+import {
+  CCS_PROVIDER_CATEGORIES,
+  PRESET_GROUP_ORDER,
+  PRESET_PLAN_KEYS,
+  PRESET_REGION_KEYS,
+  PROVIDER_PRESETS,
+  groupPresetsByCategory,
+  presetByKey,
+  presetGroup,
+  presetVersionKeys,
+  providerFromPreset,
+} from '../src/domain/presets.mjs'
 import { CCS_API_PROTOCOLS, validateCCSProvider, normalizeCCSProvider } from '../src/domain/ccs-provider.mjs'
 
 const PROTOCOLS = new Set(CCS_API_PROTOCOLS)
@@ -115,4 +126,167 @@ test('the Codex-side presets speak the Responses protocol', () => {
   for (const preset of PROVIDER_PRESETS.filter((entry) => entry.appType === 'codex')) {
     assert.equal(preset.api, 'openai-responses', `${preset.key} would not match its wire_api`)
   }
+})
+
+// --- the CC Switch category / family / plan / region model ------------------
+//
+// CC Switch's Rust side types `category` as a free-form `Option<String>`, but
+// its frontend constrains it to exactly eight values (`src/types.ts`) and maps
+// them onto the five sections the "add provider" list is grouped into
+// (`src/components/providers/forms/presetGroups.ts`). Both are transcribed
+// here, and both are asserted, because a category that drifts stops the picker
+// from grouping rather than failing loudly.
+
+test('the category vocabulary is exactly the eight CC Switch declares', () => {
+  assert.deepEqual([...CCS_PROVIDER_CATEGORIES], [
+    'official',
+    'cn_official',
+    'cloud_provider',
+    'aggregator',
+    'third_party',
+    'custom',
+    'omo',
+    'omo-slim',
+  ])
+})
+
+test('every preset carries a category from that vocabulary', () => {
+  // A typo would not throw — `presetGroup` falls through to `thirdparty` — so
+  // the value is checked against the list rather than only its presence.
+  const known = new Set(CCS_PROVIDER_CATEGORIES)
+  for (const preset of PROVIDER_PRESETS) {
+    assert.ok(known.has(preset.category), `${preset.key}: category "${preset.category}" is not one of the eight`)
+  }
+})
+
+test('presetGroup reproduces presetGroups.ts', () => {
+  const group = (category) => presetGroup({ category })
+  // `official` is the account-sign-in section; the other two CC Switch sends
+  // there (`requiresOAuth`, `providerType`) have no entry in this catalogue —
+  // every preset here authenticates with an API key.
+  assert.equal(group('official'), 'login')
+  assert.equal(group('cn_official'), 'vendor')
+  assert.equal(group('cloud_provider'), 'cloud')
+  assert.equal(group('omo'), 'plugin')
+  assert.equal(group('omo-slim'), 'plugin')
+  // `third_party`, `aggregator`, `custom` and anything unrecognised all land in
+  // the third-party section, which is CC Switch's own `default` case.
+  assert.equal(group('third_party'), 'thirdparty')
+  assert.equal(group('aggregator'), 'thirdparty')
+  assert.equal(group('custom'), 'thirdparty')
+  assert.equal(group(undefined), 'thirdparty', 'a preset with no category still groups')
+})
+
+test('presetVersionKeys names the plan before the region', () => {
+  // CC Switch's `presetVersionLabel` joins plan then region with " · ", so the
+  // order is part of the contract rather than an accident of this catalogue.
+  assert.deepEqual(presetVersionKeys({ planKey: 'payg', regionKey: 'cn' }), ['manager.plan.payg', 'manager.region.cn'])
+  assert.deepEqual(presetVersionKeys({ planKey: 'coding' }), ['manager.plan.coding'])
+  assert.deepEqual(presetVersionKeys({ regionKey: 'intl' }), ['manager.region.intl'])
+  // Neither dimension: no suffix. Every such preset here is the only one for
+  // its vendor, so there is no sibling to be told apart from.
+  assert.deepEqual(presetVersionKeys({}), [])
+  assert.deepEqual(presetVersionKeys(undefined), [])
+  // An empty string is absence, not a dimension worth labelling.
+  assert.deepEqual(presetVersionKeys({ planKey: '', regionKey: '' }), [])
+})
+
+test('groupPresetsByCategory sections the catalogue in CC Switch order', () => {
+  const sections = groupPresetsByCategory(PROVIDER_PRESETS)
+  const order = sections.map((section) => section.group)
+  // `PRESET_GROUP_ORDER` is a fixed display order, and the sections that come
+  // back keep it rather than the catalogue's own order.
+  assert.deepEqual(order, [...PRESET_GROUP_ORDER].filter((group) => order.includes(group)))
+  // Empty sections are dropped: a heading with nothing under it is worse than
+  // no heading.
+  assert.ok(sections.every((section) => section.presets.length > 0))
+  // Every preset appears exactly once.
+  const seen = sections.flatMap((section) => section.presets.map((preset) => preset.key))
+  assert.equal(seen.length, PROVIDER_PRESETS.length)
+  assert.equal(new Set(seen).size, PROVIDER_PRESETS.length)
+})
+
+test('groupPresetsByCategory tolerates an empty or malformed catalogue', () => {
+  assert.deepEqual(groupPresetsByCategory([]), [])
+  assert.deepEqual(groupPresetsByCategory(undefined), [])
+})
+
+// --- the CC Switch fields transcribed onto each preset ----------------------
+
+test('every preset declares a category, and the vendors declare their family', () => {
+  for (const preset of PROVIDER_PRESETS) {
+    const label = preset.key
+    assert.ok(CCS_PROVIDER_CATEGORIES.includes(preset.category), `${label}: category`)
+    // A family with a single version is deliberately absent: CC Switch only
+    // tags a vendor when that app really serves several versions of it, because
+    // the tag is what merges them into one row.
+    if (preset.family !== undefined) {
+      assert.equal(typeof preset.family, 'string', `${label}: family must be a string`)
+      assert.ok(preset.family.length > 0, `${label}: empty family`)
+    }
+    if (preset.planKey !== undefined) {
+      assert.ok(PRESET_PLAN_KEYS.includes(preset.planKey), `${label}: planKey "${preset.planKey}" is not a CC Switch plan`)
+    }
+    if (preset.regionKey !== undefined) {
+      assert.ok(PRESET_REGION_KEYS.includes(preset.regionKey), `${label}: regionKey "${preset.regionKey}" is not a CC Switch region`)
+    }
+  }
+})
+
+test('the vendors CC Switch shares across apps carry the same family here', () => {
+  // The family is what tells the picker two presets are versions of one vendor.
+  // If the Claude and Codex halves of a vendor disagreed, they would render as
+  // two unrelated rows — the exact thing the family exists to prevent.
+  const byFamily = new Map()
+  for (const preset of PROVIDER_PRESETS) {
+    if (preset.family === undefined) continue
+    byFamily.set(preset.family, [...(byFamily.get(preset.family) ?? []), preset])
+  }
+  assert.ok(byFamily.size > 0, 'no preset declares a family at all')
+  for (const [family, presets] of byFamily) {
+    // A family that merged only one preset would be a tag with no effect, which
+    // means the transcription is wrong rather than merely redundant.
+    assert.ok(presets.length > 1, `family "${family}" groups only ${presets[0].key}`)
+    // Every version of one vendor must be categorised alike, or the picker
+    // would file the same vendor under two sections.
+    assert.equal(new Set(presets.map((preset) => preset.category)).size, 1, `family "${family}" spans several categories`)
+  }
+})
+
+test('the version fields match the CC Switch presets they were read from', () => {
+  // Spot checks against `src/config/claudeProviderPresets.ts` and
+  // `codexProviderPresets.ts`. These are the entries whose family, plan or
+  // region is most likely to be "tidied" by a later edit, and getting one wrong
+  // silently merges or splits a row in the picker.
+  const claudeKimi = presetByKey('kimi-claude')
+  assert.equal(claudeKimi.family, 'kimi')
+  assert.equal(claudeKimi.planKey, 'payg')
+  assert.equal(claudeKimi.regionKey, 'cn')
+  assert.equal(claudeKimi.category, 'cn_official')
+
+  // The Codex half of the same vendor carries the same family, so the two
+  // merge — but a different plan, because CC Switch's Codex list serves the
+  // pay-as-you-go endpoint where its Claude list serves the coding one.
+  const codexKimi = presetByKey('kimi-codex')
+  assert.equal(codexKimi.family, 'kimi')
+
+  // StepFun differs between the two apps: the Codex preset is the `stepPlan`
+  // tier while the Claude one is the vendor default, so only the Codex half
+  // carries a planKey.
+  assert.equal(presetByKey('stepfun-codex').planKey, 'stepPlan')
+  assert.equal(presetByKey('stepfun-claude').planKey, undefined)
+  assert.equal(presetByKey('stepfun-claude').family, 'stepfun')
+  assert.equal(presetByKey('stepfun-codex').family, 'stepfun')
+
+  // Volcengine is the vendor CC Switch files as three plans; only one of them
+  // is transcribed here, and it is the pay-as-you-go one.
+  const doubao = presetByKey('volcengine-doubao-claude')
+  assert.equal(doubao.family, 'volcengine')
+  assert.equal(doubao.planKey, 'payg')
+  // CC Switch marks it a partner; the flag is carried so the picker can say so.
+  assert.equal(doubao.isPartner, true)
+
+  // A vendor with a single version carries no family at all.
+  assert.equal(presetByKey('deepseek-claude').family, undefined)
+  assert.equal(presetByKey('deepseek-claude').category, 'cn_official')
 })
