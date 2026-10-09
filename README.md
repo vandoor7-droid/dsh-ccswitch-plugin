@@ -1,6 +1,6 @@
 # DSH CC Switch 管理器
 
-将 CC Switch 里的 Codex、Claude、Claude Desktop、OpenCode、Gemini、Hermes、Grok Build、Pi、MCode 与 OpenClaw provider 导入 DeepSeek Harness，并在同一个「设置 -> 模型」页面管理每个模型的推理深度。
+在 DeepSeek Harness 里管理 CC Switch 的 provider：把 Codex、Claude、Claude Desktop、OpenCode、Gemini、Hermes、Grok Build、Pi、MCode 与 OpenClaw 的 provider 导入 DSH，也能不依赖 CC Switch 单独新增/编辑/激活 provider，并把它写回 Claude Code 与 Codex 自己的配置文件。
 
 [English README](./README.en.md)
 
@@ -17,23 +17,66 @@
 - 原生 Models 页面、CCSwitch 导入区和模型推理编辑器共存于同一个 Models 页面。
 - CCSwitch 导入区、模型推理面板和每个模型卡片都支持收纳折叠，折叠偏好会保存在当前浏览器。
 
-CCSwitch 是只读导入源。首次导入后，DSH 设置和 credentials 服务成为配置事实来源；不会写回 CCSwitch 数据库。
+### provider 管理器（不依赖 CCSwitch）
+
+**设置 -> 插件** 里还有一个独立的 provider 管理器，它把 provider 目录存在插件**自己的** settings 命名空间
+（`dsh-ccswitch-plugin.providers`）里，因此**不装 CCSwitch 也能用**：
+
+- 增删改查 provider：显示名、协议、endpoint、模型列表、备注、图标、成本倍率与每日/每月额度。
+- 28 个内置 preset（DeepSeek、Kimi、智谱 GLM、硅基流动、OpenRouter、NVIDIA、MiniMax、豆包等），
+  新建时挑一个即可，也可以从空白表单开始。
+- **激活**一个 provider 会做两件事，且彼此独立：把 DSH 自己的 `llm-pi-ai` 路由切过去；以及改写
+  **那个 provider 所属工具自己的配置**——目前覆盖 **Claude Code**（`~/.claude/settings.json`）
+  与 **Codex**（`~/.codex/config.toml` 与 `auth.json`）。
+- 目录写入成功即视为既成事实：后面两步任何一步失败都只写进 `warnings` 而不回滚，重试只补做没成功的那一半。
+  没有 writer 的 app type 会被明确点名，而不是静默跳过。
+
+### 写回外部工具配置的边界
+
+外部配置的写入遵循 CC Switch 的 **floor** 语义，这是最值得小心的一部分：
+
+- 一个 provider 在 live 文件里**拥有**一组键（连接与鉴权）；切换时这些键先清空再写入目标 provider 的值，
+  文件里其余的键归用户和客户端，一个字节都不碰。
+- **保序写入**：已存在的键保持位置、缩进、行尾注释；文件原有的缩进字符、CRLF/LF、末尾换行都保留，
+  因此重复写入字节相同。
+- 目标文件**解析失败时拒绝写入**，绝不从空文档重建——宁可报错，不可覆盖用户的配置。
+
+CCSwitch 本身是只读导入源：导入后 DSH 设置和 credentials 服务成为配置事实来源，插件不会写回 CCSwitch 数据库。
 
 ## 安装
 
-从 GitHub 安装：
+> **不要用 `dsh plugin --profile desktop add`。** 它会被 DSH 拒绝：
+> `error: profile "desktop" is managed exclusively by the Electron application`
+> ——desktop profile 由桌面应用独占管理。请按下面的步骤手动安装。
+
+1. **先完全退出 DSH**（桌面应用会在运行时回写下面这两个文件）。
+
+2. 把包装进 profile 的 pnpm 工程：
 
 ```bash
-dsh plugin --profile desktop add github:vandoor7-droid/dsh-ccswitch-plugin
+cd ~/.dsh/profiles/desktop
+pnpm add github:vandoor7-droid/dsh-ccswitch-plugin
+# 或从本地源码：pnpm add /path/to/dsh-ccswitch-plugin
 ```
 
-从本地源码安装：
+3. 把包名加进同一目录下 `package.json` 的 `dsh.profile.bundles`：
 
-```bash
-dsh plugin --profile desktop add ./dsh-ccswitch-plugin
+```json
+"dsh": {
+  "profile": {
+    "bundles": ["...", "dsh-ccswitch-plugin"]
+  }
+}
 ```
 
-安装或更新后刷新 DSH Web 页面，打开 **设置 -> 模型**。
+**第 3 步不能漏。** 插件的 `cordis.patch.yml` 是 **bundle patch**，而 DSH 只对列在
+`dsh.profile.bundles` 里的包合并它的 patch。只做第 2 步的话，依赖装得好好的，插件
+依然不出现——而且不报任何错，那一行永远到不了 loader。
+
+4. 重启 DSH。打开 **设置 -> 插件**（provider 管理器）与 **设置 -> 模型**（CCSwitch 导入）。
+
+> 从本地源码安装时，`pnpm add` 复制的是**构建产物**而不是链接。改完源码要
+> `npm run build`，再重新 `pnpm add` 一次，DSH 才会用到新的构建。
 
 ## 使用
 

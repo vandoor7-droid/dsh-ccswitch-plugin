@@ -1,6 +1,6 @@
 # DSH CC Switch Manager
 
-Import CC Switch Codex, Claude, Claude Desktop, OpenCode, Gemini, Hermes, Grok Build, Pi, MCode, and OpenClaw providers into DeepSeek Harness and manage per-model reasoning depth on the same **Settings -> Models** page.
+Manage CC Switch providers inside DeepSeek Harness: import Codex, Claude, Claude Desktop, OpenCode, Gemini, Hermes, Grok Build, Pi, MCode and OpenClaw providers into DSH, or add, edit and activate providers without CC Switch at all — and write them back into Claude Code's and Codex's own configuration files.
 
 [中文 README](./README.md)
 
@@ -17,23 +17,75 @@ Import CC Switch Codex, Claude, Claude Desktop, OpenCode, Gemini, Hermes, Grok B
 - Keeps the native Models page, CCSwitch import controls, and reasoning editor in one Models page.
 - The CCSwitch import section, reasoning panel, and each model card can be collapsed; collapse preferences persist in the current browser.
 
-CCSwitch is a read-only import source. After import, DSH settings and the credentials service are authoritative; the plugin never writes back to the CCSwitch database.
+### Provider manager (does not need CCSwitch)
+
+**Settings -> Plugins** also carries a standalone provider manager. It keeps the provider
+catalogue in the plugin's **own** settings namespace (`dsh-ccswitch-plugin.providers`), so it
+works with **no CCSwitch installed at all**:
+
+- Add, edit, duplicate and delete providers: display name, protocol, endpoint, model list, notes,
+  icon, cost multiplier, and daily/monthly spend caps.
+- 28 built-in presets (DeepSeek, Kimi, Zhipu GLM, SiliconFlow, OpenRouter, NVIDIA, MiniMax, Doubao,
+  and more) to start from, or a blank form.
+- **Activating** a provider does two independent things: it points DSH's own `llm-pi-ai` route at it,
+  and it rewrites **that provider's own tool configuration** — currently **Claude Code**
+  (`~/.claude/settings.json`) and **Codex** (`~/.codex/config.toml` and `auth.json`).
+- Once the catalogue write succeeds that is the durable fact: a failure in either later step is
+  reported in `warnings` rather than rolled back, and a retry finishes only the half that did not take.
+  An app type with no writer is named explicitly instead of silently skipped.
+
+### How the external writes behave
+
+Writing another tool's configuration follows CC Switch's **floor** semantics, which is the part
+most worth getting right:
+
+- A provider **owns** a set of keys in the live file (connection and authentication). Switching clears
+  those keys and then writes the target provider's values; every other key belongs to the user and the
+  client and is left untouched, byte for byte.
+- Writes are **order-preserving**: an existing key keeps its position, indentation and trailing comment,
+  and the file's original indent character, CRLF/LF and trailing newline are all preserved — so writing
+  twice produces identical bytes.
+- A file that **cannot be parsed is refused rather than overwritten**. The plugin never rebuilds a
+  config from an empty document: an error is better than destroying the user's configuration.
+
+CCSwitch itself remains a read-only import source: after import, DSH settings and the credentials
+service are authoritative, and the plugin never writes back to the CCSwitch database.
 
 ## Installation
 
-Install from GitHub:
+> **Do not use `dsh plugin --profile desktop add`.** DSH refuses it:
+> `error: profile "desktop" is managed exclusively by the Electron application`.
+> The desktop profile is managed by the desktop app alone. Install by hand instead.
+
+1. **Quit DSH completely first** (the desktop app rewrites both files below while running).
+
+2. Install the package into the profile's pnpm project:
 
 ```bash
-dsh plugin --profile desktop add github:vandoor7-droid/dsh-ccswitch-plugin
+cd ~/.dsh/profiles/desktop
+pnpm add github:vandoor7-droid/dsh-ccswitch-plugin
+# or from a local checkout: pnpm add /path/to/dsh-ccswitch-plugin
 ```
 
-Install from a local checkout:
+3. Add the package name to `dsh.profile.bundles` in that directory's `package.json`:
 
-```bash
-dsh plugin --profile desktop add ./dsh-ccswitch-plugin
+```json
+"dsh": {
+  "profile": {
+    "bundles": ["...", "dsh-ccswitch-plugin"]
+  }
+}
 ```
 
-After installing or updating, reload DSH Web and open **Settings -> Models**.
+**Step 3 is not optional.** A plugin's `cordis.patch.yml` is a **bundle** patch, and DSH
+only merges it for packages named in `dsh.profile.bundles`. Skip it and the dependency
+installs cleanly while the plugin stays invisible — with no error at all; its row simply
+never reaches the loader.
+
+4. Restart DSH. Open **Settings -> Plugins** (the provider manager) and **Settings -> Models** (the CCSwitch importer).
+
+> Installing from a local checkout copies the **built** output rather than linking to it.
+> After changing the source, run `npm run build` and `pnpm add` again so DSH picks the new build up.
 
 ## Usage
 
