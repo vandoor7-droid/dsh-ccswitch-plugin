@@ -17,6 +17,7 @@ const PROVIDERS_PATH = `${MANAGER_API_BASE}/providers`
 const SAVE_PATH = `${PROVIDERS_PATH}/save`
 const DELETE_PATH = `${PROVIDERS_PATH}/delete`
 const ACTIVATE_PATH = `${PROVIDERS_PATH}/activate`
+const REORDER_PATH = `${PROVIDERS_PATH}/reorder`
 const PRESETS_PATH = `${MANAGER_API_BASE}/presets`
 /**
  * The importer's read-only probe, reused rather than duplicated.
@@ -41,6 +42,14 @@ const SAME_ORIGIN_VALUE = 'same-origin'
  * falls back to when the Host half is older than this bundle.
  */
 const FALLBACK_PROTOCOLS = ['openai-completions', 'openai-responses', 'anthropic-messages']
+
+/**
+ * The app types the form offers when the Host sends none.
+ *
+ * Mirrors `WRITER_APP_TYPES` in `src/host/writers.js` — the app types that
+ * have a writer, and so the only ones an activation can do anything for.
+ */
+const FALLBACK_APP_TYPES = ['claude', 'codex']
 
 function defaultFetch(url, init) {
   return globalThis.fetch(url, init)
@@ -150,10 +159,44 @@ export function sanitizeOrder(order, providers) {
   return next
 }
 
+/**
+ * The order with one row moved by `delta` positions.
+ *
+ * Computed against the **full** order, never a filtered view. That is what CC
+ * Switch does: its drag handler resolves both ends against `sortedProviders`
+ * (the unfiltered list) even when a search is hiding rows, so the dragged row
+ * lands where the row it was dropped on sits rather than where it looks like it
+ * sits. `moveInOrder` is the same rule for a one-slot move.
+ *
+ * Returns the input unchanged when the move would leave the list — the first
+ * row's up and the last row's down — and when the key is absent, which a
+ * background refresh can produce between a render and a click. The caller
+ * disables those buttons, but the arithmetic has to be total on its own.
+ */
+export function moveInOrder(order, key, delta) {
+  const list = Array.isArray(order) ? order : []
+  const from = list.indexOf(key)
+  const to = from + delta
+  if (from < 0 || !Number.isInteger(delta) || delta === 0 || to < 0 || to >= list.length) return list
+  const next = [...list]
+  // Out then back in at the target index, so the row takes the slot of the one
+  // it displaced instead of swapping with it — CC Switch's `queueMove` does the
+  // same, and a swap would move the other row twice as far as the user asked.
+  next.splice(from, 1)
+  next.splice(to, 0, key)
+  return next
+}
+
 /** The protocol list for the form's select; never empty. */
 export function sanitizeProtocols(value) {
   const list = (Array.isArray(value) ? value : []).filter((entry) => typeof entry === 'string' && entry.trim() !== '')
   return list.length > 0 ? [...new Set(list)] : [...FALLBACK_PROTOCOLS]
+}
+
+/** The app-type list for the form's select; never empty. */
+export function sanitizeAppTypes(value) {
+  const list = (Array.isArray(value) ? value : []).filter((entry) => typeof entry === 'string' && entry.trim() !== '')
+  return list.length > 0 ? [...new Set(list)] : [...FALLBACK_APP_TYPES]
 }
 
 /** Presets are a convenience, so a malformed entry is dropped, not repaired. */
@@ -276,6 +319,7 @@ export function createCCSwitchManagerController({ fetchImpl = defaultFetch, onCh
     order: [],
     current: undefined,
     apiProtocols: [...FALLBACK_PROTOCOLS],
+    appTypes: [...FALLBACK_APP_TYPES],
     presets: [],
     presetsError: null,
     /** The row an operation is in flight for, so only it shows as busy. */
@@ -361,6 +405,7 @@ export function createCCSwitchManagerController({ fetchImpl = defaultFetch, onCh
         probes: pruneProbes(snapshot.probes, providers),
         current: optionalText(body?.current),
         apiProtocols: sanitizeProtocols(body?.apiProtocols),
+        appTypes: sanitizeAppTypes(body?.appTypes),
       })
       return snapshot
     } catch (error) {
@@ -540,6 +585,31 @@ export function createCCSwitchManagerController({ fetchImpl = defaultFetch, onCh
           },
         }),
       })
+    }),
+    /**
+     * Write a new row order.
+     *
+     * The complete order rather than a list of moves, which is what the Host
+     * requires: it re-indexes every row by position, so a partial list would
+     * leave the unnamed rows holding indices the user never saw and the result
+     * would depend on numbers that were invisible on screen. `keys` must name
+     * every provider exactly once, and the Host refuses the write if it does
+     * not — which is also how a catalogue that changed since the last read is
+     * caught, rather than reordered into a shape nobody asked for.
+     *
+     * There is no `pendingKey`. A reorder touches every row, so naming one as
+     * the busy row would be wrong; the published `status: 'busy'` is what takes
+     * the controls out of play for the duration, which is what stops a second
+     * move being queued against an order that is about to change underneath it.
+     */
+    reorder: (keys, expectedRevision) => enqueue(async () => {
+      if (!Array.isArray(keys) || keys.length === 0) {
+        throw new Error('reorder requires the complete order')
+      }
+      const revision = Number.isInteger(expectedRevision) ? expectedRevision : snapshot.revision
+      const body = { keys: [...keys] }
+      if (revision !== undefined) body.expectedRevision = revision
+      return runMutation({ path: REORDER_PATH, body, pendingAction: 'reorder' })
     }),
     dismissActivation: () => {
       publish({ ...snapshot, activation: undefined })

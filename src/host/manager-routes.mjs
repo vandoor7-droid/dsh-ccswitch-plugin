@@ -282,6 +282,12 @@ export function makeManagerRoutes(deps = {}) {
             currentByApp: currentKeysByApp(providers),
             providers: Object.fromEntries(entries),
             apiProtocols: [...CCS_API_PROTOCOLS],
+            // The app types this plugin can act on, taken from the writer list
+            // rather than a second copy in the browser half. A value here is a
+            // promise that activating such a provider does something; the form
+            // still offers a stored value outside the list, or editing an
+            // imported row of another app type would rewrite it on open.
+            appTypes: [...WRITER_APP_TYPES],
           })
         } catch (err) {
           console.error('[dsh-ccswitch-plugin] manager list failed:', redactText(err))

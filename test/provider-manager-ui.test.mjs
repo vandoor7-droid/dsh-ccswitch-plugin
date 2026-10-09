@@ -22,6 +22,7 @@ import {
   ProviderEditModal,
   draftFromPreset,
   draftFromProvider,
+  draftSignature,
   draftToProvider,
   draftToSaveRequest,
   emptyDraft,
@@ -1289,4 +1290,194 @@ test('the search box and the probe survive each other', async () => {
   // And it is still there when the filter is cleared.
   input.props.onChange({ target: { value: '' } })
   assert.match(textOf(render()), /连通/)
+})
+
+// --- moving a row ------------------------------------------------------------
+//
+// The reorder route was built and tested on the Host, and nothing in the UI
+// called it, so the list order was fixed. These cover the controls that now do.
+
+/** Every button whose own text is exactly `label`, in document order. */
+function buttonsLabelled(root, label) {
+  return findAll(root, (node) => node.type === 'button' && textOf(node).trim() === label)
+}
+
+/** The option values a `<select>` offers, flattened. */
+function optionValues(select) {
+  return (Array.isArray(select.props.children) ? select.props.children : [])
+    .filter(Boolean)
+    .map((option) => option.props.value)
+}
+
+const THREE_KEYS = ['ccs-a-ab12cd34', 'ccs-b-ab12cd34', 'ccs-c-ab12cd34']
+
+function threeProviders() {
+  return Object.fromEntries(THREE_KEYS.map((key) => [key, hostProvider({ key, displayName: key })]))
+}
+
+function searchBox(root) {
+  return findAll(root, (node) => node.type === 'input'
+    && typeof node.props.placeholder === 'string'
+    && node.props.placeholder.includes('搜索'))[0]
+}
+
+test('the move buttons write the whole new order, and are dead at the ends', async () => {
+  const reorders = []
+  const controller = await readyController(threeProviders(), {
+    routes: {
+      [`${PROVIDERS_PATH}/reorder`]: (init) => {
+        reorders.push(JSON.parse(init.body))
+        return { body: { status: 'reordered', order: JSON.parse(init.body).keys } }
+      },
+    },
+  })
+  const harness = createHarness()
+  const tree = harness.render(React.createElement(ProviderManagerSection, { controller, t }))
+
+  const ups = buttonsLabelled(tree, '↑')
+  const downs = buttonsLabelled(tree, '↓')
+  assert.equal(ups.length, 3, 'one up button per row')
+  assert.equal(downs.length, 3, 'one down button per row')
+  // There is nowhere for the first row to go up, nor the last to go down. The
+  // Host accepts either as a no-op move, which would cost a settings write and
+  // a revision bump to store the order that is already there.
+  assert.equal(ups[0].props.disabled, true, 'the first row cannot move up')
+  assert.equal(downs[2].props.disabled, true, 'the last row cannot move down')
+  assert.equal(ups[1].props.disabled, false)
+  assert.equal(downs[0].props.disabled, false)
+
+  // Move the middle row up.
+  ups[1].props.onClick()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.equal(reorders.length, 1, 'exactly one reorder was sent')
+  // The complete order, re-indexed by position — what the Host requires.
+  assert.deepEqual(reorders[0].keys, ['ccs-b-ab12cd34', 'ccs-a-ab12cd34', 'ccs-c-ab12cd34'])
+})
+
+test('a move made while a search is hiding rows still moves one whole slot', async () => {
+  // CC Switch resolves both ends of a drag against the unfiltered
+  // `sortedProviders`, so a move is a fact about the catalogue rather than
+  // about what the filter happens to be showing. A one-slot move has to follow
+  // the same rule, or a row moved past a hidden neighbour lands somewhere the
+  // user cannot see and did not ask for.
+  const reorders = []
+  const controller = await readyController(threeProviders(), {
+    routes: {
+      [`${PROVIDERS_PATH}/reorder`]: (init) => {
+        reorders.push(JSON.parse(init.body))
+        return { body: { status: 'reordered', order: [] } }
+      },
+    },
+  })
+  const harness = createHarness()
+  let tree = harness.render(React.createElement(ProviderManagerSection, { controller, t }))
+
+  // Narrow to the last row only.
+  const search = searchBox(tree)
+  assert.ok(search, 'the search box rendered')
+  search.props.onChange({ target: { value: 'ccs-c' } })
+  tree = harness.render(React.createElement(ProviderManagerSection, { controller, t }))
+
+  const ups = buttonsLabelled(tree, '↑')
+  assert.equal(ups.length, 1, 'the filter hides the other two rows')
+  // It is the third row of three, so up is available. Were the index resolved
+  // against the filtered list it would be the first row, and this would be off.
+  assert.equal(ups[0].props.disabled, false, 'the row is not first in the catalogue')
+  ups[0].props.onClick()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.deepEqual(reorders[0].keys, ['ccs-a-ab12cd34', 'ccs-c-ab12cd34', 'ccs-b-ab12cd34'])
+})
+
+test('a failed reorder is reported as a reorder failure', async () => {
+  const controller = await readyController(threeProviders(), {
+    routes: {
+      [`${PROVIDERS_PATH}/reorder`]: { status: 400, body: { error: 'keys must name every provider exactly once' } },
+    },
+  })
+  const harness = createHarness()
+  const tree = harness.render(React.createElement(ProviderManagerSection, { controller, t }))
+  buttonsLabelled(tree, '↓')[0].props.onClick()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  // Worded as a reorder failure, not a save or delete one: the user pressed a
+  // move button and the message has to name that.
+  assert.match(textOf(harness.render(React.createElement(ProviderManagerSection, { controller, t }))), /调整顺序失败/)
+})
+
+// --- the app type control ----------------------------------------------------
+//
+// The field travelled through every draft builder but had no control, so a
+// provider added by hand silently became a Claude Code provider: the Host
+// defaults an absent app type to `claude`. It is now shown and editable.
+
+test('a new provider names an app type instead of leaving it implied', () => {
+  assert.equal(emptyDraft().appType, 'claude')
+  // A stored provider that predates the field reads as the value the Host will
+  // actually use, so the control never shows blank while the Host treats it as
+  // claude.
+  assert.equal(draftFromProvider({ displayName: 'X' }).appType, 'claude')
+  assert.equal(draftFromProvider({ displayName: 'X', appType: '' }).appType, 'claude')
+  assert.equal(draftFromProvider({ displayName: 'X', appType: 'codex' }).appType, 'codex')
+  // A preset that names none is a Claude preset.
+  assert.equal(draftFromPreset({ key: 'p', displayName: 'P' }).appType, 'claude')
+  assert.equal(draftFromPreset({ key: 'p', displayName: 'P', appType: 'codex' }).appType, 'codex')
+})
+
+test('the app type survives the round trip to the wire shape', () => {
+  const provider = draftToProvider({ ...emptyDraft(), displayName: 'X', appType: 'codex' })
+  assert.equal(provider.appType, 'codex')
+  // Omitted rather than sent empty when the form is blanked, so the Host falls
+  // back rather than storing an unusable app type.
+  const blank = draftToProvider({ ...emptyDraft(), displayName: 'X', appType: '' })
+  assert.equal(Object.hasOwn(blank, 'appType'), false)
+})
+
+test('changing only the app type still counts as a change', () => {
+  const base = draftFromProvider(hostProvider())
+  assert.notEqual(draftSignature(base), draftSignature({ ...base, appType: 'codex' }))
+})
+
+test('the modal offers the Host app-type list and sends the chosen one', () => {
+  const submitted = []
+  const props = {
+    initialDraft: draftFromProvider(hostProvider()),
+    mode: 'edit',
+    protocols: ['anthropic-messages'],
+    appTypes: ['claude', 'codex'],
+    onSubmit: (value) => submitted.push(value),
+    onClose: () => {},
+    t,
+  }
+  const harness = createHarness()
+  const tree = harness.render(React.createElement(ProviderEditModal, props))
+
+  const appSelect = byType(tree, 'select').find((select) => optionValues(select).includes('codex'))
+  assert.ok(appSelect, 'the app-type select rendered')
+  // Its options come from the Host list, not a second copy in the browser.
+  assert.deepEqual(optionValues(appSelect), ['claude', 'codex'])
+
+  // Choosing one and saving carries it to the Host. The re-render reuses the
+  // component's hook storage, so the draft the form now holds is the edited one.
+  appSelect.props.onChange({ target: { value: 'codex' } })
+  const rebuilt = harness.render(React.createElement(ProviderEditModal, props))
+  byType(rebuilt, 'form')[0].props.onSubmit({ preventDefault() {} })
+  assert.equal(submitted.length, 1)
+  assert.equal(submitted[0].appType, 'codex')
+})
+
+test('a stored app type the Host no longer offers is still selectable', () => {
+  // Opening the form on an imported provider of another app type must not
+  // rewrite it to the first listed entry just because a save round-trips what
+  // the form shows.
+  const harness = createHarness()
+  const tree = harness.render(React.createElement(ProviderEditModal, {
+    initialDraft: { ...draftFromProvider(hostProvider()), appType: 'gemini' },
+    mode: 'edit',
+    protocols: ['anthropic-messages'],
+    appTypes: ['claude', 'codex'],
+    onSubmit: () => {},
+    onClose: () => {},
+    t,
+  }))
+  const appSelect = byType(tree, 'select')[1]
+  assert.ok(optionValues(appSelect).includes('gemini'), 'the stored value is offered alongside the Host list')
 })

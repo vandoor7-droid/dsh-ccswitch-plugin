@@ -39,6 +39,12 @@ const MAX_MODELS = 200;
  * Exported so a test can assert every code `validateDraft` emits has an entry:
  * this is the one place a new code can silently start rendering itself.
  */
+/**
+ * The app types the form offers when the Host sends none. Mirrors
+ * `WRITER_APP_TYPES`; see `sanitizeAppTypes` in the manager controller.
+ */
+const FALLBACK_APP_TYPES = ["claude", "codex"];
+
 export const PROBLEM_FALLBACK = {
   'displayName-required': '请填写名称。',
   'api-required': '请选择协议。',
@@ -74,10 +80,13 @@ export function emptyDraft() {
     limitMonthlyUsd: "",
     inFailoverQueue: false,
     models: [blankModel()],
-    // Carried through an edit so a save does not quietly drop fields this form
-    // does not edit. An edit replaces the whole stored record, so anything
-    // omitted here is lost.
-    appType: undefined,
+    // Every stored provider belongs to one app, and this value decides which
+    // tool's config file an activation rewrites. It is set here rather than
+    // left absent: an absent one falls back to `claude` deep in the Host, so a
+    // provider added by hand silently became a Claude Code provider with
+    // nothing on screen saying so. The default is still `claude` — the form
+    // now shows it, and the user can change it.
+    appType: "claude",
     sourceProfileId: undefined,
     isCurrent: false,
   };
@@ -126,7 +135,7 @@ export function draftFromProvider(provider) {
         reasoningEfforts: model?.reasoningEfforts === false ? false : model?.reasoningEfforts,
       }))
       : [blankModel()],
-    appType: typeof provider.appType === "string" ? provider.appType : undefined,
+    appType: typeof provider.appType === "string" && provider.appType !== "" ? provider.appType : "claude",
     sourceProfileId: typeof provider.sourceProfileId === "string" ? provider.sourceProfileId : undefined,
     isCurrent: provider.isCurrent === true,
   };
@@ -154,7 +163,7 @@ export function draftFromPreset(preset) {
     websiteUrl: typeof preset.websiteUrl === "string" ? preset.websiteUrl : "",
     icon: String(preset.icon ?? ""),
     iconColor: String(preset.iconColor ?? ""),
-    appType: typeof preset.appType === "string" ? preset.appType : undefined,
+    appType: typeof preset.appType === "string" && preset.appType !== "" ? preset.appType : "claude",
     models: models.length > 0 ? models.map((id) => ({ ...blankModel(), id })) : [blankModel()],
   };
 }
@@ -305,6 +314,7 @@ export function draftSignature(draft) {
     provider.limitDailyUsd,
     provider.limitMonthlyUsd,
     provider.inFailoverQueue,
+    provider.appType,
     // Included because a save replaces the record: a non-empty draft means the
     // user is about to write a key, which is always a change worth reporting.
     typeof draft?.apiKey === "string" ? draft.apiKey : "",
@@ -343,6 +353,7 @@ function field(label, control, hint, hintId) {
  * @param {object} props.initialDraft - see {@link emptyDraft}.
  * @param {'create'|'edit'} props.mode - picks the title.
  * @param {string[]} props.protocols - the Host's authoritative protocol list.
+ * @param {string[]} props.appTypes - the app types with a writer, per the Host.
  * @param {boolean} [props.saving] - a save is in flight.
  * @param {string[]} [props.errors] - the Host's own validation list after a 400.
  * @param {boolean} [props.conflict] - the last save lost a revision race.
@@ -355,6 +366,7 @@ export function ProviderEditModal({
   initialDraft,
   mode = "create",
   protocols = [],
+  appTypes = [],
   saving = false,
   errors = [],
   conflict = false,
@@ -372,6 +384,7 @@ export function ProviderEditModal({
   const reactId = useId();
   const titleId = `dsh-ccswitch-modal-title-${reactId}`;
   const apiKeyHintId = `dsh-ccswitch-modal-apikey-${reactId}`;
+  const appTypeHintId = `dsh-ccswitch-modal-apptype-${reactId}`;
   const modelsHeadingId = `dsh-ccswitch-modal-models-${reactId}`;
 
   const problems = validateDraft(draft);
@@ -448,6 +461,7 @@ export function ProviderEditModal({
   };
 
   const protocolOptions = Array.isArray(protocols) && protocols.length > 0 ? protocols : [draft.api].filter(Boolean);
+  const appTypeOptions = Array.isArray(appTypes) && appTypes.length > 0 ? appTypes : FALLBACK_APP_TYPES;
 
   return h("div", {
     className: "dsh-ccswitch-modal__backdrop",
@@ -516,6 +530,22 @@ export function ProviderEditModal({
                 .map((protocol) => h("option", { key: protocol, value: protocol }, protocol)),
               draft.api === "" ? h("option", { key: "", value: "" }, "") : null,
             )),
+          field(tr("manager.fieldAppType", "应用"),
+            h("select", {
+              className: "dsh-ccswitch-form__input",
+              value: draft.appType ?? "",
+              "aria-describedby": appTypeHintId,
+              onChange: (event) => patch({ appType: event.target.value }),
+            },
+              // A stored value the Host no longer offers still has to be
+              // selectable, or opening the form on an imported provider of
+              // another app type would silently rewrite it. Same rule the
+              // protocol select above follows.
+              ...[...new Set([...appTypeOptions, draft.appType].filter((entry) => typeof entry === "string" && entry !== ""))]
+                .map((appType) => h("option", { key: appType, value: appType }, appType)),
+            ),
+            tr("manager.appTypeHint", "决定启用时改写哪个工具的配置；只有 claude 和 codex 有写入器。"),
+            appTypeHintId),
           field(tr("manager.fieldBaseUrl", "Base URL"),
             h("input", {
               className: "dsh-ccswitch-form__input",

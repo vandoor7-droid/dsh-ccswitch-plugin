@@ -8,7 +8,7 @@
 // rejected operation that leaves the table spinning forever. Each gets a test.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createCCSwitchManagerController } from '../src/client/manager-controller.mjs'
+import { createCCSwitchManagerController, moveInOrder, sanitizeAppTypes } from '../src/client/manager-controller.mjs'
 
 const PROVIDERS = '/api/dsh-ccswitch-manager/providers'
 const PRESETS = '/api/dsh-ccswitch-manager/presets'
@@ -758,4 +758,117 @@ test('a verdict is dropped when the row it describes goes away', async () => {
   await controller.probeOne('ccs-deepseek-ab12cd34')
   controller.clearProbe('ccs-deepseek-ab12cd34')
   assert.equal(controller.getSnapshot().probes['ccs-deepseek-ab12cd34'], undefined)
+})
+
+// --- reordering --------------------------------------------------------------
+//
+// The route existed and was tested before this, but nothing called it: the
+// table rendered from `order` and the user had no way to change it. These
+// tests cover the two things that were missing — the arithmetic that turns a
+// click into a new order, and the request that writes it.
+
+test('moveInOrder shifts one row and takes its target slot, not a swap', () => {
+  const order = ['a', 'b', 'c', 'd']
+  assert.deepEqual(moveInOrder(order, 'b', -1), ['b', 'a', 'c', 'd'])
+  assert.deepEqual(moveInOrder(order, 'b', 1), ['a', 'c', 'b', 'd'])
+  assert.deepEqual(moveInOrder(order, 'a', 1), ['b', 'a', 'c', 'd'])
+  assert.deepEqual(moveInOrder(order, 'd', -1), ['a', 'b', 'd', 'c'])
+  assert.equal(order.join(), 'a,b,c,d', 'the input must not be mutated')
+})
+
+test('moveInOrder is total: every out-of-range move returns the order unchanged', () => {
+  const order = ['a', 'b', 'c']
+  // The buttons are disabled at the ends, but a background refresh between the
+  // render and the click can still land one of these.
+  for (const [key, delta] of [
+    ['a', -1], ['c', 1], ['missing', 1], ['missing', -1],
+    ['a', 0], ['b', 9], ['b', -9],
+  ]) {
+    assert.equal(moveInOrder(order, key, delta), order, `${key} ${delta}`)
+  }
+  // A non-integer delta is not a move.
+  assert.equal(moveInOrder(order, 'b', 1.5), order)
+  assert.equal(moveInOrder(order, 'b', NaN), order)
+  // A missing or malformed list is empty, not a throw.
+  assert.deepEqual(moveInOrder(undefined, 'a', 1), [])
+  assert.deepEqual(moveInOrder(null, 'a', 1), [])
+})
+
+test('reorder posts the complete order, not a list of moves', async () => {
+  const routes = {
+    [PROVIDERS]: providersBody(),
+    [`${PROVIDERS}/reorder`]: { body: { status: 'reordered', order: ['b', 'a'] } },
+  }
+  const fetchImpl = stubFetch(routes)
+  const controller = createCCSwitchManagerController({ fetchImpl })
+  await controller.refresh()
+  await controller.reorder(['b', 'a'])
+  const call = fetchImpl.calls.find((entry) => entry.url === `${PROVIDERS}/reorder`)
+  assert.ok(call, 'the reorder route was not called')
+  assert.equal(call.init.method, 'POST')
+  assert.equal(call.init.headers['x-dsh-ccswitch-origin'], 'same-origin')
+  const body = JSON.parse(call.init.body)
+  // The whole list: the Host re-indexes every row by position, so a partial
+  // list would leave the unnamed rows holding numbers the user never saw.
+  assert.deepEqual(body.keys, ['b', 'a'])
+  assert.equal(body.expectedRevision, 7)
+})
+
+test('reorder refuses an empty order without a round trip', async () => {
+  // The Host would answer 400 for this. Catching it here means a mis-wired
+  // button cannot blank the catalogue's ordering with a request that was
+  // never going to be accepted.
+  let called = false
+  const fetchImpl = stubFetch({
+    [PROVIDERS]: providersBody(),
+    [`${PROVIDERS}/reorder`]: () => { called = true; return { body: {} } },
+  })
+  const controller = createCCSwitchManagerController({ fetchImpl })
+  await controller.refresh()
+  await assert.rejects(() => controller.reorder([]), /complete order/)
+  await assert.rejects(() => controller.reorder(undefined), /complete order/)
+  assert.equal(called, false)
+})
+
+test('a rejected reorder reports the failure and leaves the table usable', async () => {
+  const fetchImpl = stubFetch({
+    [PROVIDERS]: providersBody(),
+    [`${PROVIDERS}/reorder`]: {
+      status: 400,
+      body: { error: 'keys must name every provider exactly once' },
+    },
+  })
+  const controller = createCCSwitchManagerController({ fetchImpl })
+  await controller.refresh()
+  await assert.rejects(() => controller.reorder(['a', 'b']), /exactly once/)
+  const snapshot = controller.getSnapshot()
+  assert.equal(snapshot.status, 'error')
+  assert.equal(snapshot.conflict, false)
+  assert.match(snapshot.error, /exactly once/)
+  // Not wedged mid-operation: the buttons come back.
+  assert.equal(snapshot.pendingKey, undefined)
+  assert.equal(snapshot.pendingAction, undefined)
+})
+
+test('the app-type list is carried from the Host, with a fallback for an older one', async () => {
+  const withHost = stubFetch({ [PROVIDERS]: providersBody({ appTypes: ['claude', 'codex'] }) })
+  const a = createCCSwitchManagerController({ fetchImpl: withHost })
+  await a.refresh()
+  assert.deepEqual(a.getSnapshot().appTypes, ['claude', 'codex'])
+
+  // A Host that predates the field still leaves a usable select rather than an
+  // empty one, which would make the app type unsettable.
+  const older = stubFetch({ [PROVIDERS]: providersBody({ appTypes: undefined }) })
+  const b = createCCSwitchManagerController({ fetchImpl: older })
+  await b.refresh()
+  assert.deepEqual(b.getSnapshot().appTypes, ['claude', 'codex'])
+})
+
+test('sanitizeAppTypes drops non-strings and never returns an empty list', () => {
+  assert.deepEqual(sanitizeAppTypes(['claude', 'codex']), ['claude', 'codex'])
+  assert.deepEqual(sanitizeAppTypes(['claude', 'claude']), ['claude'])
+  assert.deepEqual(sanitizeAppTypes(['claude', '', '  ', 42, null]), ['claude'])
+  assert.deepEqual(sanitizeAppTypes('claude'), ['claude', 'codex'])
+  assert.deepEqual(sanitizeAppTypes([]), ['claude', 'codex'])
+  assert.deepEqual(sanitizeAppTypes(undefined), ['claude', 'codex'])
 })

@@ -17,6 +17,7 @@ import React, { useEffect, useRef, useState, useSyncExternalStore } from "react"
 import { makeTranslator, messagesFor } from "../client/i18n.mjs";
 import { DEFAULT_LOCALE } from "../client/messages.mjs";
 import { groupPresetsByCategory, presetVersionKeys } from "../domain/presets.mjs";
+import { moveInOrder } from "../client/manager-controller.mjs";
 import { draftFromPreset, draftFromProvider, emptyDraft, ProviderEditModal } from "./ProviderEditModal.mjs";
 
 const h = React.createElement;
@@ -56,6 +57,7 @@ const FAILURE_TEXT = {
   activate: ["manager.activateFailed", "启用失败：{message}"],
   delete: ["manager.deleteFailed", "删除失败：{message}"],
   save: ["manager.saveFailed", "保存失败：{message}"],
+  reorder: ["manager.reorderFailed", "调整顺序失败：{message}"],
 };
 
 /**
@@ -309,6 +311,26 @@ export function ProviderManagerSection({ controller, t }) {
   };
 
   const onActivate = (key) => runRowAction(key, () => controller.activate(key), "activate");
+
+  /**
+   * Move one row by one slot.
+   *
+   * Resolved against the **full** order, not the filtered list on screen — the
+   * same rule CC Switch's drag handler uses, where both ends of a drop are
+   * looked up in `sortedProviders` even while a search hides rows. That keeps
+   * "where did it go" a fact about the catalogue rather than about what the
+   * filter happened to be showing, so a move made mid-search is still the move
+   * the user finds after clearing it.
+   *
+   * `moveInOrder` returns its input when the move would leave the list, so an
+   * unchanged list means there is nothing to write: re-sending it would cost a
+   * round trip and a revision bump to store the order that is already there.
+   */
+  const onMove = (key, delta) => {
+    const moved = moveInOrder(order, key, delta);
+    if (moved === order) return;
+    void runRowAction(key, () => controller.reorder(moved), "reorder");
+  };
   const onDelete = (provider) => {
     const name = provider.displayName || provider.key;
     // Destructive and irreversible, so it is confirmed. `window.confirm` is
@@ -504,6 +526,10 @@ export function ProviderManagerSection({ controller, t }) {
         ...visibleRows.map((provider) => {
           const view = providerRowView(provider, snapshot);
           const { name, pending, action } = view;
+          // Where this row sits in the whole catalogue. The buttons' disabled
+          // state and the move itself both read from this, so a filtered view
+          // cannot make the first *visible* row look like the first row.
+          const rowIndex = order.indexOf(view.key);
           const probe = snapshot.probes?.[view.key];
           const testing = probe?.phase === 'testing';
           return h("div", {
@@ -572,6 +598,32 @@ export function ProviderManagerSection({ controller, t }) {
                 "aria-label": tr("manager.activateAria", "启用 {name}", { name }),
                 onClick: () => onActivate(view.key),
               }, action === "activate" ? tr("manager.activating", "启用中…") : tr("manager.activate", "启用")),
+              // The move pair, sitting between the primary action and the row's
+              // maintenance buttons — the order CC Switch's ProviderCardActions
+              // lays them out in (status, primary, up/down, edit, ⋯).
+              //
+              // These are buttons rather than drag handles because
+              // @dnd-kit is not a dependency of this plugin, and adding one
+              // would mean shipping a drag library to the browser for a single
+              // list. The pair also happens to be the keyboard-accessible form
+              // of the same edit, which CC Switch only gets from its dnd-kit
+              // KeyboardSensor.
+              h("button", {
+                type: "button",
+                className: "dsh-ccswitch-import__link",
+                // The row's position in the whole catalogue, not in the
+                // filtered view: see `onMove`.
+                disabled: view.disabled || rowIndex <= 0,
+                "aria-label": tr("manager.moveUpAria", "上移 {name}", { name }),
+                onClick: () => onMove(view.key, -1),
+              }, tr("manager.moveUp", "↑")),
+              h("button", {
+                type: "button",
+                className: "dsh-ccswitch-import__link",
+                disabled: view.disabled || rowIndex < 0 || rowIndex >= order.length - 1,
+                "aria-label": tr("manager.moveDownAria", "下移 {name}", { name }),
+                onClick: () => onMove(view.key, 1),
+              }, tr("manager.moveDown", "↓")),
               h("button", {
                 type: "button",
                 className: "dsh-ccswitch-import__link",
@@ -609,6 +661,7 @@ export function ProviderManagerSection({ controller, t }) {
         initialDraft: dialog.draft,
         mode: dialog.mode,
         protocols: snapshot.apiProtocols ?? [],
+        appTypes: snapshot.appTypes ?? [],
         saving: snapshot.status === "busy" && snapshot.pendingAction === "save",
         errors: Array.isArray(snapshot.saveErrors) ? snapshot.saveErrors : [],
         conflict: snapshot.conflict === true,

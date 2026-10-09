@@ -453,11 +453,13 @@ window.__ModuleLoader__.load({
 		var SAVE_PATH = `${PROVIDERS_PATH}/save`;
 		var DELETE_PATH = `${PROVIDERS_PATH}/delete`;
 		var ACTIVATE_PATH = `${PROVIDERS_PATH}/activate`;
+		var REORDER_PATH = `${PROVIDERS_PATH}/reorder`;
 		var PRESETS_PATH = `${MANAGER_API_BASE}/presets`;
 		var PROBE_PATH = "/api/dsh-ccswitch/probe";
 		var SAME_ORIGIN_HEADER2 = "x-dsh-ccswitch-origin";
 		var SAME_ORIGIN_VALUE2 = "same-origin";
 		var FALLBACK_PROTOCOLS = ["openai-completions", "openai-responses", "anthropic-messages"];
+		var FALLBACK_APP_TYPES = ["claude", "codex"];
 		function defaultFetch2(url, init) {
 		  return globalThis.fetch(url, init);
 		}
@@ -536,9 +538,23 @@ window.__ModuleLoader__.load({
 		  }
 		  return next;
 		}
+		function moveInOrder(order, key, delta) {
+		  const list = Array.isArray(order) ? order : [];
+		  const from = list.indexOf(key);
+		  const to = from + delta;
+		  if (from < 0 || !Number.isInteger(delta) || delta === 0 || to < 0 || to >= list.length) return list;
+		  const next = [...list];
+		  next.splice(from, 1);
+		  next.splice(to, 0, key);
+		  return next;
+		}
 		function sanitizeProtocols(value) {
 		  const list = (Array.isArray(value) ? value : []).filter((entry) => typeof entry === "string" && entry.trim() !== "");
 		  return list.length > 0 ? [...new Set(list)] : [...FALLBACK_PROTOCOLS];
+		}
+		function sanitizeAppTypes(value) {
+		  const list = (Array.isArray(value) ? value : []).filter((entry) => typeof entry === "string" && entry.trim() !== "");
+		  return list.length > 0 ? [...new Set(list)] : [...FALLBACK_APP_TYPES];
 		}
 		function sanitizePresets(value) {
 		  return (Array.isArray(value) ? value : []).filter(isRecord).slice(0, 200).map((preset) => ({
@@ -611,6 +627,7 @@ window.__ModuleLoader__.load({
 		    order: [],
 		    current: void 0,
 		    apiProtocols: [...FALLBACK_PROTOCOLS],
+		    appTypes: [...FALLBACK_APP_TYPES],
 		    presets: [],
 		    presetsError: null,
 		    /** The row an operation is in flight for, so only it shows as busy. */
@@ -683,7 +700,8 @@ window.__ModuleLoader__.load({
 		        // behind for a row that is about to be re-created with the same key.
 		        probes: pruneProbes2(snapshot.probes, providers),
 		        current: optionalText(body?.current),
-		        apiProtocols: sanitizeProtocols(body?.apiProtocols)
+		        apiProtocols: sanitizeProtocols(body?.apiProtocols),
+		        appTypes: sanitizeAppTypes(body?.appTypes)
 		      });
 		      return snapshot;
 		    } catch (error) {
@@ -838,6 +856,31 @@ window.__ModuleLoader__.load({
 		          }
 		        })
 		      });
+		    }),
+		    /**
+		     * Write a new row order.
+		     *
+		     * The complete order rather than a list of moves, which is what the Host
+		     * requires: it re-indexes every row by position, so a partial list would
+		     * leave the unnamed rows holding indices the user never saw and the result
+		     * would depend on numbers that were invisible on screen. `keys` must name
+		     * every provider exactly once, and the Host refuses the write if it does
+		     * not — which is also how a catalogue that changed since the last read is
+		     * caught, rather than reordered into a shape nobody asked for.
+		     *
+		     * There is no `pendingKey`. A reorder touches every row, so naming one as
+		     * the busy row would be wrong; the published `status: 'busy'` is what takes
+		     * the controls out of play for the duration, which is what stops a second
+		     * move being queued against an order that is about to change underneath it.
+		     */
+		    reorder: (keys, expectedRevision) => enqueue(async () => {
+		      if (!Array.isArray(keys) || keys.length === 0) {
+		        throw new Error("reorder requires the complete order");
+		      }
+		      const revision = Number.isInteger(expectedRevision) ? expectedRevision : snapshot.revision;
+		      const body = { keys: [...keys] };
+		      if (revision !== void 0) body.expectedRevision = revision;
+		      return runMutation({ path: REORDER_PATH, body, pendingAction: "reorder" });
 		    }),
 		    dismissActivation: () => {
 		      publish({ ...snapshot, activation: void 0 });
@@ -1079,6 +1122,11 @@ window.__ModuleLoader__.load({
 		    "manager.failover": "\u6545\u969C\u8F6C\u79FB\u961F\u5217",
 		    "manager.activate": "\u542F\u7528",
 		    "manager.activating": "\u542F\u7528\u4E2D\u2026",
+		    "manager.moveUp": "\u2191",
+		    "manager.moveDown": "\u2193",
+		    "manager.moveUpAria": "\u4E0A\u79FB {name}",
+		    "manager.moveDownAria": "\u4E0B\u79FB {name}",
+		    "manager.reorderFailed": "\u8C03\u6574\u987A\u5E8F\u5931\u8D25\uFF1A{message}",
 		    "manager.edit": "\u7F16\u8F91",
 		    "manager.duplicate": "\u590D\u5236",
 		    "manager.delete": "\u5220\u9664",
@@ -1105,6 +1153,8 @@ window.__ModuleLoader__.load({
 		    "manager.fieldDisplayName": "\u540D\u79F0",
 		    "manager.fieldApi": "\u534F\u8BAE",
 		    "manager.fieldBaseUrl": "Base URL",
+		    "manager.fieldAppType": "\u5E94\u7528",
+		    "manager.appTypeHint": "\u51B3\u5B9A\u542F\u7528\u65F6\u6539\u5199\u54EA\u4E2A\u5DE5\u5177\u7684\u914D\u7F6E\uFF1B\u53EA\u6709 claude \u548C codex \u6709\u5199\u5165\u5668\u3002",
 		    "manager.fieldApiKey": "API Key",
 		    "manager.apiKeyHint": "\u7559\u7A7A\u8868\u793A\u4FDD\u6301\u5F53\u524D\u5BC6\u94A5\u4E0D\u53D8\u3002",
 		    "manager.apiKeyStored": "\u5DF2\u5B58\u6709\u4E00\u4E2A\u5BC6\u94A5\uFF0C\u6B64\u5904\u4E0D\u4F1A\u56DE\u663E\u3002",
@@ -1282,6 +1332,11 @@ window.__ModuleLoader__.load({
 		    "manager.failover": "failover queue",
 		    "manager.activate": "Activate",
 		    "manager.activating": "Activating\u2026",
+		    "manager.moveUp": "\u2191",
+		    "manager.moveDown": "\u2193",
+		    "manager.moveUpAria": "Move {name} up",
+		    "manager.moveDownAria": "Move {name} down",
+		    "manager.reorderFailed": "Could not reorder: {message}",
 		    "manager.edit": "Edit",
 		    "manager.duplicate": "Duplicate",
 		    "manager.delete": "Delete",
@@ -1308,6 +1363,8 @@ window.__ModuleLoader__.load({
 		    "manager.fieldDisplayName": "Name",
 		    "manager.fieldApi": "Protocol",
 		    "manager.fieldBaseUrl": "Base URL",
+		    "manager.fieldAppType": "App",
+		    "manager.appTypeHint": "Which tool's configuration an activation rewrites; only claude and codex have a writer.",
 		    "manager.fieldApiKey": "API key",
 		    "manager.apiKeyHint": "Leave blank to keep the current key.",
 		    "manager.apiKeyStored": "A key is already stored; it is never shown here.",
@@ -2602,6 +2659,7 @@ window.__ModuleLoader__.load({
 		var import_react4 = __toESM(require("react"), 1);
 		var h4 = import_react4.default.createElement;
 		var MAX_MODELS = 200;
+		var FALLBACK_APP_TYPES2 = ["claude", "codex"];
 		var PROBLEM_FALLBACK = {
 		  "displayName-required": "\u8BF7\u586B\u5199\u540D\u79F0\u3002",
 		  "api-required": "\u8BF7\u9009\u62E9\u534F\u8BAE\u3002",
@@ -2633,10 +2691,13 @@ window.__ModuleLoader__.load({
 		    limitMonthlyUsd: "",
 		    inFailoverQueue: false,
 		    models: [blankModel()],
-		    // Carried through an edit so a save does not quietly drop fields this form
-		    // does not edit. An edit replaces the whole stored record, so anything
-		    // omitted here is lost.
-		    appType: void 0,
+		    // Every stored provider belongs to one app, and this value decides which
+		    // tool's config file an activation rewrites. It is set here rather than
+		    // left absent: an absent one falls back to `claude` deep in the Host, so a
+		    // provider added by hand silently became a Claude Code provider with
+		    // nothing on screen saying so. The default is still `claude` — the form
+		    // now shows it, and the user can change it.
+		    appType: "claude",
 		    sourceProfileId: void 0,
 		    isCurrent: false
 		  };
@@ -2674,7 +2735,7 @@ window.__ModuleLoader__.load({
 		      // levels the user configured in the reasoning editor.
 		      reasoningEfforts: model?.reasoningEfforts === false ? false : model?.reasoningEfforts
 		    })) : [blankModel()],
-		    appType: typeof provider.appType === "string" ? provider.appType : void 0,
+		    appType: typeof provider.appType === "string" && provider.appType !== "" ? provider.appType : "claude",
 		    sourceProfileId: typeof provider.sourceProfileId === "string" ? provider.sourceProfileId : void 0,
 		    isCurrent: provider.isCurrent === true
 		  };
@@ -2692,7 +2753,7 @@ window.__ModuleLoader__.load({
 		    websiteUrl: typeof preset.websiteUrl === "string" ? preset.websiteUrl : "",
 		    icon: String(preset.icon ?? ""),
 		    iconColor: String(preset.iconColor ?? ""),
-		    appType: typeof preset.appType === "string" ? preset.appType : void 0,
+		    appType: typeof preset.appType === "string" && preset.appType !== "" ? preset.appType : "claude",
 		    models: models.length > 0 ? models.map((id) => ({ ...blankModel(), id })) : [blankModel()]
 		  };
 		}
@@ -2756,6 +2817,7 @@ window.__ModuleLoader__.load({
 		  initialDraft,
 		  mode = "create",
 		  protocols = [],
+		  appTypes = [],
 		  saving = false,
 		  errors = [],
 		  conflict = false,
@@ -2771,6 +2833,7 @@ window.__ModuleLoader__.load({
 		  const reactId = (0, import_react4.useId)();
 		  const titleId = `dsh-ccswitch-modal-title-${reactId}`;
 		  const apiKeyHintId = `dsh-ccswitch-modal-apikey-${reactId}`;
+		  const appTypeHintId = `dsh-ccswitch-modal-apptype-${reactId}`;
 		  const modelsHeadingId = `dsh-ccswitch-modal-models-${reactId}`;
 		  const problems = validateDraft(draft);
 		  const problemMessages = problems.map((problem) => tr(
@@ -2826,6 +2889,7 @@ window.__ModuleLoader__.load({
 		    onSubmit?.(draft);
 		  };
 		  const protocolOptions = Array.isArray(protocols) && protocols.length > 0 ? protocols : [draft.api].filter(Boolean);
+		  const appTypeOptions = Array.isArray(appTypes) && appTypes.length > 0 ? appTypes : FALLBACK_APP_TYPES2;
 		  return h4(
 		    "div",
 		    {
@@ -2904,6 +2968,21 @@ window.__ModuleLoader__.load({
 		              ...[...new Set([...protocolOptions, draft.api].filter((entry) => entry !== ""))].map((protocol) => h4("option", { key: protocol, value: protocol }, protocol)),
 		              draft.api === "" ? h4("option", { key: "", value: "" }, "") : null
 		            )
+		          ),
+		          field(
+		            tr("manager.fieldAppType", "\u5E94\u7528"),
+		            h4(
+		              "select",
+		              {
+		                className: "dsh-ccswitch-form__input",
+		                value: draft.appType ?? "",
+		                "aria-describedby": appTypeHintId,
+		                onChange: (event) => patch({ appType: event.target.value })
+		              },
+		              ...[...new Set([...appTypeOptions, draft.appType].filter((entry) => typeof entry === "string" && entry !== ""))].map((appType) => h4("option", { key: appType, value: appType }, appType))
+		            ),
+		            tr("manager.appTypeHint", "\u51B3\u5B9A\u542F\u7528\u65F6\u6539\u5199\u54EA\u4E2A\u5DE5\u5177\u7684\u914D\u7F6E\uFF1B\u53EA\u6709 claude \u548C codex \u6709\u5199\u5165\u5668\u3002"),
+		            appTypeHintId
 		          ),
 		          field(
 		            tr("manager.fieldBaseUrl", "Base URL"),
@@ -3087,7 +3166,8 @@ window.__ModuleLoader__.load({
 		var FAILURE_TEXT = {
 		  activate: ["manager.activateFailed", "\u542F\u7528\u5931\u8D25\uFF1A{message}"],
 		  delete: ["manager.deleteFailed", "\u5220\u9664\u5931\u8D25\uFF1A{message}"],
-		  save: ["manager.saveFailed", "\u4FDD\u5B58\u5931\u8D25\uFF1A{message}"]
+		  save: ["manager.saveFailed", "\u4FDD\u5B58\u5931\u8D25\uFF1A{message}"],
+		  reorder: ["manager.reorderFailed", "\u8C03\u6574\u987A\u5E8F\u5931\u8D25\uFF1A{message}"]
 		};
 		function emptyState(snapshot) {
 		  const status = snapshot?.status;
@@ -3215,6 +3295,11 @@ window.__ModuleLoader__.load({
 		    }
 		  };
 		  const onActivate = (key) => runRowAction(key, () => controller.activate(key), "activate");
+		  const onMove = (key, delta) => {
+		    const moved = moveInOrder(order, key, delta);
+		    if (moved === order) return;
+		    void runRowAction(key, () => controller.reorder(moved), "reorder");
+		  };
 		  const onDelete = (provider) => {
 		    const name2 = provider.displayName || provider.key;
 		    if (typeof window !== "undefined" && typeof window.confirm === "function" && !window.confirm(tr("manager.deleteConfirm", "\u786E\u5B9A\u5220\u9664 provider\u300C{name}\u300D\uFF1F\u8BE5\u64CD\u4F5C\u65E0\u6CD5\u64A4\u9500\u3002", { name: name2 }))) {
@@ -3391,6 +3476,7 @@ window.__ModuleLoader__.load({
 		      ...visibleRows.map((provider) => {
 		        const view = providerRowView(provider, snapshot);
 		        const { name: name2, pending, action } = view;
+		        const rowIndex = order.indexOf(view.key);
 		        const probe = snapshot.probes?.[view.key];
 		        const testing = probe?.phase === "testing";
 		        return h5(
@@ -3459,6 +3545,32 @@ window.__ModuleLoader__.load({
 		              "aria-label": tr("manager.activateAria", "\u542F\u7528 {name}", { name: name2 }),
 		              onClick: () => onActivate(view.key)
 		            }, action === "activate" ? tr("manager.activating", "\u542F\u7528\u4E2D\u2026") : tr("manager.activate", "\u542F\u7528")),
+		            // The move pair, sitting between the primary action and the row's
+		            // maintenance buttons — the order CC Switch's ProviderCardActions
+		            // lays them out in (status, primary, up/down, edit, ⋯).
+		            //
+		            // These are buttons rather than drag handles because
+		            // @dnd-kit is not a dependency of this plugin, and adding one
+		            // would mean shipping a drag library to the browser for a single
+		            // list. The pair also happens to be the keyboard-accessible form
+		            // of the same edit, which CC Switch only gets from its dnd-kit
+		            // KeyboardSensor.
+		            h5("button", {
+		              type: "button",
+		              className: "dsh-ccswitch-import__link",
+		              // The row's position in the whole catalogue, not in the
+		              // filtered view: see `onMove`.
+		              disabled: view.disabled || rowIndex <= 0,
+		              "aria-label": tr("manager.moveUpAria", "\u4E0A\u79FB {name}", { name: name2 }),
+		              onClick: () => onMove(view.key, -1)
+		            }, tr("manager.moveUp", "\u2191")),
+		            h5("button", {
+		              type: "button",
+		              className: "dsh-ccswitch-import__link",
+		              disabled: view.disabled || rowIndex < 0 || rowIndex >= order.length - 1,
+		              "aria-label": tr("manager.moveDownAria", "\u4E0B\u79FB {name}", { name: name2 }),
+		              onClick: () => onMove(view.key, 1)
+		            }, tr("manager.moveDown", "\u2193")),
 		            h5("button", {
 		              type: "button",
 		              className: "dsh-ccswitch-import__link",
@@ -3494,6 +3606,7 @@ window.__ModuleLoader__.load({
 		      initialDraft: dialog.draft,
 		      mode: dialog.mode,
 		      protocols: snapshot.apiProtocols ?? [],
+		      appTypes: snapshot.appTypes ?? [],
 		      saving: snapshot.status === "busy" && snapshot.pendingAction === "save",
 		      errors: Array.isArray(snapshot.saveErrors) ? snapshot.saveErrors : [],
 		      conflict: snapshot.conflict === true,
