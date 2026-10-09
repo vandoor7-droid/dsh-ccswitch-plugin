@@ -440,6 +440,370 @@ window.__ModuleLoader__.load({
 		  return controller;
 		}
 
+		// src/client/manager-controller.mjs
+		var MANAGER_API_BASE = "/api/dsh-ccswitch-manager";
+		var PROVIDERS_PATH = `${MANAGER_API_BASE}/providers`;
+		var SAVE_PATH = `${PROVIDERS_PATH}/save`;
+		var DELETE_PATH = `${PROVIDERS_PATH}/delete`;
+		var ACTIVATE_PATH = `${PROVIDERS_PATH}/activate`;
+		var PRESETS_PATH = `${MANAGER_API_BASE}/presets`;
+		var SAME_ORIGIN_HEADER2 = "x-dsh-ccswitch-origin";
+		var SAME_ORIGIN_VALUE2 = "same-origin";
+		var FALLBACK_PROTOCOLS = ["openai-completions", "openai-responses", "anthropic-messages"];
+		function defaultFetch2(url, init) {
+		  return globalThis.fetch(url, init);
+		}
+		function writeHeaders2() {
+		  return { "content-type": "application/json", [SAME_ORIGIN_HEADER2]: SAME_ORIGIN_VALUE2 };
+		}
+		function isRecord(value) {
+		  return typeof value === "object" && value !== null && !Array.isArray(value);
+		}
+		function optionalText(value) {
+		  const raw = typeof value === "string" ? value.trim() : "";
+		  return raw === "" ? void 0 : raw;
+		}
+		function finiteNumber(value) {
+		  return typeof value === "number" && Number.isFinite(value) ? value : void 0;
+		}
+		function count(value) {
+		  return Number.isInteger(value) && value >= 0 ? value : void 0;
+		}
+		function sanitizeModel(value) {
+		  const source = isRecord(value) ? value : {};
+		  return {
+		    id: String(source.id ?? ""),
+		    name: optionalText(source.name),
+		    contextWindow: count(source.contextWindow),
+		    maxTokens: count(source.maxTokens),
+		    reasoningEfforts: source.reasoningEfforts === false ? false : void 0
+		  };
+		}
+		function sanitizeProvider(key, value) {
+		  const source = isRecord(value) ? value : {};
+		  return {
+		    key: String(source.key ?? key),
+		    displayName: String(source.displayName ?? ""),
+		    api: String(source.api ?? ""),
+		    baseURL: String(source.baseURL ?? ""),
+		    apiKeyEnv: optionalText(source.apiKeyEnv),
+		    // The Host reports configuredness, never the key. Anything other than an
+		    // explicit `found` reads as missing, so a Host that omits the field cannot
+		    // make a provider whose credential is unset look ready.
+		    credential: source.credential === "found" ? "found" : "missing",
+		    models: (Array.isArray(source.models) ? source.models : []).slice(0, 200).map(sanitizeModel),
+		    notes: optionalText(source.notes),
+		    icon: optionalText(source.icon),
+		    iconColor: optionalText(source.iconColor),
+		    appType: optionalText(source.appType),
+		    sourceProfileId: optionalText(source.sourceProfileId),
+		    isCurrent: source.isCurrent === true,
+		    inFailoverQueue: source.inFailoverQueue === true,
+		    costMultiplier: finiteNumber(source.costMultiplier),
+		    limitDailyUsd: finiteNumber(source.limitDailyUsd),
+		    limitMonthlyUsd: finiteNumber(source.limitMonthlyUsd)
+		  };
+		}
+		function sanitizeProviders(value) {
+		  const source = isRecord(value) ? value : {};
+		  const providers = {};
+		  for (const [key, entry] of Object.entries(source)) {
+		    if (key === "") continue;
+		    providers[key] = sanitizeProvider(key, entry);
+		  }
+		  return providers;
+		}
+		function sanitizeOrder(order, providers) {
+		  const seen = /* @__PURE__ */ new Set();
+		  const next = [];
+		  for (const key of Array.isArray(order) ? order : []) {
+		    if (typeof key !== "string" || !Object.hasOwn(providers, key) || seen.has(key)) continue;
+		    seen.add(key);
+		    next.push(key);
+		  }
+		  for (const key of Object.keys(providers)) {
+		    if (!seen.has(key)) next.push(key);
+		  }
+		  return next;
+		}
+		function sanitizeProtocols(value) {
+		  const list = (Array.isArray(value) ? value : []).filter((entry) => typeof entry === "string" && entry.trim() !== "");
+		  return list.length > 0 ? [...new Set(list)] : [...FALLBACK_PROTOCOLS];
+		}
+		function sanitizePresets(value) {
+		  return (Array.isArray(value) ? value : []).filter(isRecord).slice(0, 200).map((preset) => ({
+		    key: String(preset.key ?? ""),
+		    displayName: String(preset.displayName ?? ""),
+		    appType: optionalText(preset.appType),
+		    api: String(preset.api ?? ""),
+		    baseURL: String(preset.baseURL ?? ""),
+		    models: (Array.isArray(preset.models) ? preset.models : []).filter((id) => typeof id === "string" && id !== "").slice(0, 200),
+		    icon: optionalText(preset.icon),
+		    iconColor: optionalText(preset.iconColor)
+		  })).filter((preset) => preset.key !== "" && preset.displayName !== "");
+		}
+		function sanitizeWarnings(value) {
+		  return (Array.isArray(value) ? value : []).filter((entry) => typeof entry === "string" && entry.trim() !== "").slice(0, 20);
+		}
+		function createCCSwitchManagerController({ fetchImpl = defaultFetch2, onChanged = () => {
+		} } = {}) {
+		  let snapshot = {
+		    status: "idle",
+		    error: null,
+		    /** The last failure was a revision conflict, not a bad request. */
+		    conflict: false,
+		    revision: void 0,
+		    exists: false,
+		    providers: {},
+		    order: [],
+		    current: void 0,
+		    apiProtocols: [...FALLBACK_PROTOCOLS],
+		    presets: [],
+		    presetsError: null,
+		    /** The row an operation is in flight for, so only it shows as busy. */
+		    pendingKey: void 0,
+		    pendingAction: void 0,
+		    /** The Host's own validation list from a rejected save, for the form. */
+		    saveErrors: [],
+		    /** `{key, applied, warnings}` from the last activation, until dismissed. */
+		    activation: void 0
+		  };
+		  const listeners = /* @__PURE__ */ new Set();
+		  const publish = (next) => {
+		    snapshot = next;
+		    for (const listener of listeners) listener();
+		  };
+		  let operationQueue = Promise.resolve();
+		  const enqueue = (operation) => {
+		    const next = operationQueue.then(operation, operation);
+		    operationQueue = next.then(() => void 0, () => void 0);
+		    return next;
+		  };
+		  const request = async (url, init) => {
+		    const response = await fetchImpl(url, init);
+		    let body;
+		    try {
+		      body = await response.json();
+		    } catch {
+		      body = void 0;
+		    }
+		    if (!response.ok) {
+		      const error = new Error(optionalText(body?.error) ?? `HTTP ${response.status}`);
+		      error.status = response.status;
+		      error.errors = Array.isArray(body?.errors) ? body.errors.filter((entry) => typeof entry === "string").slice(0, 50) : void 0;
+		      throw error;
+		    }
+		    return body ?? {};
+		  };
+		  const performRefresh = async (options = {}) => {
+		    const quiet = options?.quiet === true;
+		    if (!quiet) {
+		      publish({ ...snapshot, status: "loading", error: null, conflict: false, pendingKey: void 0, pendingAction: void 0 });
+		    }
+		    try {
+		      const body = await request(PROVIDERS_PATH);
+		      const providers = sanitizeProviders(body?.providers);
+		      publish({
+		        ...snapshot,
+		        status: "ready",
+		        error: null,
+		        conflict: false,
+		        pendingKey: void 0,
+		        pendingAction: void 0,
+		        // `exists` separates "no namespace has been created yet" from "the
+		        // namespace exists and is empty": the first has no catalogue to edit at
+		        // all, which is a different thing to tell the user.
+		        exists: body?.exists === true,
+		        revision: Number.isInteger(body?.revision) ? body.revision : void 0,
+		        providers,
+		        order: sanitizeOrder(body?.order, providers),
+		        current: optionalText(body?.current),
+		        apiProtocols: sanitizeProtocols(body?.apiProtocols)
+		      });
+		      return snapshot;
+		    } catch (error) {
+		      if (!quiet) {
+		        publish({
+		          ...snapshot,
+		          status: "error",
+		          error: error instanceof Error ? error.message : String(error),
+		          conflict: false,
+		          pendingKey: void 0,
+		          pendingAction: void 0
+		        });
+		      }
+		      throw error;
+		    }
+		  };
+		  const quietlyRefresh = async () => {
+		    try {
+		      await performRefresh({ quiet: true });
+		    } catch {
+		    }
+		  };
+		  const runMutation = async ({ path, body, pendingKey, pendingAction, patch }) => {
+		    publish({
+		      ...snapshot,
+		      status: "busy",
+		      error: null,
+		      conflict: false,
+		      pendingKey,
+		      pendingAction,
+		      // Cleared on entry so a rejection's list is never the previous attempt's:
+		      // a stale validation message is worse than none, because the field it
+		      // names may already be fixed.
+		      saveErrors: [],
+		      activation: void 0
+		    });
+		    try {
+		      const response = await request(path, {
+		        method: "POST",
+		        headers: writeHeaders2(),
+		        body: JSON.stringify(body)
+		      });
+		      const extra = typeof patch === "function" ? patch(response) : void 0;
+		      publish({
+		        ...snapshot,
+		        status: "ready",
+		        error: null,
+		        conflict: false,
+		        pendingKey: void 0,
+		        pendingAction: void 0,
+		        saveErrors: [],
+		        ...extra
+		      });
+		      await quietlyRefresh();
+		      try {
+		        await onChanged();
+		      } catch {
+		      }
+		      return snapshot;
+		    } catch (error) {
+		      const message = error instanceof Error ? error.message : String(error);
+		      const conflict = error?.status === 409;
+		      if (conflict) {
+		        try {
+		          await performRefresh({ quiet: true });
+		        } catch {
+		        }
+		      }
+		      publish({
+		        ...snapshot,
+		        status: conflict ? "conflict" : "error",
+		        error: message,
+		        conflict,
+		        // Only a save route answers with a per-field list; carrying one from a
+		        // delete or activate would put a form's errors on an unrelated dialog.
+		        saveErrors: pendingAction === "save" && Array.isArray(error?.errors) ? error.errors : [],
+		        pendingKey: void 0,
+		        pendingAction: void 0
+		      });
+		      throw error;
+		    }
+		  };
+		  const controller = {
+		    getSnapshot: () => snapshot,
+		    subscribe: (listener) => {
+		      listeners.add(listener);
+		      return () => listeners.delete(listener);
+		    },
+		    refresh: () => enqueue(() => performRefresh()),
+		    /**
+		     * The preset catalogue is loaded separately from the provider list because
+		     * it is static: a failed load must not break the tab, so it reports beside
+		     * the picker instead of through the page's error banner.
+		     */
+		    loadPresets: () => enqueue(async () => {
+		      publish({ ...snapshot, presetsError: null });
+		      try {
+		        const body = await request(PRESETS_PATH);
+		        publish({ ...snapshot, presets: sanitizePresets(body?.presets), presetsError: null });
+		        return snapshot;
+		      } catch (error) {
+		        publish({ ...snapshot, presetsError: error instanceof Error ? error.message : String(error) });
+		        throw error;
+		      }
+		    }),
+		    /**
+		     * Create or update one provider.
+		     *
+		     * `expectedRevision` is the revision the caller read the provider *at*, not
+		     * whatever the controller holds now: a refresh that landed while the form
+		     * was open means the document moved under the edit, and the Host has to be
+		     * able to refuse rather than let the form silently overwrite it.
+		     */
+		    save: (draft = {}) => enqueue(async () => {
+		      const key = optionalText(draft?.key);
+		      const provider = isRecord(draft?.provider) ? draft.provider : {};
+		      const apiKey = typeof draft?.apiKey === "string" && draft.apiKey !== "" ? draft.apiKey : void 0;
+		      const expectedRevision = Number.isInteger(draft?.expectedRevision) ? draft.expectedRevision : snapshot.revision;
+		      const body = { provider };
+		      if (key !== void 0) body.key = key;
+		      if (apiKey !== void 0) body.apiKey = apiKey;
+		      if (expectedRevision !== void 0) body.expectedRevision = expectedRevision;
+		      return runMutation({ path: SAVE_PATH, body, pendingKey: key, pendingAction: "save" });
+		    }),
+		    remove: (key, expectedRevision) => enqueue(async () => {
+		      const target = optionalText(key);
+		      if (target === void 0) throw new Error("remove requires a provider key");
+		      const revision = Number.isInteger(expectedRevision) ? expectedRevision : snapshot.revision;
+		      const body = { key: target };
+		      if (revision !== void 0) body.expectedRevision = revision;
+		      return runMutation({ path: DELETE_PATH, body, pendingKey: target, pendingAction: "delete" });
+		    }),
+		    activate: (key, expectedRevision) => enqueue(async () => {
+		      const target = optionalText(key);
+		      if (target === void 0) throw new Error("activate requires a provider key");
+		      const revision = Number.isInteger(expectedRevision) ? expectedRevision : snapshot.revision;
+		      const body = { key: target };
+		      if (revision !== void 0) body.expectedRevision = revision;
+		      return runMutation({
+		        path: ACTIVATE_PATH,
+		        body,
+		        pendingKey: target,
+		        pendingAction: "activate",
+		        patch: (response) => ({
+		          activation: {
+		            key: target,
+		            // Only an explicit `applied: false` means DSH did not take it; a
+		            // Host that omits the field succeeded.
+		            applied: response?.applied !== false,
+		            warnings: sanitizeWarnings(response?.warnings)
+		          }
+		        })
+		      });
+		    }),
+		    dismissActivation: () => {
+		      publish({ ...snapshot, activation: void 0 });
+		    },
+		    /**
+		     * Drop the previous attempt's failure before a new one begins.
+		     *
+		     * Without this, opening a second dialog after a rejected save greets the
+		     * user with the errors of the attempt they already abandoned — including
+		     * ones naming fields they have since fixed. The stored `saveErrors` outlive
+		     * the dialog that produced them, because the controller has no way to know
+		     * when a form closes.
+		     */
+		    clearSaveFeedback: () => {
+		      const wasFailed = snapshot.status === "error" || snapshot.status === "conflict";
+		      if (!wasFailed && snapshot.error === null && snapshot.conflict === false && snapshot.saveErrors.length === 0) {
+		        return;
+		      }
+		      publish({
+		        ...snapshot,
+		        // Back to `ready` only from a failed state: a dialog can only be opened
+		        // from a table that is on screen, so the read behind it did succeed.
+		        status: wasFailed ? "ready" : snapshot.status,
+		        error: null,
+		        conflict: false,
+		        saveErrors: []
+		      });
+		    }
+		  };
+		  return controller;
+		}
+
 		// src/client/messages.mjs
 		var MESSAGES = {
 		  zh: {
@@ -544,7 +908,82 @@ window.__ModuleLoader__.load({
 		    "reasoning.saving": "\u4FDD\u5B58\u4E2D\u2026",
 		    "reasoning.saved": "\u5DF2\u4FDD\u5B58",
 		    "reasoning.savedDirty": "\u5DF2\u4FDD\u5B58\uFF0C\u4F46\u4ECD\u6709\u672A\u4FDD\u5B58\u7684\u6539\u52A8",
-		    "reasoning.saveFailed": "\u4FDD\u5B58\u5931\u8D25\uFF1A{message}"
+		    "reasoning.saveFailed": "\u4FDD\u5B58\u5931\u8D25\uFF1A{message}",
+		    "manager.title": "\u4F9B\u5E94\u5546\u7BA1\u7406",
+		    "manager.hintExpanded": "\u76F4\u63A5\u7BA1\u7406\u672C\u63D2\u4EF6\u62E5\u6709\u7684 provider\uFF1A\u65B0\u589E\u3001\u7F16\u8F91\u3001\u590D\u5236\u3001\u5220\u9664\u3001\u542F\u7528\u3002",
+		    "manager.loading": "\u6B63\u5728\u8BFB\u53D6 provider \u5217\u8868\u2026",
+		    "manager.refresh": "\u5237\u65B0",
+		    "manager.refreshing": "\u5237\u65B0\u4E2D\u2026",
+		    "manager.empty": "\u8FD8\u6CA1\u6709 provider\uFF0C\u70B9\u51FB\u300C\u65B0\u589E provider\u300D\u5F00\u59CB\u3002",
+		    "manager.emptyNoNamespace": "\u672C\u63D2\u4EF6\u5C1A\u672A\u521B\u5EFA\u8BBE\u7F6E\u547D\u540D\u7A7A\u95F4\uFF1B\u6DFB\u52A0\u7B2C\u4E00\u4E2A provider \u65F6\u4F1A\u4E00\u5E76\u521B\u5EFA\u3002",
+		    "manager.add": "\u65B0\u589E provider",
+		    "manager.presetLabel": "\u9884\u8BBE",
+		    "manager.presetNone": "\u81EA\u5B9A\u4E49\uFF08\u7A7A\u767D\uFF09",
+		    "manager.presetsFailed": "\u9884\u8BBE\u5217\u8868\u52A0\u8F7D\u5931\u8D25\uFF1A{message}",
+		    "manager.credentialFound": "\u51ED\u636E\u5DF2\u627E\u5230",
+		    "manager.credentialMissing": "\u7F3A\u5C11\u51ED\u636E",
+		    "manager.active": "\u5F53\u524D\u542F\u7528",
+		    "manager.modelCount": "{count} \u4E2A\u6A21\u578B",
+		    "manager.noModels": "\u65E0\u6A21\u578B",
+		    "manager.failover": "\u6545\u969C\u8F6C\u79FB\u961F\u5217",
+		    "manager.activate": "\u542F\u7528",
+		    "manager.activating": "\u542F\u7528\u4E2D\u2026",
+		    "manager.edit": "\u7F16\u8F91",
+		    "manager.duplicate": "\u590D\u5236",
+		    "manager.delete": "\u5220\u9664",
+		    "manager.deleting": "\u5220\u9664\u4E2D\u2026",
+		    "manager.saving": "\u4FDD\u5B58\u4E2D\u2026",
+		    "manager.deleteConfirm": "\u786E\u5B9A\u5220\u9664 provider\u300C{name}\u300D\uFF1F\u8BE5\u64CD\u4F5C\u65E0\u6CD5\u64A4\u9500\u3002",
+		    "manager.activateAria": "\u542F\u7528 {name}",
+		    "manager.editAria": "\u7F16\u8F91 {name}",
+		    "manager.duplicateAria": "\u590D\u5236 {name}",
+		    "manager.deleteAria": "\u5220\u9664 {name}",
+		    "manager.rowActionsAria": "{name} \u7684\u64CD\u4F5C",
+		    "manager.activated": "\u5DF2\u542F\u7528 {name}",
+		    "manager.activatedNotApplied": "\u5DF2\u6807\u8BB0\u4E3A\u542F\u7528\uFF0C\u4F46 DSH \u6CA1\u6709\u63A5\u53D7\u8BE5 provider\uFF0C\u6A21\u578B\u8BF7\u6C42\u4ECD\u8D70\u539F\u6765\u7684\u8DEF\u7531\u3002",
+		    "manager.activationWarnings": "\u542F\u7528\u63D0\u793A",
+		    "manager.dismiss": "\u77E5\u9053\u4E86",
+		    "manager.conflict": "\u8BBE\u7F6E\u6587\u6863\u5DF2\u88AB\u5176\u4ED6\u5730\u65B9\u6539\u52A8\uFF0C\u5217\u8868\u5DF2\u5237\u65B0\uFF0C\u8BF7\u91CD\u8BD5\u3002",
+		    "manager.saveFailed": "\u4FDD\u5B58\u5931\u8D25\uFF1A{message}",
+		    "manager.deleteFailed": "\u5220\u9664\u5931\u8D25\uFF1A{message}",
+		    "manager.activateFailed": "\u542F\u7528\u5931\u8D25\uFF1A{message}",
+		    "manager.createTitle": "\u65B0\u589E provider",
+		    "manager.editTitle": "\u7F16\u8F91 provider",
+		    "manager.close": "\u5173\u95ED",
+		    "manager.fieldDisplayName": "\u540D\u79F0",
+		    "manager.fieldApi": "\u534F\u8BAE",
+		    "manager.fieldBaseUrl": "Base URL",
+		    "manager.fieldApiKey": "API Key",
+		    "manager.apiKeyHint": "\u7559\u7A7A\u8868\u793A\u4FDD\u6301\u5F53\u524D\u5BC6\u94A5\u4E0D\u53D8\u3002",
+		    "manager.apiKeyStored": "\u5DF2\u5B58\u6709\u4E00\u4E2A\u5BC6\u94A5\uFF0C\u6B64\u5904\u4E0D\u4F1A\u56DE\u663E\u3002",
+		    "manager.fieldNotes": "\u5907\u6CE8",
+		    "manager.fieldIcon": "\u56FE\u6807",
+		    "manager.fieldIconColor": "\u56FE\u6807\u989C\u8272",
+		    "manager.fieldCostMultiplier": "\u8D39\u7528\u500D\u7387",
+		    "manager.fieldLimitDaily": "\u6BCF\u65E5\u9650\u989D\uFF08USD\uFF09",
+		    "manager.fieldLimitMonthly": "\u6BCF\u6708\u9650\u989D\uFF08USD\uFF09",
+		    "manager.fieldFailover": "\u52A0\u5165\u6545\u969C\u8F6C\u79FB\u961F\u5217",
+		    "manager.modelsHeading": "\u6A21\u578B",
+		    "manager.modelId": "\u6A21\u578B ID",
+		    "manager.modelName": "\u663E\u793A\u540D",
+		    "manager.modelContext": "\u4E0A\u4E0B\u6587\u7A97\u53E3",
+		    "manager.modelMaxTokens": "\u6700\u5927\u8F93\u51FA token",
+		    "manager.modelAdd": "\u6DFB\u52A0\u6A21\u578B",
+		    "manager.modelRemove": "\u79FB\u9664",
+		    "manager.modelRemoveAria": "\u79FB\u9664\u6A21\u578B {id}",
+		    "manager.modelRowAria": "\u7B2C {index} \u4E2A\u6A21\u578B",
+		    "manager.validationTitle": "\u8BF7\u4FEE\u6B63\u4EE5\u4E0B\u95EE\u9898\uFF1A",
+		    "manager.error.displayName-required": "\u8BF7\u586B\u5199\u540D\u79F0\u3002",
+		    "manager.error.api-required": "\u8BF7\u9009\u62E9\u534F\u8BAE\u3002",
+		    "manager.error.baseURL-required": "\u8BF7\u586B\u5199 Base URL\u3002",
+		    "manager.error.baseURL-invalid": "Base URL \u4E0D\u662F\u5408\u6CD5\u7F51\u5740\uFF1A{detail}",
+		    "manager.error.models-required": "\u81F3\u5C11\u9700\u8981\u4E00\u4E2A\u6A21\u578B\uFF0C\u4E14\u6A21\u578B ID \u4E0D\u80FD\u4E3A\u7A7A\u3002",
+		    "manager.error.model-id-required": "\u7B2C {detail} \u4E2A\u6A21\u578B\u7F3A\u5C11 ID\u3002",
+		    "manager.error.costMultiplier-invalid": "\u8D39\u7528\u500D\u7387\u5FC5\u987B\u662F\u4E0D\u5C0F\u4E8E 0 \u7684\u6570\u5B57\uFF1A{detail}",
+		    "manager.error.limitDailyUsd-invalid": "\u6BCF\u65E5\u9650\u989D\u5FC5\u987B\u662F\u4E0D\u5C0F\u4E8E 0 \u7684\u6570\u5B57\uFF1A{detail}",
+		    "manager.error.limitMonthlyUsd-invalid": "\u6BCF\u6708\u9650\u989D\u5FC5\u987B\u662F\u4E0D\u5C0F\u4E8E 0 \u7684\u6570\u5B57\uFF1A{detail}",
+		    "manager.save": "\u4FDD\u5B58",
+		    "manager.cancel": "\u53D6\u6D88"
 		  },
 		  en: {
 		    nav: "Model reasoning",
@@ -648,13 +1087,105 @@ window.__ModuleLoader__.load({
 		    "reasoning.saving": "Saving\u2026",
 		    "reasoning.saved": "Saved",
 		    "reasoning.savedDirty": "Saved, but newer edits are still unsaved",
-		    "reasoning.saveFailed": "Save failed: {message}"
+		    "reasoning.saveFailed": "Save failed: {message}",
+		    "manager.title": "Provider manager",
+		    "manager.hintExpanded": "Manage the providers this plugin owns: add, edit, duplicate, delete, activate.",
+		    "manager.loading": "Loading providers\u2026",
+		    "manager.refresh": "Refresh",
+		    "manager.refreshing": "Refreshing\u2026",
+		    "manager.empty": "No providers yet \u2014 use \u201CAdd provider\u201D to create one.",
+		    "manager.emptyNoNamespace": "This plugin has no settings namespace yet; adding the first provider creates it.",
+		    "manager.add": "Add provider",
+		    "manager.presetLabel": "Preset",
+		    "manager.presetNone": "Custom (blank)",
+		    "manager.presetsFailed": "Could not load presets: {message}",
+		    "manager.credentialFound": "credential found",
+		    "manager.credentialMissing": "credential missing",
+		    "manager.active": "active",
+		    "manager.modelCount": "{count} models",
+		    "manager.noModels": "no models",
+		    "manager.failover": "failover queue",
+		    "manager.activate": "Activate",
+		    "manager.activating": "Activating\u2026",
+		    "manager.edit": "Edit",
+		    "manager.duplicate": "Duplicate",
+		    "manager.delete": "Delete",
+		    "manager.deleting": "Deleting\u2026",
+		    "manager.saving": "Saving\u2026",
+		    "manager.deleteConfirm": "Delete the provider \u201C{name}\u201D? This cannot be undone.",
+		    "manager.activateAria": "Activate {name}",
+		    "manager.editAria": "Edit {name}",
+		    "manager.duplicateAria": "Duplicate {name}",
+		    "manager.deleteAria": "Delete {name}",
+		    "manager.rowActionsAria": "Actions for {name}",
+		    "manager.activated": "Activated {name}",
+		    "manager.activatedNotApplied": "Marked active, but DSH did not accept the provider \u2014 requests still use the previous route.",
+		    "manager.activationWarnings": "Activation notes",
+		    "manager.dismiss": "Dismiss",
+		    "manager.conflict": "The settings document changed elsewhere. The list has been reloaded \u2014 please retry.",
+		    "manager.saveFailed": "Save failed: {message}",
+		    "manager.deleteFailed": "Delete failed: {message}",
+		    "manager.activateFailed": "Activate failed: {message}",
+		    "manager.createTitle": "Add provider",
+		    "manager.editTitle": "Edit provider",
+		    "manager.close": "Close",
+		    "manager.fieldDisplayName": "Name",
+		    "manager.fieldApi": "Protocol",
+		    "manager.fieldBaseUrl": "Base URL",
+		    "manager.fieldApiKey": "API key",
+		    "manager.apiKeyHint": "Leave blank to keep the current key.",
+		    "manager.apiKeyStored": "A key is already stored; it is never shown here.",
+		    "manager.fieldNotes": "Notes",
+		    "manager.fieldIcon": "Icon",
+		    "manager.fieldIconColor": "Icon colour",
+		    "manager.fieldCostMultiplier": "Cost multiplier",
+		    "manager.fieldLimitDaily": "Daily limit (USD)",
+		    "manager.fieldLimitMonthly": "Monthly limit (USD)",
+		    "manager.fieldFailover": "Add to the failover queue",
+		    "manager.modelsHeading": "Models",
+		    "manager.modelId": "Model id",
+		    "manager.modelName": "Display name",
+		    "manager.modelContext": "Context window",
+		    "manager.modelMaxTokens": "Max output tokens",
+		    "manager.modelAdd": "Add model",
+		    "manager.modelRemove": "Remove",
+		    "manager.modelRemoveAria": "Remove model {id}",
+		    "manager.modelRowAria": "Model {index}",
+		    "manager.validationTitle": "Fix these problems:",
+		    "manager.error.displayName-required": "A name is required.",
+		    "manager.error.api-required": "A protocol is required.",
+		    "manager.error.baseURL-required": "A base URL is required.",
+		    "manager.error.baseURL-invalid": "The base URL is not a valid URL: {detail}",
+		    "manager.error.models-required": "At least one model is required, and its id must not be empty.",
+		    "manager.error.model-id-required": "Model {detail} has no id.",
+		    "manager.error.costMultiplier-invalid": "The cost multiplier must be a number \u2265 0: {detail}",
+		    "manager.error.limitDailyUsd-invalid": "The daily limit must be a number \u2265 0: {detail}",
+		    "manager.error.limitMonthlyUsd-invalid": "The monthly limit must be a number \u2265 0: {detail}",
+		    "manager.save": "Save",
+		    "manager.cancel": "Cancel"
 		  }
 		};
 
+		// src/client/i18n.mjs
+		function makeTranslator(t) {
+		  return function translate(key, fallback, params) {
+		    let template;
+		    try {
+		      template = typeof t === "function" ? t(key) : void 0;
+		    } catch {
+		      template = void 0;
+		    }
+		    if (typeof template !== "string" || template.length === 0) template = fallback;
+		    if (typeof template !== "string" || template.length === 0) return key;
+		    if (!params) return template;
+		    return template.replace(/\{(\w+)\}/g, (match, name2) => Object.hasOwn(params, name2) ? String(params[name2]) : match);
+		  };
+		}
+
 		// src/client/registration.mjs
 		var MODELS_FOOTER_SLOT = "settings.models.footer";
-		function registerReasoningSettings(ctx, { controller, importer, component, t }) {
+		var PLUGINS_TAB_SLOT = "settings.plugins.tab";
+		function registerReasoningSettings(ctx, { controller, importer, manager, managerComponent, component, t }) {
 		  ctx.locale?.register?.("dsh-ccswitch-plugin", MESSAGES);
 		  ctx.slots.inject(MODELS_FOOTER_SLOT, () => ctx.slots.register({
 		    name: MODELS_FOOTER_SLOT,
@@ -662,8 +1193,27 @@ window.__ModuleLoader__.load({
 		    order: 10,
 		    inject: () => ({ controller, importer, slots: ctx.slots, t })
 		  }, component));
+		  if (manager && managerComponent) {
+		    const tr = makeTranslator(t);
+		    ctx.slots.inject(PLUGINS_TAB_SLOT, () => ctx.slots.register({
+		      name: PLUGINS_TAB_SLOT,
+		      id: "ccswitch-manager",
+		      // 10 is taken by the importer's footer cell and by other plugins' tabs;
+		      // 20 keeps this tab after them without colliding.
+		      order: 20,
+		      // A thunk, so the tab title follows the active locale: the owner
+		      // re-reads it per render and never subscribes locale state itself.
+		      label: () => tr("manager.title", "Provider manager"),
+		      inject: () => ({ controller: manager, t })
+		    }, managerComponent));
+		  }
 		  const refreshImporter = () => {
 		    const result = importer?.scan?.();
+		    if (result?.catch) void result.catch(() => {
+		    });
+		  };
+		  const refreshManager = () => {
+		    const result = manager?.refresh?.();
 		    if (result?.catch) void result.catch(() => {
 		    });
 		  };
@@ -680,9 +1230,11 @@ window.__ModuleLoader__.load({
 		  const disposers = [
 		    listen("settings/document-updated", () => {
 		      void controller.refresh();
+		      refreshManager();
 		    }),
 		    listen("llm/adapters-updated", () => {
 		      void controller.refresh();
+		      refreshManager();
 		    }),
 		    listen("credentials/record-updated", refreshImporter),
 		    listen("credentials/reference-updated", refreshImporter)
@@ -738,7 +1290,7 @@ window.__ModuleLoader__.load({
 		  importPanel: false,
 		  models: /* @__PURE__ */ Object.create(null)
 		});
-		function isRecord(value) {
+		function isRecord2(value) {
 		  return value !== null && typeof value === "object" && !Array.isArray(value);
 		}
 		function normalizeCollapse(input) {
@@ -747,13 +1299,13 @@ window.__ModuleLoader__.load({
 		    importPanel: false,
 		    models: /* @__PURE__ */ Object.create(null)
 		  };
-		  if (!isRecord(input)) return out;
+		  if (!isRecord2(input)) return out;
 		  out.reasoningPanel = input.reasoningPanel === true;
 		  out.importPanel = input.importPanel === true;
-		  if (isRecord(input.models)) {
+		  if (isRecord2(input.models)) {
 		    for (const route of Object.keys(input.models)) {
 		      const byModel = input.models[route];
-		      if (!isRecord(byModel)) continue;
+		      if (!isRecord2(byModel)) continue;
 		      const normalized = /* @__PURE__ */ Object.create(null);
 		      for (const modelId of Object.keys(byModel)) {
 		        if (byModel[modelId] === true) normalized[modelId] = true;
@@ -804,22 +1356,6 @@ window.__ModuleLoader__.load({
 		  } catch {
 		    return null;
 		  }
-		}
-
-		// src/client/i18n.mjs
-		function makeTranslator(t) {
-		  return function translate(key, fallback, params) {
-		    let template;
-		    try {
-		      template = typeof t === "function" ? t(key) : void 0;
-		    } catch {
-		      template = void 0;
-		    }
-		    if (typeof template !== "string" || template.length === 0) template = fallback;
-		    if (typeof template !== "string" || template.length === 0) return key;
-		    if (!params) return template;
-		    return template.replace(/\{(\w+)\}/g, (match, name2) => Object.hasOwn(params, name2) ? String(params[name2]) : match);
-		  };
 		}
 
 		// src/ui/ReasoningSettingsSection.mjs
@@ -1472,6 +2008,784 @@ window.__ModuleLoader__.load({
 		  );
 		}
 
+		// src/ui/ProviderManagerSection.mjs
+		var import_react5 = __toESM(require("react"), 1);
+
+		// src/ui/ProviderEditModal.mjs
+		var import_react4 = __toESM(require("react"), 1);
+		var h4 = import_react4.default.createElement;
+		var MAX_MODELS = 200;
+		var PROBLEM_FALLBACK = {
+		  "displayName-required": "\u8BF7\u586B\u5199\u540D\u79F0\u3002",
+		  "api-required": "\u8BF7\u9009\u62E9\u534F\u8BAE\u3002",
+		  "baseURL-required": "\u8BF7\u586B\u5199 Base URL\u3002",
+		  "baseURL-invalid": "Base URL \u4E0D\u662F\u5408\u6CD5\u7F51\u5740\uFF1A{detail}",
+		  "models-required": "\u81F3\u5C11\u9700\u8981\u4E00\u4E2A\u6A21\u578B\uFF0C\u4E14\u6A21\u578B ID \u4E0D\u80FD\u4E3A\u7A7A\u3002",
+		  "model-id-required": "\u7B2C {detail} \u4E2A\u6A21\u578B\u7F3A\u5C11 ID\u3002",
+		  "costMultiplier-invalid": "\u8D39\u7528\u500D\u7387\u5FC5\u987B\u662F\u4E0D\u5C0F\u4E8E 0 \u7684\u6570\u5B57\uFF1A{detail}",
+		  "limitDailyUsd-invalid": "\u6BCF\u65E5\u9650\u989D\u5FC5\u987B\u662F\u4E0D\u5C0F\u4E8E 0 \u7684\u6570\u5B57\uFF1A{detail}",
+		  "limitMonthlyUsd-invalid": "\u6BCF\u6708\u9650\u989D\u5FC5\u987B\u662F\u4E0D\u5C0F\u4E8E 0 \u7684\u6570\u5B57\uFF1A{detail}"
+		};
+		function blankModel() {
+		  return { id: "", name: "", contextWindow: "", maxTokens: "" };
+		}
+		function emptyDraft() {
+		  return {
+		    key: void 0,
+		    displayName: "",
+		    api: "",
+		    baseURL: "",
+		    apiKey: "",
+		    notes: "",
+		    icon: "",
+		    iconColor: "",
+		    costMultiplier: "",
+		    limitDailyUsd: "",
+		    limitMonthlyUsd: "",
+		    inFailoverQueue: false,
+		    models: [blankModel()],
+		    // Carried through an edit so a save does not quietly drop fields this form
+		    // does not edit. An edit replaces the whole stored record, so anything
+		    // omitted here is lost.
+		    appType: void 0,
+		    sourceProfileId: void 0,
+		    isCurrent: false
+		  };
+		}
+		function textOf(value) {
+		  return typeof value === "number" && Number.isFinite(value) ? String(value) : "";
+		}
+		function draftFromProvider(provider) {
+		  const base = emptyDraft();
+		  if (!provider || typeof provider !== "object") return base;
+		  const models = Array.isArray(provider.models) ? provider.models : [];
+		  return {
+		    ...base,
+		    key: typeof provider.key === "string" && provider.key !== "" ? provider.key : void 0,
+		    displayName: String(provider.displayName ?? ""),
+		    api: String(provider.api ?? ""),
+		    baseURL: String(provider.baseURL ?? ""),
+		    // Never copied from a stored value; see the module comment.
+		    apiKey: "",
+		    notes: String(provider.notes ?? ""),
+		    icon: String(provider.icon ?? ""),
+		    iconColor: String(provider.iconColor ?? ""),
+		    costMultiplier: textOf(provider.costMultiplier),
+		    limitDailyUsd: textOf(provider.limitDailyUsd),
+		    limitMonthlyUsd: textOf(provider.limitMonthlyUsd),
+		    inFailoverQueue: provider.inFailoverQueue === true,
+		    models: models.length > 0 ? models.slice(0, MAX_MODELS).map((model) => ({
+		      id: String(model?.id ?? ""),
+		      name: String(model?.name ?? ""),
+		      contextWindow: textOf(model?.contextWindow),
+		      maxTokens: textOf(model?.maxTokens),
+		      // Not editable here, but preserved so saving does not erase reasoning
+		      // levels the user configured in the reasoning editor.
+		      reasoningEfforts: model?.reasoningEfforts === false ? false : model?.reasoningEfforts
+		    })) : [blankModel()],
+		    appType: typeof provider.appType === "string" ? provider.appType : void 0,
+		    sourceProfileId: typeof provider.sourceProfileId === "string" ? provider.sourceProfileId : void 0,
+		    isCurrent: provider.isCurrent === true
+		  };
+		}
+		function draftFromPreset(preset) {
+		  const base = emptyDraft();
+		  if (!preset || typeof preset !== "object") return base;
+		  const models = (Array.isArray(preset.models) ? preset.models : []).filter((id) => typeof id === "string" && id !== "").slice(0, MAX_MODELS);
+		  return {
+		    ...base,
+		    displayName: String(preset.displayName ?? ""),
+		    api: String(preset.api ?? ""),
+		    baseURL: String(preset.baseURL ?? ""),
+		    icon: String(preset.icon ?? ""),
+		    iconColor: String(preset.iconColor ?? ""),
+		    appType: typeof preset.appType === "string" ? preset.appType : void 0,
+		    models: models.length > 0 ? models.map((id) => ({ ...blankModel(), id })) : [blankModel()]
+		  };
+		}
+		function numberField(value) {
+		  if (typeof value === "number") return Number.isFinite(value) ? value : void 0;
+		  const text = typeof value === "string" ? value.trim() : "";
+		  if (text === "") return void 0;
+		  const parsed = Number(text);
+		  return Number.isFinite(parsed) ? parsed : void 0;
+		}
+		function optionalText2(value) {
+		  const text = typeof value === "string" ? value.trim() : "";
+		  return text === "" ? void 0 : text;
+		}
+		function validateDraft(draft) {
+		  const source = draft && typeof draft === "object" ? draft : {};
+		  const problems = [];
+		  if (optionalText2(source.displayName) === void 0) problems.push({ code: "displayName-required" });
+		  const api = optionalText2(source.api);
+		  if (api === void 0) problems.push({ code: "api-required" });
+		  const baseURL = optionalText2(source.baseURL);
+		  if (baseURL === void 0) problems.push({ code: "baseURL-required" });
+		  else {
+		    try {
+		      new URL(baseURL);
+		    } catch {
+		      problems.push({ code: "baseURL-invalid", detail: baseURL });
+		    }
+		  }
+		  const models = Array.isArray(source.models) ? source.models : [];
+		  const usable = models.filter((model) => optionalText2(model?.id) !== void 0);
+		  if (usable.length === 0) problems.push({ code: "models-required" });
+		  models.forEach((model, index) => {
+		    if (optionalText2(model?.id) !== void 0) return;
+		    const touched = optionalText2(model?.name) !== void 0 || numberField(model?.contextWindow) !== void 0 || numberField(model?.maxTokens) !== void 0;
+		    if (touched) problems.push({ code: "model-id-required", detail: index + 1 });
+		  });
+		  for (const [field2, code] of [
+		    ["costMultiplier", "costMultiplier-invalid"],
+		    ["limitDailyUsd", "limitDailyUsd-invalid"],
+		    ["limitMonthlyUsd", "limitMonthlyUsd-invalid"]
+		  ]) {
+		    const raw = source[field2];
+		    const text = typeof raw === "string" ? raw.trim() : raw;
+		    if (text === "" || text === void 0) continue;
+		    const parsed = numberField(raw);
+		    if (parsed === void 0 || parsed < 0) problems.push({ code, detail: String(raw) });
+		  }
+		  return problems;
+		}
+		function field(label, control, hint, hintId) {
+		  return h4(
+		    "label",
+		    { className: "dsh-ccswitch-form__field" },
+		    h4("span", { className: "dsh-ccswitch-form__label" }, label),
+		    control,
+		    hint ? h4("span", { className: "dsh-ccswitch-form__hint", id: hintId }, hint) : null
+		  );
+		}
+		function ProviderEditModal({
+		  initialDraft,
+		  mode = "create",
+		  protocols = [],
+		  saving = false,
+		  errors = [],
+		  conflict = false,
+		  saveError = "",
+		  onSubmit,
+		  onClose,
+		  t
+		}) {
+		  const tr = makeTranslator(t);
+		  const [draft, setDraft] = (0, import_react4.useState)(() => initialDraft ?? emptyDraft());
+		  const [showProblems, setShowProblems] = (0, import_react4.useState)(false);
+		  const dialogRef = (0, import_react4.useRef)(null);
+		  const reactId = (0, import_react4.useId)();
+		  const titleId = `dsh-ccswitch-modal-title-${reactId}`;
+		  const apiKeyHintId = `dsh-ccswitch-modal-apikey-${reactId}`;
+		  const modelsHeadingId = `dsh-ccswitch-modal-models-${reactId}`;
+		  const problems = validateDraft(draft);
+		  const problemMessages = problems.map((problem) => tr(
+		    `manager.error.${problem.code}`,
+		    PROBLEM_FALLBACK[problem.code] ?? PROBLEM_FALLBACK["models-required"],
+		    problem.detail === void 0 ? void 0 : { detail: problem.detail }
+		  ));
+		  const hostErrors = (Array.isArray(errors) ? errors : []).filter((entry) => typeof entry === "string" && entry !== "");
+		  (0, import_react4.useEffect)(() => {
+		    const dialog = dialogRef.current;
+		    if (!dialog || typeof document === "undefined") return void 0;
+		    const first = dialog.querySelector("input, select, textarea, button");
+		    if (first && typeof first.focus === "function") first.focus();
+		    const onKeyDown = (event) => {
+		      if (event.key === "Escape") {
+		        event.stopPropagation();
+		        onClose?.();
+		        return;
+		      }
+		      if (event.key !== "Tab") return;
+		      const focusable = dialog.querySelectorAll(
+		        'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+		      );
+		      if (focusable.length === 0) return;
+		      const firstEl = focusable[0];
+		      const lastEl = focusable[focusable.length - 1];
+		      if (event.shiftKey && document.activeElement === firstEl) {
+		        event.preventDefault();
+		        lastEl.focus();
+		      } else if (!event.shiftKey && document.activeElement === lastEl) {
+		        event.preventDefault();
+		        firstEl.focus();
+		      }
+		    };
+		    document.addEventListener("keydown", onKeyDown, true);
+		    return () => document.removeEventListener("keydown", onKeyDown, true);
+		  }, [onClose]);
+		  const patch = (changes) => setDraft((current) => ({ ...current, ...changes }));
+		  const patchModel = (index, changes) => setDraft((current) => ({
+		    ...current,
+		    models: current.models.map((model, at) => at === index ? { ...model, ...changes } : model)
+		  }));
+		  const addModel = () => setDraft((current) => current.models.length >= MAX_MODELS ? current : { ...current, models: [...current.models, blankModel()] });
+		  const removeModel = (index) => setDraft((current) => {
+		    const models = current.models.filter((_, at) => at !== index);
+		    return { ...current, models: models.length > 0 ? models : [blankModel()] };
+		  });
+		  const submit = (event) => {
+		    event.preventDefault();
+		    if (saving) return;
+		    setShowProblems(true);
+		    if (problems.length > 0) return;
+		    onSubmit?.(draft);
+		  };
+		  const protocolOptions = Array.isArray(protocols) && protocols.length > 0 ? protocols : [draft.api].filter(Boolean);
+		  return h4(
+		    "div",
+		    {
+		      className: "dsh-ccswitch-modal__backdrop",
+		      // A click that starts and ends on the backdrop closes; one that started
+		      // inside the panel and drifted out does not, so a drag that overshoots a
+		      // text selection does not throw the form away.
+		      onMouseDown: (event) => {
+		        if (event.target === event.currentTarget) onClose?.();
+		      }
+		    },
+		    h4(
+		      "div",
+		      {
+		        className: "dsh-ccswitch-modal",
+		        role: "dialog",
+		        "aria-modal": "true",
+		        "aria-labelledby": titleId,
+		        ref: dialogRef
+		      },
+		      h4(
+		        "form",
+		        { className: "dsh-ccswitch-form", onSubmit: submit, noValidate: true },
+		        h4(
+		          "div",
+		          { className: "dsh-ccswitch-modal__header" },
+		          h4(
+		            "h3",
+		            { id: titleId, className: "dsh-ccswitch-modal__title" },
+		            mode === "edit" ? tr("manager.editTitle", "\u7F16\u8F91 provider") : tr("manager.createTitle", "\u65B0\u589E provider")
+		          ),
+		          h4("button", {
+		            type: "button",
+		            className: "dsh-ccswitch-modal__close",
+		            "aria-label": tr("manager.close", "\u5173\u95ED"),
+		            onClick: () => onClose?.()
+		          }, "\xD7")
+		        ),
+		        conflict || hostErrors.length > 0 || saveError !== "" || showProblems && problemMessages.length > 0 ? h4(
+		          "div",
+		          { role: "alert", className: "dsh-ccswitch-modal__errors" },
+		          conflict ? h4("p", { className: "dsh-ccswitch-modal__error" }, tr("manager.conflict", "\u8BBE\u7F6E\u6587\u6863\u5DF2\u88AB\u5176\u4ED6\u5730\u65B9\u6539\u52A8\uFF0C\u5217\u8868\u5DF2\u5237\u65B0\uFF0C\u8BF7\u91CD\u8BD5\u3002")) : null,
+		          saveError !== "" ? h4("p", { className: "dsh-ccswitch-modal__error" }, saveError) : null,
+		          hostErrors.length > 0 || showProblems && problemMessages.length > 0 ? h4(
+		            "div",
+		            null,
+		            h4("p", { className: "dsh-ccswitch-modal__error-title" }, tr("manager.validationTitle", "\u8BF7\u4FEE\u6B63\u4EE5\u4E0B\u95EE\u9898\uFF1A")),
+		            h4(
+		              "ul",
+		              { className: "dsh-ccswitch-modal__error-list" },
+		              ...[...hostErrors, ...showProblems ? problemMessages : []].map((message, index) => h4("li", { key: `${index}-${message}` }, message))
+		            )
+		          ) : null
+		        ) : null,
+		        h4(
+		          "div",
+		          { className: "dsh-ccswitch-form__grid" },
+		          field(
+		            tr("manager.fieldDisplayName", "\u540D\u79F0"),
+		            h4("input", {
+		              className: "dsh-ccswitch-form__input",
+		              type: "text",
+		              value: draft.displayName,
+		              onChange: (event) => patch({ displayName: event.target.value })
+		            })
+		          ),
+		          field(
+		            tr("manager.fieldApi", "\u534F\u8BAE"),
+		            h4(
+		              "select",
+		              {
+		                className: "dsh-ccswitch-form__input",
+		                value: draft.api,
+		                onChange: (event) => patch({ api: event.target.value })
+		              },
+		              ...[...new Set([...protocolOptions, draft.api].filter((entry) => entry !== ""))].map((protocol) => h4("option", { key: protocol, value: protocol }, protocol)),
+		              draft.api === "" ? h4("option", { key: "", value: "" }, "") : null
+		            )
+		          ),
+		          field(
+		            tr("manager.fieldBaseUrl", "Base URL"),
+		            h4("input", {
+		              className: "dsh-ccswitch-form__input",
+		              type: "text",
+		              value: draft.baseURL,
+		              onChange: (event) => patch({ baseURL: event.target.value })
+		            })
+		          ),
+		          field(
+		            tr("manager.fieldApiKey", "API Key"),
+		            h4("input", {
+		              className: "dsh-ccswitch-form__input",
+		              type: "password",
+		              autoComplete: "off",
+		              value: draft.apiKey,
+		              "aria-describedby": apiKeyHintId,
+		              onChange: (event) => patch({ apiKey: event.target.value })
+		            }),
+		            `${tr("manager.apiKeyHint", "\u7559\u7A7A\u8868\u793A\u4FDD\u6301\u5F53\u524D\u5BC6\u94A5\u4E0D\u53D8\u3002")}${mode === "edit" && initialDraft?.key ? ` ${tr("manager.apiKeyStored", "\u5DF2\u5B58\u6709\u4E00\u4E2A\u5BC6\u94A5\uFF0C\u6B64\u5904\u4E0D\u4F1A\u56DE\u663E\u3002")}` : ""}`,
+		            apiKeyHintId
+		          ),
+		          field(
+		            tr("manager.fieldNotes", "\u5907\u6CE8"),
+		            h4("input", {
+		              className: "dsh-ccswitch-form__input",
+		              type: "text",
+		              value: draft.notes,
+		              onChange: (event) => patch({ notes: event.target.value })
+		            })
+		          ),
+		          field(
+		            tr("manager.fieldIcon", "\u56FE\u6807"),
+		            h4("input", {
+		              className: "dsh-ccswitch-form__input",
+		              type: "text",
+		              value: draft.icon,
+		              onChange: (event) => patch({ icon: event.target.value })
+		            })
+		          ),
+		          field(
+		            tr("manager.fieldIconColor", "\u56FE\u6807\u989C\u8272"),
+		            h4("input", {
+		              className: "dsh-ccswitch-form__input",
+		              type: "text",
+		              value: draft.iconColor,
+		              onChange: (event) => patch({ iconColor: event.target.value })
+		            })
+		          ),
+		          field(
+		            tr("manager.fieldCostMultiplier", "\u8D39\u7528\u500D\u7387"),
+		            h4("input", {
+		              className: "dsh-ccswitch-form__input",
+		              type: "text",
+		              inputMode: "decimal",
+		              value: draft.costMultiplier,
+		              onChange: (event) => patch({ costMultiplier: event.target.value })
+		            })
+		          ),
+		          field(
+		            tr("manager.fieldLimitDaily", "\u6BCF\u65E5\u9650\u989D\uFF08USD\uFF09"),
+		            h4("input", {
+		              className: "dsh-ccswitch-form__input",
+		              type: "text",
+		              inputMode: "decimal",
+		              value: draft.limitDailyUsd,
+		              onChange: (event) => patch({ limitDailyUsd: event.target.value })
+		            })
+		          ),
+		          field(
+		            tr("manager.fieldLimitMonthly", "\u6BCF\u6708\u9650\u989D\uFF08USD\uFF09"),
+		            h4("input", {
+		              className: "dsh-ccswitch-form__input",
+		              type: "text",
+		              inputMode: "decimal",
+		              value: draft.limitMonthlyUsd,
+		              onChange: (event) => patch({ limitMonthlyUsd: event.target.value })
+		            })
+		          ),
+		          h4(
+		            "label",
+		            { className: "dsh-ccswitch-form__field dsh-ccswitch-form__field--check" },
+		            h4("input", {
+		              type: "checkbox",
+		              checked: draft.inFailoverQueue,
+		              onChange: (event) => patch({ inFailoverQueue: event.target.checked })
+		            }),
+		            h4("span", { className: "dsh-ccswitch-form__label" }, tr("manager.fieldFailover", "\u52A0\u5165\u6545\u969C\u8F6C\u79FB\u961F\u5217"))
+		          )
+		        ),
+		        h4(
+		          "fieldset",
+		          { className: "dsh-ccswitch-form__models", "aria-labelledby": modelsHeadingId },
+		          h4("legend", { id: modelsHeadingId, className: "dsh-ccswitch-form__legend" }, tr("manager.modelsHeading", "\u6A21\u578B")),
+		          ...draft.models.map((model, index) => h4(
+		            "div",
+		            {
+		              // Index-keyed on purpose: two rows may legitimately hold the same
+		              // (or an empty) id while the user is editing, and keying by id
+		              // would make React reconcile the wrong row.
+		              key: index,
+		              className: "dsh-ccswitch-form__model-row",
+		              role: "group",
+		              "aria-label": tr("manager.modelRowAria", "\u7B2C {index} \u4E2A\u6A21\u578B", { index: index + 1 })
+		            },
+		            h4("input", {
+		              className: "dsh-ccswitch-form__input",
+		              type: "text",
+		              placeholder: tr("manager.modelId", "\u6A21\u578B ID"),
+		              "aria-label": tr("manager.modelId", "\u6A21\u578B ID"),
+		              value: model.id,
+		              onChange: (event) => patchModel(index, { id: event.target.value })
+		            }),
+		            h4("input", {
+		              className: "dsh-ccswitch-form__input",
+		              type: "text",
+		              placeholder: tr("manager.modelName", "\u663E\u793A\u540D"),
+		              "aria-label": tr("manager.modelName", "\u663E\u793A\u540D"),
+		              value: model.name,
+		              onChange: (event) => patchModel(index, { name: event.target.value })
+		            }),
+		            h4("input", {
+		              className: "dsh-ccswitch-form__input",
+		              type: "text",
+		              inputMode: "numeric",
+		              placeholder: tr("manager.modelContext", "\u4E0A\u4E0B\u6587\u7A97\u53E3"),
+		              "aria-label": tr("manager.modelContext", "\u4E0A\u4E0B\u6587\u7A97\u53E3"),
+		              value: model.contextWindow,
+		              onChange: (event) => patchModel(index, { contextWindow: event.target.value })
+		            }),
+		            h4("input", {
+		              className: "dsh-ccswitch-form__input",
+		              type: "text",
+		              inputMode: "numeric",
+		              placeholder: tr("manager.modelMaxTokens", "\u6700\u5927\u8F93\u51FA token"),
+		              "aria-label": tr("manager.modelMaxTokens", "\u6700\u5927\u8F93\u51FA token"),
+		              value: model.maxTokens,
+		              onChange: (event) => patchModel(index, { maxTokens: event.target.value })
+		            }),
+		            h4("button", {
+		              type: "button",
+		              className: "dsh-ccswitch-import__link dsh-ccswitch-form__model-remove",
+		              "aria-label": tr("manager.modelRemoveAria", "\u79FB\u9664\u6A21\u578B {id}", { id: model.id || index + 1 }),
+		              onClick: () => removeModel(index)
+		            }, tr("manager.modelRemove", "\u79FB\u9664"))
+		          )),
+		          h4("button", {
+		            type: "button",
+		            className: "dsh-ccswitch-import__secondary",
+		            disabled: draft.models.length >= MAX_MODELS,
+		            onClick: addModel
+		          }, tr("manager.modelAdd", "\u6DFB\u52A0\u6A21\u578B"))
+		        ),
+		        h4(
+		          "div",
+		          { className: "dsh-ccswitch-modal__footer" },
+		          h4("button", {
+		            type: "button",
+		            className: "dsh-ccswitch-import__secondary",
+		            onClick: () => onClose?.()
+		          }, tr("manager.cancel", "\u53D6\u6D88")),
+		          h4("button", {
+		            type: "submit",
+		            className: "dsh-ccswitch-import__primary",
+		            disabled: saving
+		          }, saving ? tr("manager.saving", "\u4FDD\u5B58\u4E2D\u2026") : tr("manager.save", "\u4FDD\u5B58"))
+		        )
+		      )
+		    )
+		  );
+		}
+
+		// src/ui/ProviderManagerSection.mjs
+		var h5 = import_react5.default.createElement;
+		var FAILURE_TEXT = {
+		  activate: ["manager.activateFailed", "\u542F\u7528\u5931\u8D25\uFF1A{message}"],
+		  delete: ["manager.deleteFailed", "\u5220\u9664\u5931\u8D25\uFF1A{message}"],
+		  save: ["manager.saveFailed", "\u4FDD\u5B58\u5931\u8D25\uFF1A{message}"]
+		};
+		function emptyState(snapshot) {
+		  const status = snapshot?.status;
+		  if (status === "error" || status === "conflict") return null;
+		  if (status !== "ready") return "loading";
+		  return snapshot.exists === true ? "empty" : "emptyNoNamespace";
+		}
+		function providerRowView(provider, snapshot) {
+		  const key = provider?.key ?? "";
+		  const pending = snapshot?.pendingKey !== void 0 && snapshot.pendingKey === key;
+		  return {
+		    key,
+		    name: provider?.displayName || key,
+		    isCurrent: provider?.isCurrent === true,
+		    // Anything the Host did not explicitly report as found reads as missing:
+		    // the failure that matters is a provider whose key is unset, and it must
+		    // never be dressed up as ready.
+		    credentialFound: provider?.credential === "found",
+		    modelCount: Array.isArray(provider?.models) ? provider.models.length : 0,
+		    inFailoverQueue: provider?.inFailoverQueue === true,
+		    pending,
+		    action: pending ? snapshot?.pendingAction : void 0,
+		    disabled: snapshot?.status === "busy" || snapshot?.status === "loading"
+		  };
+		}
+		function useDialog(revision, onOpen) {
+		  const [dialog, setDialog] = (0, import_react5.useState)(null);
+		  const open = (next) => {
+		    onOpen?.();
+		    setDialog({ revision, ...next });
+		  };
+		  return {
+		    dialog,
+		    openCreate: (preset) => open({ mode: "create", draft: preset ? draftFromPreset(preset) : emptyDraft() }),
+		    openEdit: (provider) => open({ mode: "edit", draft: draftFromProvider(provider) }),
+		    openDuplicate: (provider) => open({
+		      mode: "create",
+		      // A duplicate is a *new* provider that starts from an existing one, so the
+		      // key is dropped: keeping it would make the save an update to the
+		      // original, which is the opposite of what "Duplicate" promises.
+		      draft: { ...draftFromProvider(provider), key: void 0, isCurrent: false }
+		    }),
+		    close: () => setDialog(null)
+		  };
+		}
+		function ProviderManagerSection({ controller, t }) {
+		  const tr = makeTranslator(t);
+		  const snapshot = (0, import_react5.useSyncExternalStore)(controller.subscribe, controller.getSnapshot, controller.getSnapshot);
+		  const { dialog, openCreate, openEdit, openDuplicate, close } = useDialog(
+		    snapshot.revision,
+		    () => controller.clearSaveFeedback?.()
+		  );
+		  const [presetKey, setPresetKey] = (0, import_react5.useState)("");
+		  const [rowError, setRowError] = (0, import_react5.useState)(null);
+		  const loadedPresets = (0, import_react5.useRef)(false);
+		  (0, import_react5.useEffect)(() => {
+		    if (snapshot.status === "idle") void controller.refresh().catch(() => {
+		    });
+		  }, [controller, snapshot.status]);
+		  (0, import_react5.useEffect)(() => {
+		    if (loadedPresets.current) return;
+		    loadedPresets.current = true;
+		    void controller.loadPresets().catch(() => {
+		    });
+		  }, [controller]);
+		  const providers = snapshot.providers ?? {};
+		  const order = Array.isArray(snapshot.order) ? snapshot.order : [];
+		  const presets = Array.isArray(snapshot.presets) ? snapshot.presets : [];
+		  const busy = snapshot.status === "busy" || snapshot.status === "loading";
+		  const activation = snapshot.activation;
+		  const runRowAction = async (key, action, kind) => {
+		    setRowError(null);
+		    try {
+		      await action();
+		    } catch (error) {
+		      if (error?.status === 409) return;
+		      const message = error instanceof Error ? error.message : String(error);
+		      const [fallbackKey, fallback] = FAILURE_TEXT[kind] ?? FAILURE_TEXT.delete;
+		      setRowError({ key, message: tr(fallbackKey, fallback, { message }) });
+		    }
+		  };
+		  const onActivate = (key) => runRowAction(key, () => controller.activate(key), "activate");
+		  const onDelete = (provider) => {
+		    const name2 = provider.displayName || provider.key;
+		    if (typeof window !== "undefined" && typeof window.confirm === "function" && !window.confirm(tr("manager.deleteConfirm", "\u786E\u5B9A\u5220\u9664 provider\u300C{name}\u300D\uFF1F\u8BE5\u64CD\u4F5C\u65E0\u6CD5\u64A4\u9500\u3002", { name: name2 }))) {
+		      return;
+		    }
+		    void runRowAction(provider.key, () => controller.remove(provider.key), "delete");
+		  };
+		  const submitDialog = (draft) => {
+		    void controller.save({ ...draft, expectedRevision: dialog?.revision }).then(() => close()).catch(() => {
+		    });
+		  };
+		  const applyPreset = (key) => {
+		    setPresetKey(key);
+		    if (key === "") return;
+		    const preset = presets.find((entry) => entry.key === key);
+		    if (preset) openCreate(preset);
+		    setPresetKey("");
+		  };
+		  const rows = order.map((key) => providers[key]).filter(Boolean);
+		  return h5(
+		    "section",
+		    { className: "dsh-ccswitch-manager", "aria-labelledby": "dsh-ccswitch-manager-title" },
+		    h5(
+		      "div",
+		      { className: "dsh-ccswitch-manager__header" },
+		      h5(
+		        "div",
+		        null,
+		        h5("h2", { id: "dsh-ccswitch-manager-title", className: "dsh-ccswitch-manager__title" }, tr("manager.title", "\u4F9B\u5E94\u5546\u7BA1\u7406")),
+		        h5("p", { className: "dsh-ccswitch-manager__hint" }, tr("manager.hintExpanded", "\u76F4\u63A5\u7BA1\u7406\u672C\u63D2\u4EF6\u62E5\u6709\u7684 provider\uFF1A\u65B0\u589E\u3001\u7F16\u8F91\u3001\u590D\u5236\u3001\u5220\u9664\u3001\u542F\u7528\u3002"))
+		      ),
+		      h5(
+		        "div",
+		        { className: "dsh-ccswitch-manager__header-actions" },
+		        presets.length > 0 ? h5(
+		          "label",
+		          { className: "dsh-ccswitch-manager__preset" },
+		          h5("span", { className: "dsh-ccswitch-manager__preset-label" }, tr("manager.presetLabel", "\u9884\u8BBE")),
+		          h5(
+		            "select",
+		            {
+		              className: "dsh-ccswitch-manager__preset-select",
+		              value: presetKey,
+		              onChange: (event) => applyPreset(event.target.value)
+		            },
+		            h5("option", { value: "" }, tr("manager.presetNone", "\u81EA\u5B9A\u4E49\uFF08\u7A7A\u767D\uFF09")),
+		            ...presets.map((preset) => h5("option", { key: preset.key, value: preset.key }, preset.displayName))
+		          )
+		        ) : null,
+		        h5("button", {
+		          type: "button",
+		          className: "dsh-ccswitch-import__secondary",
+		          disabled: busy,
+		          onClick: () => {
+		            void controller.refresh().catch(() => {
+		            });
+		          }
+		        }, snapshot.status === "loading" ? tr("manager.refreshing", "\u5237\u65B0\u4E2D\u2026") : tr("manager.refresh", "\u5237\u65B0")),
+		        h5("button", {
+		          type: "button",
+		          className: "dsh-ccswitch-import__primary",
+		          disabled: busy,
+		          onClick: () => openCreate()
+		        }, tr("manager.add", "\u65B0\u589E provider"))
+		      )
+		    ),
+		    snapshot.presetsError ? h5(
+		      "p",
+		      { className: "dsh-ccswitch-manager__note" },
+		      tr("manager.presetsFailed", "\u9884\u8BBE\u5217\u8868\u52A0\u8F7D\u5931\u8D25\uFF1A{message}", { message: snapshot.presetsError })
+		    ) : null,
+		    snapshot.error ? h5(
+		      "p",
+		      { role: "alert", className: "dsh-ccswitch-import__error" },
+		      snapshot.conflict ? tr("manager.conflict", "\u8BBE\u7F6E\u6587\u6863\u5DF2\u88AB\u5176\u4ED6\u5730\u65B9\u6539\u52A8\uFF0C\u5217\u8868\u5DF2\u5237\u65B0\uFF0C\u8BF7\u91CD\u8BD5\u3002") : snapshot.error
+		    ) : null,
+		    activation ? h5(
+		      "div",
+		      {
+		        role: "status",
+		        className: "dsh-ccswitch-manager__activation" + (activation.applied ? "" : " dsh-ccswitch-manager__activation--warn")
+		      },
+		      h5(
+		        "div",
+		        { className: "dsh-ccswitch-manager__activation-head" },
+		        h5("strong", null, tr("manager.activated", "\u5DF2\u542F\u7528 {name}", {
+		          name: providers[activation.key]?.displayName ?? activation.key
+		        })),
+		        h5("button", {
+		          type: "button",
+		          className: "dsh-ccswitch-import__link",
+		          onClick: () => controller.dismissActivation()
+		        }, tr("manager.dismiss", "\u77E5\u9053\u4E86"))
+		      ),
+		      !activation.applied ? h5(
+		        "p",
+		        { className: "dsh-ccswitch-manager__activation-warning" },
+		        tr("manager.activatedNotApplied", "\u5DF2\u6807\u8BB0\u4E3A\u542F\u7528\uFF0C\u4F46 DSH \u6CA1\u6709\u63A5\u53D7\u8BE5 provider\uFF0C\u6A21\u578B\u8BF7\u6C42\u4ECD\u8D70\u539F\u6765\u7684\u8DEF\u7531\u3002")
+		      ) : null,
+		      activation.warnings.length > 0 ? h5(
+		        "div",
+		        null,
+		        h5("p", { className: "dsh-ccswitch-manager__activation-title" }, tr("manager.activationWarnings", "\u542F\u7528\u63D0\u793A")),
+		        h5(
+		          "ul",
+		          { className: "dsh-ccswitch-manager__activation-list" },
+		          ...activation.warnings.map((warning, index) => h5("li", { key: `${index}-${warning}` }, warning))
+		        )
+		      ) : null
+		    ) : null,
+		    rows.length === 0 ? (() => {
+		      const state = emptyState(snapshot);
+		      if (state === null) return null;
+		      if (state === "loading") {
+		        return h5("p", { className: "dsh-ccswitch-manager__empty" }, tr("manager.loading", "\u6B63\u5728\u8BFB\u53D6 provider \u5217\u8868\u2026"));
+		      }
+		      return h5("p", { className: "dsh-ccswitch-manager__empty" }, state === "empty" ? tr("manager.empty", "\u8FD8\u6CA1\u6709 provider\uFF0C\u70B9\u51FB\u300C\u65B0\u589E provider\u300D\u5F00\u59CB\u3002") : tr("manager.emptyNoNamespace", "\u672C\u63D2\u4EF6\u5C1A\u672A\u521B\u5EFA\u8BBE\u7F6E\u547D\u540D\u7A7A\u95F4\uFF1B\u6DFB\u52A0\u7B2C\u4E00\u4E2A provider \u65F6\u4F1A\u4E00\u5E76\u521B\u5EFA\u3002"));
+		    })() : h5(
+		      "div",
+		      { className: "dsh-ccswitch-manager__list" },
+		      ...rows.map((provider) => {
+		        const view = providerRowView(provider, snapshot);
+		        const { name: name2, pending, action } = view;
+		        return h5(
+		          "div",
+		          {
+		            key: view.key,
+		            className: "dsh-ccswitch-manager__row" + (view.isCurrent ? " dsh-ccswitch-manager__row--current" : "")
+		          },
+		          h5(
+		            "div",
+		            { className: "dsh-ccswitch-manager__content" },
+		            h5(
+		              "div",
+		              { className: "dsh-ccswitch-manager__primary-line" },
+		              h5("strong", null, name2),
+		              view.isCurrent ? h5(
+		                "span",
+		                { className: "dsh-ccswitch-import__badge dsh-ccswitch-import__badge--new" },
+		                tr("manager.active", "\u5F53\u524D\u542F\u7528")
+		              ) : null
+		            ),
+		            h5(
+		              "div",
+		              { className: "dsh-ccswitch-manager__meta-line" },
+		              h5("code", { className: "dsh-ccswitch-manager__provider-key" }, view.key),
+		              h5("span", { className: "dsh-ccswitch-manager__protocol" }, provider.api || "\u2014"),
+		              provider.baseURL ? h5("code", null, provider.baseURL) : null,
+		              h5("span", null, view.modelCount > 0 ? tr("manager.modelCount", "{count} \u4E2A\u6A21\u578B", { count: view.modelCount }) : tr("manager.noModels", "\u65E0\u6A21\u578B")),
+		              h5("span", {
+		                className: "dsh-ccswitch-import__badge" + (view.credentialFound ? " dsh-ccswitch-import__badge--new" : " dsh-ccswitch-import__badge--blocked")
+		              }, view.credentialFound ? tr("manager.credentialFound", "\u51ED\u636E\u5DF2\u627E\u5230") : tr("manager.credentialMissing", "\u7F3A\u5C11\u51ED\u636E")),
+		              view.inFailoverQueue ? h5("span", { className: "dsh-ccswitch-manager__failover" }, tr("manager.failover", "\u6545\u969C\u8F6C\u79FB\u961F\u5217")) : null
+		            ),
+		            rowError && rowError.key === view.key ? h5("p", { role: "alert", className: "dsh-ccswitch-manager__row-error" }, rowError.message) : null
+		          ),
+		          h5(
+		            "div",
+		            { className: "dsh-ccswitch-manager__row-actions", role: "group", "aria-label": tr("manager.rowActionsAria", "{name} \u7684\u64CD\u4F5C", { name: name2 }) },
+		            h5("button", {
+		              type: "button",
+		              className: "dsh-ccswitch-import__link",
+		              // Activating the row that is already current is a no-op that
+		              // still costs a settings write and a full-catalogue edit.
+		              disabled: view.disabled || view.isCurrent,
+		              "aria-label": tr("manager.activateAria", "\u542F\u7528 {name}", { name: name2 }),
+		              onClick: () => onActivate(view.key)
+		            }, action === "activate" ? tr("manager.activating", "\u542F\u7528\u4E2D\u2026") : tr("manager.activate", "\u542F\u7528")),
+		            h5("button", {
+		              type: "button",
+		              className: "dsh-ccswitch-import__link",
+		              disabled: view.disabled,
+		              "aria-label": tr("manager.editAria", "\u7F16\u8F91 {name}", { name: name2 }),
+		              onClick: () => openEdit(provider)
+		            }, tr("manager.edit", "\u7F16\u8F91")),
+		            h5("button", {
+		              type: "button",
+		              className: "dsh-ccswitch-import__link",
+		              disabled: view.disabled,
+		              "aria-label": tr("manager.duplicateAria", "\u590D\u5236 {name}", { name: name2 }),
+		              onClick: () => openDuplicate(provider)
+		            }, tr("manager.duplicate", "\u590D\u5236")),
+		            h5("button", {
+		              type: "button",
+		              className: "dsh-ccswitch-import__link dsh-ccswitch-manager__danger",
+		              disabled: view.disabled,
+		              "aria-label": tr("manager.deleteAria", "\u5220\u9664 {name}", { name: name2 }),
+		              onClick: () => onDelete(provider)
+		            }, action === "delete" ? tr("manager.deleting", "\u5220\u9664\u4E2D\u2026") : tr("manager.delete", "\u5220\u9664"))
+		          )
+		        );
+		      })
+		    ),
+		    // Keyed by which provider is being edited, so opening "edit" on a second
+		    // row remounts the form; without it React would reuse the first row's state
+		    // and the dialog would show the wrong provider. The revision is deliberately
+		    // NOT part of this key: a background refresh changes it, and remounting on
+		    // that would throw away everything the user had typed.
+		    dialog ? h5(ProviderEditModal, {
+		      key: `${dialog.mode}:${dialog.draft?.key ?? "new"}`,
+		      initialDraft: dialog.draft,
+		      mode: dialog.mode,
+		      protocols: snapshot.apiProtocols ?? [],
+		      saving: snapshot.status === "busy" && snapshot.pendingAction === "save",
+		      errors: Array.isArray(snapshot.saveErrors) ? snapshot.saveErrors : [],
+		      conflict: snapshot.conflict === true,
+		      saveError: snapshot.status === "error" && snapshot.error ? snapshot.error : "",
+		      onSubmit: submitDialog,
+		      onClose: close,
+		      t
+		    }) : null
+		  );
+		}
+
 		// src/client/styles.mjs
 		var STYLE_ID = "dsh-ccswitch-plugin-styles";
 		var CSS = `button[class*="navCell"]:has(span[class*="navLabel"]:empty){display:none;}
@@ -1572,6 +2886,82 @@ window.__ModuleLoader__.load({
 		.dsh-ccswitch-import__row-extras{display:flex;align-items:center;gap:8px;min-width:0;justify-self:end;}.dsh-ccswitch-import__probe-btn{white-space:nowrap;}.dsh-ccswitch-import__probe-btn[disabled]{color:var(--dsw-alias-label-dimmed);cursor:default;text-decoration:none;}.dsh-ccswitch-import__probe{font-size:11px;line-height:16px;white-space:nowrap;color:var(--dsw-alias-label-tertiary);}.dsh-ccswitch-import__probe--ok{color:var(--dsw-alias-state-business-primary);}.dsh-ccswitch-import__probe--error{color:var(--dsw-alias-state-error-primary);}
 		@media (max-width:640px){[role='dialog']:has(.dsh-ccswitch-import)>nav{flex:0 0 56px;width:56px;min-width:56px;}[role='dialog']:has(.dsh-ccswitch-import)>nav button{width:40px;min-width:40px;padding:0;justify-content:center;}[role='dialog']:has(.dsh-ccswitch-import)>nav button>span{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;}[role='dialog']:has(.dsh-ccswitch-import)>div{min-width:0;}.dsh-ccswitch-import__header{flex-direction:column;}.dsh-ccswitch-import__header-actions{width:100%;justify-content:space-between;}.dsh-ccswitch-import__header-actions .dsh-ccswitch-import__actions{flex:1;}.dsh-ccswitch-import__actions{width:100%;flex-direction:column;align-items:stretch;}.dsh-ccswitch-import__actions button{width:100%;}.dsh-ccswitch-import__row{grid-template-columns:auto minmax(0,1fr);min-width:0;}.dsh-ccswitch-import__content{min-width:0;}.dsh-ccswitch-import__row-extras{grid-column:1/-1;justify-self:start;flex-wrap:wrap;}.dsh-reasoning-model__header{align-items:stretch;flex-direction:column;gap:10px;padding:10px;}.dsh-reasoning-model__mode-area{width:100%;justify-content:space-between;}.dsh-reasoning-model__body{padding:10px;}.dsh-reasoning-model__footer{padding:9px 10px;}.dsh-reasoning-levels__heading{align-items:flex-start;}.dsh-reasoning-levels__options{gap:6px;}.dsh-reasoning-custom__body{grid-template-columns:minmax(0,1fr);}}`;
 		var STATUS_CSS = ".dsh-reasoning-status--dirty{color:var(--dsw-alias-label-secondary);}\n";
+		var MANAGER_CSS = [
+		  ".dsh-ccswitch-manager{display:flex;flex-direction:column;gap:14px;color:var(--dsw-alias-label-primary);}",
+		  ".dsh-ccswitch-manager__header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;}",
+		  ".dsh-ccswitch-manager__title{margin:0 0 4px;color:var(--dsw-alias-label-primary);font-size:16px;font-weight:500;line-height:24px;}",
+		  ".dsh-ccswitch-manager__hint{margin:0;color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:20px;}",
+		  ".dsh-ccswitch-manager__header-actions{display:flex;align-items:center;gap:8px;flex:none;flex-wrap:wrap;}",
+		  ".dsh-ccswitch-manager__preset{display:flex;align-items:center;gap:6px;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;}",
+		  ".dsh-ccswitch-manager__preset-select{box-sizing:border-box;min-height:28px;padding:0 8px;border:1px solid var(--dsw-alias-border-l2);border-radius:7px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-family:inherit;font-size:12px;line-height:18px;}",
+		  ".dsh-ccswitch-manager__preset-select:focus-visible{outline:2px solid var(--dsw-alias-border-l3);outline-offset:1px;}",
+		  ".dsh-ccswitch-manager__note{margin:0;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;overflow-wrap:anywhere;}",
+		  ".dsh-ccswitch-manager__empty{margin:0;color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:20px;}",
+		  ".dsh-ccswitch-manager__list{display:flex;flex-direction:column;gap:8px;}",
+		  ".dsh-ccswitch-manager__row{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;min-width:0;padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-1);}",
+		  // The active row is marked by its border rather than a fill, so the badge
+		  // stays readable in both themes.
+		  ".dsh-ccswitch-manager__row--current{border-color:var(--dsw-alias-brand-primary);}",
+		  ".dsh-ccswitch-manager__content{display:flex;flex-direction:column;gap:3px;min-width:0;flex:1 1 auto;}",
+		  ".dsh-ccswitch-manager__primary-line{display:flex;align-items:baseline;gap:8px;min-width:0;}",
+		  ".dsh-ccswitch-manager__primary-line strong{min-width:0;color:var(--dsw-alias-label-primary);font-size:13px;font-weight:500;line-height:20px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}",
+		  ".dsh-ccswitch-manager__meta-line{display:flex;align-items:baseline;flex-wrap:wrap;gap:8px;min-width:0;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;}",
+		  ".dsh-ccswitch-manager__meta-line>*{min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}",
+		  ".dsh-ccswitch-manager__provider-key,.dsh-ccswitch-manager__meta-line code{color:var(--dsw-alias-label-tertiary);font-family:var(--ds-font-family-code,monospace);font-size:11px;line-height:16px;}",
+		  ".dsh-ccswitch-manager__failover{color:var(--dsw-alias-label-secondary);}",
+		  ".dsh-ccswitch-manager__row-error{margin:2px 0 0;color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:18px;overflow-wrap:anywhere;}",
+		  ".dsh-ccswitch-manager__row-actions{display:flex;align-items:center;gap:10px;flex:none;flex-wrap:wrap;justify-content:flex-end;}",
+		  ".dsh-ccswitch-manager__danger{color:var(--dsw-alias-state-error-primary);}",
+		  ".dsh-ccswitch-manager__danger[disabled]{color:var(--dsw-alias-label-dimmed);}",
+		  ".dsh-ccswitch-manager__activation{padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-1);}",
+		  ".dsh-ccswitch-manager__activation--warn{border-color:var(--dsw-alias-state-warn-primary);}",
+		  ".dsh-ccswitch-manager__activation-head{display:flex;align-items:center;justify-content:space-between;gap:12px;}",
+		  ".dsh-ccswitch-manager__activation-head strong{color:var(--dsw-alias-label-primary);font-size:12px;font-weight:500;line-height:18px;}",
+		  ".dsh-ccswitch-manager__activation-title{margin:6px 0 0;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px;}",
+		  ".dsh-ccswitch-manager__activation-list{margin:4px 0 0;padding-left:18px;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;}",
+		  ".dsh-ccswitch-manager__activation-warning{margin:6px 0 0;color:var(--dsw-alias-state-warn-primary);font-size:12px;line-height:18px;overflow-wrap:anywhere;}",
+		  // The edit dialog. It opens on top of the settings dialog, so it owns a
+		  // full-viewport backdrop of its own rather than sitting inline in the tab.
+		  ".dsh-ccswitch-modal__backdrop{position:fixed;inset:0;z-index:60;display:flex;align-items:center;justify-content:center;padding:24px;background:rgba(0,0,0,.32);}",
+		  ".dsh-ccswitch-modal{display:flex;flex-direction:column;width:100%;max-width:720px;max-height:100%;box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);border-radius:12px;background:var(--dsw-alias-bg-layer-1);box-shadow:0 12px 40px rgba(0,0,0,.28);overflow:hidden;}",
+		  ".dsh-ccswitch-modal__header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 16px;border-bottom:1px solid var(--dsw-alias-border-l2);}",
+		  ".dsh-ccswitch-modal__title{margin:0;color:var(--dsw-alias-label-primary);font-size:14px;font-weight:500;line-height:22px;}",
+		  ".dsh-ccswitch-modal__close{flex:none;display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;border:1px solid transparent;border-radius:7px;background:transparent;color:var(--dsw-alias-label-secondary);font-family:inherit;font-size:18px;line-height:1;cursor:pointer;}",
+		  ".dsh-ccswitch-modal__close:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary);}",
+		  ".dsh-ccswitch-modal__close:focus-visible{outline:2px solid var(--dsw-alias-border-l3);outline-offset:1px;}",
+		  ".dsh-ccswitch-modal__errors{margin:12px 16px 0;padding:8px 10px;border:1px solid var(--dsw-alias-state-error-primary);border-radius:8px;}",
+		  ".dsh-ccswitch-modal__error{margin:0 0 4px;color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:18px;overflow-wrap:anywhere;}",
+		  ".dsh-ccswitch-modal__error-title{margin:0;color:var(--dsw-alias-state-error-primary);font-size:12px;font-weight:500;line-height:18px;}",
+		  ".dsh-ccswitch-modal__error-list{margin:4px 0 0;padding-left:18px;color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:18px;overflow-wrap:anywhere;}",
+		  ".dsh-ccswitch-modal__footer{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:12px 16px;border-top:1px solid var(--dsw-alias-border-l2);}",
+		  // The form body scrolls, the header and footer do not: on a short window the
+		  // Save button has to stay reachable without scrolling past every field.
+		  ".dsh-ccswitch-form{display:flex;flex-direction:column;min-height:0;overflow-y:auto;}",
+		  ".dsh-ccswitch-form__grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;padding:12px 16px 0;}",
+		  ".dsh-ccswitch-form__field{display:flex;flex-direction:column;gap:4px;min-width:0;color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px;}",
+		  ".dsh-ccswitch-form__field--check{flex-direction:row;align-items:center;gap:8px;}",
+		  ".dsh-ccswitch-form__label{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px;}",
+		  ".dsh-ccswitch-form__hint{color:var(--dsw-alias-label-dimmed);font-size:11px;line-height:16px;}",
+		  ".dsh-ccswitch-form__input{box-sizing:border-box;width:100%;min-height:30px;padding:0 8px;border:1px solid var(--dsw-alias-border-l2);border-radius:7px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-family:inherit;font-size:12px;line-height:18px;}",
+		  ".dsh-ccswitch-form__input:focus{border-color:var(--dsw-alias-brand-primary);outline:2px solid var(--dsw-alias-border-l3);outline-offset:1px;}",
+		  ".dsh-ccswitch-form__input::placeholder{color:var(--dsw-alias-label-dimmed);}",
+		  ".dsh-ccswitch-form__models{margin:14px 16px 16px;padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;min-width:0;}",
+		  ".dsh-ccswitch-form__legend{padding:0 4px;color:var(--dsw-alias-label-secondary);font-size:12px;font-weight:500;line-height:18px;}",
+		  ".dsh-ccswitch-form__model-row{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,1fr) minmax(0,.8fr) minmax(0,.8fr) auto;align-items:center;gap:6px;min-width:0;margin-bottom:6px;}",
+		  ".dsh-ccswitch-form__model-remove{white-space:nowrap;}",
+		  "@media (max-width:640px){",
+		  ".dsh-ccswitch-manager__header{flex-direction:column;}",
+		  ".dsh-ccswitch-manager__header-actions{width:100%;}",
+		  ".dsh-ccswitch-manager__row{flex-direction:column;}",
+		  ".dsh-ccswitch-manager__row-actions{width:100%;justify-content:flex-start;}",
+		  ".dsh-ccswitch-modal__backdrop{padding:0;align-items:stretch;}",
+		  ".dsh-ccswitch-modal{max-width:none;border-radius:0;max-height:none;height:100%;}",
+		  ".dsh-ccswitch-form__grid{grid-template-columns:minmax(0,1fr);}",
+		  // One model per row: five inputs side by side at phone width leaves each
+		  // about 40px wide, which is unusable for an id or a token count.
+		  ".dsh-ccswitch-form__model-row{grid-template-columns:minmax(0,1fr);}",
+		  "}"
+		].join("");
 		function installEmbedStyles() {
 		  if (typeof document === "undefined") return () => {
 		  };
@@ -1579,7 +2969,7 @@ window.__ModuleLoader__.load({
 		  };
 		  const style = document.createElement("style");
 		  style.id = STYLE_ID;
-		  style.textContent = CSS + STATUS_CSS;
+		  style.textContent = CSS + STATUS_CSS + MANAGER_CSS;
 		  document.head.append(style);
 		  return () => style.remove();
 		}
@@ -1604,11 +2994,23 @@ window.__ModuleLoader__.load({
 		      await importer.scan({ keepResults: true });
 		    }
 		  });
+		  const manager = createCCSwitchManagerController({
+		    // A manager write lands in the same settings document the reasoning editor
+		    // edits and the importer classifies against, so both have to re-read: a
+		    // provider added here must show up in the reasoning panel immediately, and
+		    // the manager's own table is refreshed by the controller itself.
+		    onChanged: async () => {
+		      controller.refresh();
+		      await importer.scan({ keepResults: true });
+		    }
+		  });
 		  const t = ctx.locale.bind("dsh-ccswitch-plugin");
 		  const removeStyles = installEmbedStyles();
 		  const dispose = registerReasoningSettings(ctx, {
 		    controller,
 		    importer,
+		    manager,
+		    managerComponent: ProviderManagerSection,
 		    component: ModelsFooterPanel,
 		    t
 		  });

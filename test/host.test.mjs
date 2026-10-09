@@ -53,6 +53,7 @@ test('Host apply registers injected routes and disposes them', () => {
     '/api/dsh-ccswitch-manager/providers/delete',
     '/api/dsh-ccswitch-manager/providers/activate',
     '/api/dsh-ccswitch-manager/presets',
+    '/api/dsh-ccswitch-manager/writers/run',
   ])
   routeCleanup()
   assert.deepEqual(disposed, registered.map((route) => route.path))

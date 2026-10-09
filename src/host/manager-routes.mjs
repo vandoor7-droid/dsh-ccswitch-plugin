@@ -35,6 +35,7 @@ import {
 import { credentialRefForProviderKey, newProviderKey } from '../../lib/core/ids.js'
 import { redactText } from '../../lib/core/safety.js'
 import { isLoopbackRequest, methodFence, readJsonBody, writeJson } from './routes.mjs'
+import { WRITER_APP_TYPES, WriterError, writeProviderConfig } from './writers.js'
 
 export const MANAGER_API_BASE = '/api/dsh-ccswitch-manager'
 
@@ -163,11 +164,33 @@ function revisionOf(body) {
   return Number.isInteger(body?.expectedRevision) ? body.expectedRevision : undefined
 }
 
+/**
+ * Which writer should handle a provider.
+ *
+ * The body's `appType` wins when it names one, so the UI can push a provider to
+ * a tool other than the one it was filed under. Otherwise the provider's own
+ * `appType` decides, and a provider that carries neither falls back to
+ * `claude`: that is what CC Switch itself defaults an unlabelled row to, and it
+ * is the more forgiving of the two (Claude Code accepts an arbitrary base URL,
+ * whereas a Codex route only works for an OpenAI-shaped endpoint).
+ */
+function resolveAppType(provider, override) {
+  if (typeof override === 'string' && override !== '') return override
+  const own = provider?.appType
+  return typeof own === 'string' && own !== '' ? own : 'claude'
+}
+
 export function makeManagerRoutes(deps = {}) {
   const settings = deps.settings
   const credentials = deps.credentials
   const isLoopback = deps.isLoopback ?? isLoopbackRequest
   const presets = Array.isArray(deps.presets) ? deps.presets : []
+  /**
+   * Where the external tools keep their config. Injected so tests can point the
+   * writers at a temp directory; production leaves it undefined and the writers
+   * fall back to `os.homedir()`.
+   */
+  const home = deps.home
   /**
    * Project a provider into the namespace DSH itself reads, so activating one
    * here actually changes which model DSH talks to. Injected rather than
@@ -402,5 +425,99 @@ export function makeManagerRoutes(deps = {}) {
         writeJson(response, 200, { presets })
       },
     },
+    {
+      kind: 'exact',
+      path: `${MANAGER_API_BASE}/writers/run`,
+      handler: async (request, response) => {
+        if (!methodFence(request, response, isLoopback, 'POST', { requireSameOrigin: true })) return
+        const body = await readJsonBody(request)
+        if (!isRecord(body) || typeof body.key !== 'string' || body.key === '') {
+          writeJson(response, 400, { error: 'body must be { key: string, appType?: "claude" | "codex" }' })
+          return
+        }
+        try {
+          // Serialised with every other write: two pushes racing would each
+          // read the target file, and the loser's edits would be computed
+          // against a version that no longer exists.
+          const outcome = await serialize(async () => {
+            const { providers } = await readCatalogue(settings)
+            if (!Object.hasOwn(providers, body.key)) {
+              throw Object.assign(new Error('no such provider'), { code: 'NOT_FOUND' })
+            }
+            const provider = providers[body.key]
+            const appType = resolveAppType(provider, body.appType)
+            if (!WRITER_APP_TYPES.includes(appType)) {
+              throw Object.assign(new Error('unsupported app type'), { code: 'UNSUPPORTED' })
+            }
+            // A config naming a provider with no key leaves the external tool
+            // broken in a way the user cannot see from here: Claude Code falls
+            // back to its own login, Codex refuses to start. Refusing the write
+            // is the only outcome that leaves the tool working.
+            const resolved = await credentials?.resolve?.(provider?.apiKeyEnv)
+            const apiKey = typeof resolved?.value === 'string' ? resolved.value : ''
+            if (apiKey === '') {
+              throw Object.assign(new Error('credential is not set'), { code: 'NO_CREDENTIAL' })
+            }
+            const written = await writeProviderConfig({ appType, provider, apiKey, home })
+            return { ...written, appType }
+          })
+          writeJson(response, 200, {
+            key: body.key,
+            appType: outcome.appType,
+            written: outcome.files.map((file) => ({
+              path: file.path,
+              keys: file.keys.slice(0, 60).map((key) => redactText(key).slice(0, 120)),
+              removed: file.removed.slice(0, 60).map((key) => redactText(key).slice(0, 120)),
+            })),
+            warnings: outcome.warnings.slice(0, 20).map((text) => redactText(text).slice(0, 200)),
+          })
+        } catch (err) {
+          if (err?.code === 'NOT_FOUND') {
+            writeJson(response, 404, { error: 'no such provider' })
+            return
+          }
+          if (err?.code === 'NO_CREDENTIAL') {
+            writeJson(response, 400, {
+              error: 'this provider has no key stored, so writing it would leave the tool unable to authenticate',
+            })
+            return
+          }
+          if (err?.code === 'UNSUPPORTED' || err instanceof WriterError) {
+            console.error('[dsh-ccswitch-plugin] writer refused:', redactText(err))
+            writeJson(response, 400, {
+              error: writerRefusalMessage(err),
+            })
+            return
+          }
+          console.error('[dsh-ccswitch-plugin] writer failed:', redactText(err))
+          writeJson(response, 500, { error: 'could not write the tool configuration' })
+        }
+      },
+    },
   ]
+}
+
+/**
+ * Explain a refused write without leaking a path the user did not name.
+ *
+ * A `parse`/`shape` refusal is the important one: it means the target file
+ * exists and this plugin will not touch it. That has to read as a deliberate
+ * refusal rather than a bug, because the file is unchanged and the user's next
+ * move is to fix or move it.
+ */
+function writerRefusalMessage(err) {
+  if (!(err instanceof WriterError)) {
+    return `no writer for that app type; supported: ${WRITER_APP_TYPES.join(', ')}`
+  }
+  if (err.kind === 'unsupported') {
+    return `no writer for that app type; supported: ${WRITER_APP_TYPES.join(', ')}`
+  }
+  if (err.kind === 'credential') {
+    return 'this provider has no key stored, so writing it would leave the tool unable to authenticate'
+  }
+  if (err.kind === 'parse') {
+    const where = err.line === undefined ? '' : ` (line ${err.line} column ${err.column})`
+    return `the existing configuration is not valid JSON${where}, so it was left untouched`
+  }
+  return 'the existing configuration has an unexpected shape, so it was left untouched'
 }

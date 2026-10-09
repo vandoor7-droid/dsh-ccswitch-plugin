@@ -426,5 +426,6 @@ test('no route uses a dynamic path segment', () => {
     `${MANAGER_API_BASE}/providers/delete`,
     `${MANAGER_API_BASE}/providers/activate`,
     `${MANAGER_API_BASE}/presets`,
+    `${MANAGER_API_BASE}/writers/run`,
   ])
 })

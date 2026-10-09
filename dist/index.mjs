@@ -1,3 +1,161 @@
+var __defProp = Object.defineProperty;
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __esm = (fn, res) => function __init() {
+  return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;
+};
+var __export = (target, all) => {
+  for (var name2 in all)
+    __defProp(target, name2, { get: all[name2], enumerable: true });
+};
+
+// node_modules/@deepseek-ai/dsh-atomic-write/lib/index.js
+var lib_exports = {};
+__export(lib_exports, {
+  withFileLock: () => withFileLock,
+  writeFileAtomic: () => writeFileAtomic
+});
+import { createHash as createHash2, randomBytes as randomBytes2 } from "node:crypto";
+import { lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
+function isTransientWindowsRenameError(error) {
+  if (process.platform !== "win32") return false;
+  return WINDOWS_TRANSIENT_RENAME_ERRORS.has(error?.code ?? "");
+}
+async function renameAtomicTemp(temp, filename) {
+  let delay = WINDOWS_RENAME_RETRY_INITIAL_MS;
+  for (let retries = 0; ; retries += 1) {
+    try {
+      await rename(temp, filename);
+      return;
+    } catch (error) {
+      if (!isTransientWindowsRenameError(error)) throw error;
+      if (retries >= WINDOWS_RENAME_RETRY_LIMIT) throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    delay = Math.min(delay * 2, WINDOWS_RENAME_RETRY_MAX_MS);
+  }
+}
+async function writeFileAtomic(filename, content, options) {
+  await mkdir(dirname(filename), {
+    recursive: true,
+    ...options.dirMode === void 0 ? {} : { mode: options.dirMode }
+  });
+  const temp = `${filename}.${randomBytes2(6).toString("hex")}.tmp`;
+  try {
+    await writeFile(temp, content, {
+      mode: options.mode,
+      flag: "wx"
+    });
+    await renameAtomicTemp(temp, filename);
+  } catch (error) {
+    await rm(temp, { force: true });
+    throw error;
+  }
+}
+async function isLockContention(error, lockPath) {
+  const code = error?.code;
+  if (code === "EEXIST") return true;
+  if (code !== "EPERM") return false;
+  try {
+    await lstat(lockPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function holderExited(record) {
+  if (!/^\d+\n$/.test(record)) return false;
+  const pid = Number(record.trim());
+  if (pid === 0 || pid > 2147483647) return false;
+  if (pid === process.pid) return false;
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (error) {
+    return error.code === "ESRCH";
+  }
+}
+async function readLockRecord(lockPath) {
+  try {
+    return await readFile(lockPath, "utf8");
+  } catch (error) {
+    return;
+  }
+}
+async function takeOverExitedLock(lockPath) {
+  const record = await readLockRecord(lockPath);
+  if (record === void 0 || !holderExited(record)) return false;
+  const claim = `${lockPath}.takeover-${createHash2("sha256").update(record).digest("hex").slice(0, 16)}`;
+  try {
+    await writeFile(claim, `${process.pid}
+`, {
+      mode: 384,
+      flag: "wx"
+    });
+  } catch (error) {
+    const code = error.code;
+    if (code === "EEXIST" || code === "EPERM") return false;
+    throw error;
+  }
+  try {
+    if (await readLockRecord(lockPath) !== record || !holderExited(record)) return false;
+    try {
+      await rm(lockPath, { force: true });
+    } catch (error) {
+      return false;
+    }
+    return true;
+  } finally {
+    await rm(claim, { force: true }).catch((error) => {
+    });
+  }
+}
+async function withFileLock(filename, operation, options) {
+  const lockPath = `${filename}.lock`;
+  const deadline = Date.now() + (options?.waitMs ?? DEFAULT_LOCK_WAIT_MS);
+  let delay = LOCK_RETRY_INITIAL_MS;
+  let retriedUnconfirmedPermissionError = false;
+  for (; ; ) {
+    try {
+      await writeFile(lockPath, `${process.pid}
+`, {
+        mode: 384,
+        flag: "wx"
+      });
+      break;
+    } catch (error) {
+      if (!await isLockContention(error, lockPath)) {
+        if (process.platform !== "win32" || error?.code !== "EPERM" || retriedUnconfirmedPermissionError) throw error;
+        retriedUnconfirmedPermissionError = true;
+      } else if (await takeOverExitedLock(lockPath)) continue;
+    }
+    if (Date.now() >= deadline) throw new Error(`atomic-write: timed out waiting for the writer lock at ${lockPath}`);
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    delay = Math.min(delay * 2, LOCK_RETRY_MAX_MS);
+  }
+  try {
+    return await operation();
+  } finally {
+    await rm(lockPath, { force: true });
+  }
+}
+var WINDOWS_TRANSIENT_RENAME_ERRORS, WINDOWS_RENAME_RETRY_INITIAL_MS, WINDOWS_RENAME_RETRY_MAX_MS, WINDOWS_RENAME_RETRY_LIMIT, LOCK_RETRY_INITIAL_MS, LOCK_RETRY_MAX_MS, DEFAULT_LOCK_WAIT_MS;
+var init_lib = __esm({
+  "node_modules/@deepseek-ai/dsh-atomic-write/lib/index.js"() {
+    WINDOWS_TRANSIENT_RENAME_ERRORS = /* @__PURE__ */ new Set([
+      "EACCES",
+      "EBUSY",
+      "EPERM"
+    ]);
+    WINDOWS_RENAME_RETRY_INITIAL_MS = 20;
+    WINDOWS_RENAME_RETRY_MAX_MS = 200;
+    WINDOWS_RENAME_RETRY_LIMIT = 8;
+    LOCK_RETRY_INITIAL_MS = 20;
+    LOCK_RETRY_MAX_MS = 200;
+    DEFAULT_LOCK_WAIT_MS = 2e3;
+  }
+});
+
 // src/host/index.mjs
 import z from "@deepseek-ai/schemastery";
 
@@ -2160,12 +2318,608 @@ function knownSecretsFor(result, secretByProfileId) {
   return typeof own === "string" ? [own] : [];
 }
 
+// src/host/writers.js
+import { mkdir as mkdir2, readFile as readFile2, rm as rm2, writeFile as writeFile2 } from "node:fs/promises";
+import { homedir as homedir2 } from "node:os";
+import { dirname as dirname2, join as join2 } from "node:path";
+var WRITER_APP_TYPES = Object.freeze(["claude", "codex"]);
+var WriterError = class extends Error {
+  constructor(message, { kind = "parse", path, line, column } = {}) {
+    super(message);
+    this.name = "WriterError";
+    this.kind = kind;
+    if (path !== void 0) this.path = path;
+    if (line !== void 0) this.line = line;
+    if (column !== void 0) this.column = column;
+  }
+};
+var CLAUDE_FLOOR_TOP = /* @__PURE__ */ new Set([
+  "apiKeyHelper",
+  "apiBaseUrl",
+  "primaryModel",
+  "smallFastModel",
+  // The legacy Bedrock API-key preset wrote the real key here.
+  "apiKey",
+  // `/model`: the choice belongs to the provider that was active when it was made.
+  "model",
+  // Fallback chain; model id → provider-specific id (a Bedrock ARN, say).
+  "fallbackModel",
+  "modelOverrides",
+  // The `/model` picker rows; in aggregate mode these are CC Switch Stack models.
+  "modelPicker",
+  // advisor is only available on the Anthropic API.
+  "advisorModel",
+  // Bedrock / Vertex credential commands.
+  "awsAuthRefresh",
+  "awsCredentialExport",
+  "gcpAuthRefresh"
+]);
+var CLAUDE_FLOOR_ENV_PREFIXES = ["ANTHROPIC_", "AWS_", "VERTEX_REGION_"];
+var CLAUDE_FLOOR_ENV_KEYS = /* @__PURE__ */ new Set([
+  "CLAUDE_CODE_SUBAGENT_MODEL",
+  "CLAUDE_CODE_SUBAGENT_MODEL_FORCE",
+  "CLOUD_ML_REGION",
+  // Vertex credential path.
+  "GOOGLE_APPLICATION_CREDENTIALS",
+  // Subscription-account long-lived token and its companions.
+  "CLAUDE_CODE_OAUTH_TOKEN",
+  "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+  "CLAUDE_CODE_OAUTH_SCOPES",
+  // Pairs with the top-level apiKeyHelper.
+  "CLAUDE_CODE_API_KEY_HELPER_TTL_MS"
+]);
+var CLAUDE_PROTOCOL_SELECTORS = /* @__PURE__ */ new Set([
+  "CLAUDE_CODE_USE_BEDROCK",
+  "CLAUDE_CODE_USE_VERTEX",
+  "CLAUDE_CODE_USE_FOUNDRY",
+  "CLAUDE_CODE_USE_GATEWAY",
+  "CLAUDE_CODE_USE_MANTLE",
+  "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+  "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD"
+]);
+function isClaudeFloorEnv(key) {
+  return CLAUDE_FLOOR_ENV_PREFIXES.some((prefix) => key.startsWith(prefix)) || CLAUDE_PROTOCOL_SELECTORS.has(key) || CLAUDE_FLOOR_ENV_KEYS.has(key) || key.startsWith("CLAUDE_CODE_SKIP_") && key.endsWith("_AUTH");
+}
+var CODEX_ROUTE_SECTION = "model_providers.custom";
+var CODEX_ROUTE_ID = "custom";
+var LOCK_WAIT_MS = 5e3;
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function requireApiKey(apiKey) {
+  if (typeof apiKey !== "string" || apiKey === "") {
+    throw new WriterError("refusing to write a configuration with no credential", {
+      kind: "credential"
+    });
+  }
+  return apiKey;
+}
+var atomicWriteModule;
+async function loadAtomicWrite() {
+  if (atomicWriteModule === void 0) {
+    try {
+      atomicWriteModule = await Promise.resolve().then(() => (init_lib(), lib_exports));
+    } catch {
+      atomicWriteModule = null;
+    }
+  }
+  return atomicWriteModule;
+}
+async function readBytesIfExists(path) {
+  try {
+    return await readFile2(path);
+  } catch (err) {
+    if (err?.code === "ENOENT") return void 0;
+    throw err;
+  }
+}
+async function replaceFile(path, content, mode) {
+  const atomic = await loadAtomicWrite();
+  if (atomic !== null) {
+    await atomic.writeFileAtomic(path, content, { mode, dirMode: 448 });
+    return;
+  }
+  await mkdir2(dirname2(path), { recursive: true, mode: 448 });
+  await writeFile2(path, content, { mode });
+}
+var defaultIo = { read: readBytesIfExists, write: replaceFile };
+async function withWriterLock(path, operation) {
+  const atomic = await loadAtomicWrite();
+  await mkdir2(dirname2(path), { recursive: true, mode: 448 });
+  if (atomic === null) return operation();
+  return atomic.withFileLock(path, operation, { waitMs: LOCK_WAIT_MS });
+}
+var DEFAULT_INDENT = "  ";
+function detectIndent(text) {
+  const lines = text.split("\n");
+  for (let index = 1; index < lines.length; index += 1) {
+    const raw = lines[index];
+    const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
+    const content = line.trimStart();
+    if (content === "") continue;
+    const leading = line.slice(0, line.length - content.length);
+    if (leading === "") continue;
+    if (/^ +$/.test(leading) || /^\t+$/.test(leading)) return leading;
+  }
+  return void 0;
+}
+function jsonErrorLocation(message, text) {
+  const explicit = /\(line (\d+) column (\d+)\)/.exec(message);
+  if (explicit !== null) return { line: Number(explicit[1]), column: Number(explicit[2]) };
+  const position = /at position (\d+)/.exec(message);
+  if (position !== null) {
+    const offset = Math.max(0, Number(position[1]));
+    const before = text.slice(0, offset);
+    return { line: before.split("\n").length, column: offset - before.lastIndexOf("\n") };
+  }
+  return { line: 1, column: 1 };
+}
+function parseJsonDocument(raw, path) {
+  if (raw === void 0) return { doc: {}, style: defaultStyle() };
+  const text = raw.toString("utf8");
+  const bom = text.startsWith("\uFEFF");
+  const body = bom ? text.slice(1) : text;
+  if (body.trim() === "") return { doc: {}, style: { ...defaultStyle(), bom } };
+  let doc;
+  try {
+    doc = JSON.parse(body);
+  } catch (err) {
+    const { line, column } = jsonErrorLocation(String(err?.message ?? ""), body);
+    throw new WriterError(
+      `${path} is not valid JSON (line ${line} column ${column}); refusing to overwrite it`,
+      { kind: "parse", path, line, column }
+    );
+  }
+  if (!isRecord(doc)) {
+    throw new WriterError(
+      `${path} does not contain a JSON object at the top level; refusing to overwrite it`,
+      { kind: "shape", path, line: 1, column: 1 }
+    );
+  }
+  return {
+    doc,
+    style: {
+      indent: detectIndent(body) ?? DEFAULT_INDENT,
+      trailingNewline: body.endsWith("\n"),
+      crlf: body.includes("\r\n"),
+      bom
+    }
+  };
+}
+function defaultStyle() {
+  return { indent: DEFAULT_INDENT, trailingNewline: false, crlf: false, bom: false };
+}
+function serializeJson(doc, style) {
+  let text = JSON.stringify(doc, null, style.indent);
+  if (style.crlf) text = text.replace(/\n/g, "\r\n");
+  if (style.trailingNewline) text += style.crlf ? "\r\n" : "\n";
+  return style.bom ? `\uFEFF${text}` : text;
+}
+function primaryModelId(provider) {
+  const models = Array.isArray(provider?.models) ? provider.models : [];
+  const found = models.find((model) => typeof model?.id === "string" && model.id.trim() !== "");
+  return found === void 0 ? void 0 : found.id.trim();
+}
+function claudeProjection(provider, apiKey) {
+  const env = {
+    ANTHROPIC_BASE_URL: String(provider?.baseURL ?? ""),
+    // cc-switch prefers ANTHROPIC_AUTH_TOKEN and only uses ANTHROPIC_API_KEY
+    // when the source row used that name, which this shape does not track.
+    // Writing both would provoke Claude Code's "Both ANTHROPIC_AUTH_TOKEN and
+    // ANTHROPIC_API_KEY set" warning.
+    ANTHROPIC_AUTH_TOKEN: apiKey
+  };
+  const model = primaryModelId(provider);
+  if (model !== void 0) env.ANTHROPIC_MODEL = model;
+  return { top: {}, env };
+}
+function applyClaudePatch(doc, top, env, path) {
+  if (doc.env !== void 0 && !isRecord(doc.env)) {
+    throw new WriterError(
+      `${path} has a non-object "env" member; refusing to overwrite it`,
+      { kind: "shape", path }
+    );
+  }
+  const topTargets = new Set(Object.keys(top));
+  const envTargets = new Set(Object.keys(env));
+  const removed = [];
+  for (const key of Object.keys(doc)) {
+    if (CLAUDE_FLOOR_TOP.has(key) && !topTargets.has(key)) {
+      delete doc[key];
+      removed.push(key);
+    }
+  }
+  for (const key of Object.keys(doc.env ?? {})) {
+    if (isClaudeFloorEnv(key) && !envTargets.has(key)) {
+      delete doc.env[key];
+      removed.push(`env.${key}`);
+    }
+  }
+  for (const [key, value] of Object.entries(top)) doc[key] = value;
+  if (envTargets.size > 0) {
+    if (!isRecord(doc.env)) doc.env = {};
+    for (const [key, value] of Object.entries(env)) doc.env[key] = value;
+  }
+  return removed;
+}
+function scanLine(line, state) {
+  let index = 0;
+  if (state.multiline !== null) {
+    const close = line.indexOf(state.multiline);
+    if (close === -1) return;
+    index = close + 3;
+    state.multiline = null;
+  }
+  while (index < line.length) {
+    const char = line[index];
+    if (char === "#") return;
+    if (char === '"' || char === "'") {
+      if (line.slice(index, index + 3) === char.repeat(3)) {
+        const close2 = line.indexOf(char.repeat(3), index + 3);
+        if (close2 === -1) {
+          state.multiline = char.repeat(3);
+          return;
+        }
+        index = close2 + 3;
+        continue;
+      }
+      if (char === '"') {
+        let at = index + 1;
+        while (at < line.length && line[at] !== '"') {
+          at += line[at] === "\\" ? 2 : 1;
+        }
+        if (at >= line.length) {
+          state.unterminated = true;
+          return;
+        }
+        index = at + 1;
+        continue;
+      }
+      const close = line.indexOf("'", index + 1);
+      if (close === -1) {
+        state.unterminated = true;
+        return;
+      }
+      index = close + 1;
+      continue;
+    }
+    if (char === "[") state.arrays += 1;
+    else if (char === "]") state.arrays = Math.max(0, state.arrays - 1);
+    index += 1;
+  }
+}
+function sectionNameOf(line) {
+  const match = /^\s*\[\[?([^\]]+)\]\]?\s*(?:#.*)?$/.exec(line);
+  if (match === null) return void 0;
+  return match[1].split(".").map((segment) => unquoteKey(segment.trim())).join(".");
+}
+function unquoteKey(raw) {
+  if (raw.length >= 2) {
+    const first = raw[0];
+    if ((first === '"' || first === "'") && raw[raw.length - 1] === first) {
+      return raw.slice(1, -1);
+    }
+  }
+  return raw;
+}
+function keyOf(line) {
+  const match = /^\s*([A-Za-z0-9_-]+|"[^"]*"|'[^']*')\s*=/.exec(line);
+  return match === null ? void 0 : unquoteKey(match[1]);
+}
+function commentStart(text) {
+  let index = 0;
+  while (index < text.length) {
+    const char = text[index];
+    if (char === "#") return index;
+    if (char === '"' || char === "'") {
+      if (text.slice(index, index + 3) === char.repeat(3)) {
+        const close2 = text.indexOf(char.repeat(3), index + 3);
+        if (close2 === -1) return -1;
+        index = close2 + 3;
+        continue;
+      }
+      if (char === '"') {
+        let at = index + 1;
+        while (at < text.length && text[at] !== '"') at += text[at] === "\\" ? 2 : 1;
+        if (at >= text.length) return -1;
+        index = at + 1;
+        continue;
+      }
+      const close = text.indexOf("'", index + 1);
+      if (close === -1) return -1;
+      index = close + 1;
+      continue;
+    }
+    index += 1;
+  }
+  return -1;
+}
+function valueSuffix(text) {
+  const at = commentStart(text);
+  if (at === -1) return "";
+  let start = at;
+  while (start > 0 && (text[start - 1] === " " || text[start - 1] === "	")) start -= 1;
+  return text.slice(start);
+}
+function tomlString(value) {
+  return JSON.stringify(String(value));
+}
+function reasoningEffortOf(provider) {
+  for (const candidate of [provider?.modelReasoningEffort, provider?.reasoning]) {
+    if (typeof candidate === "string" && candidate.trim() !== "") return candidate.trim();
+  }
+  return void 0;
+}
+function codexTomlEdits(provider) {
+  const edits = [];
+  const model = primaryModelId(provider);
+  if (model !== void 0) {
+    edits.push({ section: null, key: "model", literal: tomlString(model) });
+  }
+  edits.push({ section: null, key: "model_provider", literal: tomlString(CODEX_ROUTE_ID) });
+  const effort = reasoningEffortOf(provider);
+  edits.push({
+    section: null,
+    key: "model_reasoning_effort",
+    literal: effort === void 0 ? null : tomlString(effort)
+  });
+  edits.push(
+    { section: CODEX_ROUTE_SECTION, key: "name", literal: tomlString(provider?.displayName ?? "") },
+    { section: CODEX_ROUTE_SECTION, key: "base_url", literal: tomlString(provider?.baseURL ?? "") },
+    {
+      section: CODEX_ROUTE_SECTION,
+      key: "wire_api",
+      literal: tomlString(provider?.api === "openai-responses" ? "responses" : "chat")
+    },
+    { section: CODEX_ROUTE_SECTION, key: "requires_openai_auth", literal: "true" }
+  );
+  return edits;
+}
+function scanStructure(lines) {
+  const sectionAt = [];
+  const headers = /* @__PURE__ */ new Map();
+  const state = { multiline: null, arrays: 0, unterminated: false };
+  let current = null;
+  for (let index = 0; index < lines.length; index += 1) {
+    sectionAt.push(current);
+    if (state.multiline === null && state.arrays === 0) {
+      const name2 = sectionNameOf(lines[index]);
+      if (name2 !== void 0) {
+        if (!headers.has(name2)) headers.set(name2, index);
+        current = name2;
+      }
+    }
+    scanLine(lines[index], state);
+  }
+  const starts = [...headers.values()].sort((left, right) => left - right);
+  const endOf = (start) => starts.find((candidate) => candidate > start) ?? lines.length;
+  const ranges = new Map([...headers].map(([name2, start]) => [name2, { start, end: endOf(start) }]));
+  return { sectionAt, headers, ranges, unterminated: state.unterminated };
+}
+function patchCodexToml(text, provider, { trailingNewline } = {}) {
+  const endsWithNewline = trailingNewline ?? text.endsWith("\n");
+  const lines = text === "" ? [] : (endsWithNewline ? text.slice(0, -1) : text).split("\n");
+  const structure = scanStructure(lines);
+  const { sectionAt, headers, ranges } = structure;
+  if (structure.unterminated) {
+    throw new WriterError(
+      "config.toml contains an unterminated string; refusing to overwrite it",
+      { kind: "shape" }
+    );
+  }
+  const replacements = /* @__PURE__ */ new Map();
+  const removals = /* @__PURE__ */ new Set();
+  const pending = [];
+  const written = [];
+  const removed = [];
+  for (const edit of codexTomlEdits(provider)) {
+    const label = edit.section === null ? edit.key : `${edit.section}.${edit.key}`;
+    let found = -1;
+    for (let index = 0; index < lines.length; index += 1) {
+      if (sectionAt[index] !== edit.section) continue;
+      if (keyOf(lines[index]) !== edit.key) continue;
+      found = index;
+      break;
+    }
+    if (found === -1) {
+      pending.push(edit);
+      continue;
+    }
+    if (edit.literal === null) {
+      removals.add(found);
+      removed.push(label);
+      continue;
+    }
+    const line = lines[found];
+    const indent = /^\s*/.exec(line)[0];
+    const suffix = valueSuffix(line.slice(line.indexOf("=") + 1));
+    replacements.set(found, `${indent}${edit.key} = ${edit.literal}${suffix}`);
+    written.push(label);
+  }
+  if (pending.some((edit) => edit.section === CODEX_ROUTE_SECTION) && !headers.has(CODEX_ROUTE_SECTION)) {
+    const inlineCustom = ranges.has("model_providers") && lines.slice(ranges.get("model_providers").start, ranges.get("model_providers").end).some((line) => keyOf(line) === "custom");
+    if (inlineCustom) {
+      throw new WriterError(
+        "config.toml defines model_providers.custom inline; refusing to rewrite it",
+        { kind: "shape" }
+      );
+    }
+  }
+  const firstHeader = headers.size === 0 ? lines.length : Math.min(...[...headers.values()]);
+  const insertAfterLastContent = (end, floor) => {
+    let at = end;
+    while (at > floor && lines[at - 1] !== void 0 && lines[at - 1].trim() === "") at -= 1;
+    return at;
+  };
+  const firstHeaderAt = insertAfterLastContent(firstHeader, 0);
+  const insertions = /* @__PURE__ */ new Map();
+  const blockAt = (index) => {
+    if (!insertions.has(index)) insertions.set(index, { lines: [], blankBefore: false });
+    return insertions.get(index);
+  };
+  let appendedHeader = false;
+  for (const edit of pending) {
+    if (edit.literal === null) continue;
+    const label = edit.section === null ? edit.key : `${edit.section}.${edit.key}`;
+    if (edit.section === null) {
+      blockAt(firstHeaderAt).lines.push(`${edit.key} = ${edit.literal}`);
+      written.push(label);
+      continue;
+    }
+    const range = ranges.get(edit.section);
+    if (range !== void 0) {
+      blockAt(insertAfterLastContent(range.end, range.start + 1)).lines.push(`${edit.key} = ${edit.literal}`);
+      written.push(label);
+      continue;
+    }
+    const block = blockAt(lines.length);
+    if (!appendedHeader) {
+      block.lines.push(`[${edit.section}]`);
+      block.blankBefore = true;
+      appendedHeader = true;
+    }
+    block.lines.push(`${edit.key} = ${edit.literal}`);
+    written.push(label);
+  }
+  const out = [];
+  for (let index = 0; index <= lines.length; index += 1) {
+    const block = insertions.get(index);
+    if (block !== void 0) {
+      if (block.blankBefore && out.length > 0 && out[out.length - 1].trim() !== "") out.push("");
+      out.push(...block.lines);
+    }
+    if (index === lines.length) break;
+    if (removals.has(index)) continue;
+    out.push(replacements.has(index) ? replacements.get(index) : lines[index]);
+  }
+  const next = `${out.join("\n")}${endsWithNewline ? "\n" : ""}`;
+  verifyCodexToml(next, provider);
+  return { text: next, written, removed };
+}
+function verifyCodexToml(text, provider) {
+  const lines = text === "" ? [] : text.replace(/\n$/, "").split("\n");
+  const seen = /* @__PURE__ */ new Set();
+  for (const line of lines) {
+    const name2 = sectionNameOf(line);
+    if (name2 === void 0) continue;
+    if (seen.has(name2)) {
+      throw new WriterError(
+        `patching config.toml would duplicate the [${name2}] table; refusing to write it`,
+        { kind: "shape" }
+      );
+    }
+    seen.add(name2);
+  }
+  const refuse = (label) => {
+    throw new WriterError(
+      `config.toml did not take "${label}"; refusing to write it`,
+      { kind: "shape" }
+    );
+  };
+  const expect = (label, actual, wanted) => {
+    if (wanted !== void 0 && actual !== wanted) refuse(label);
+  };
+  const parsed = parseCodexToml(text);
+  const model = primaryModelId(provider);
+  if (model !== void 0) expect("model", parsed.model, model);
+  const effort = reasoningEffortOf(provider);
+  if (effort === void 0) {
+    if (parsed.reasoningEffort !== void 0) refuse("model_reasoning_effort");
+  } else {
+    expect("model_reasoning_effort", parsed.reasoningEffort, effort);
+  }
+  if (parsed.provider === null) refuse("model_providers.custom");
+  expect("base_url", parsed.provider.baseUrl, String(provider?.baseURL ?? ""));
+  expect("name", parsed.provider.name, String(provider?.displayName ?? ""));
+  expect("wire_api", parsed.provider.wireApi, provider?.api === "openai-responses" ? "responses" : "chat");
+}
+function protocolWarnings(appType, provider) {
+  const api = String(provider?.api ?? "");
+  if (appType === "claude" && api !== "anthropic-messages") {
+    return [`provider api "${api}" is not anthropic-messages, but Claude Code speaks the Anthropic protocol`];
+  }
+  if (appType === "codex" && api === "anthropic-messages") {
+    return ["provider api is anthropic-messages, which Codex cannot speak; the route will not work"];
+  }
+  return [];
+}
+async function writeClaudeConfig({ provider, apiKey, home, io } = {}) {
+  const key = requireApiKey(apiKey);
+  const path = join2(home ?? homedir2(), ".claude", "settings.json");
+  const fileIo = io ?? defaultIo;
+  return withWriterLock(path, async () => {
+    const raw = await fileIo.read(path);
+    const { doc, style } = parseJsonDocument(raw, path);
+    const { top, env } = claudeProjection(provider, key);
+    const removed = applyClaudePatch(doc, top, env, path);
+    await fileIo.write(path, serializeJson(doc, style), 420);
+    return {
+      files: [{
+        path,
+        keys: [...Object.keys(top), ...Object.keys(env).map((key2) => `env.${key2}`)],
+        removed
+      }],
+      warnings: protocolWarnings("claude", provider)
+    };
+  });
+}
+async function writeCodexConfig({ provider, apiKey, home, io } = {}) {
+  const key = requireApiKey(apiKey);
+  const directory = join2(home ?? homedir2(), ".codex");
+  const authPath = join2(directory, "auth.json");
+  const configPath = join2(directory, "config.toml");
+  const fileIo = io ?? defaultIo;
+  return withWriterLock(authPath, () => withWriterLock(configPath, async () => {
+    const authRaw = await fileIo.read(authPath);
+    const { doc, style } = parseJsonDocument(authRaw, authPath);
+    doc.OPENAI_API_KEY = key;
+    const authNext = serializeJson(doc, style);
+    const configRaw = await fileIo.read(configPath);
+    const patched = patchCodexToml(
+      configRaw === void 0 ? "" : configRaw.toString("utf8"),
+      provider,
+      // A file being created gets a trailing newline even though there was no
+      // "original" habit to copy.
+      { trailingNewline: configRaw === void 0 ? true : void 0 }
+    );
+    await fileIo.write(authPath, authNext, 384);
+    try {
+      await fileIo.write(configPath, patched.text, 420);
+    } catch (err) {
+      await restoreBytes(authPath, authRaw, fileIo);
+      throw err;
+    }
+    return {
+      files: [
+        { path: authPath, keys: ["OPENAI_API_KEY"], removed: [] },
+        { path: configPath, keys: patched.written, removed: patched.removed }
+      ],
+      warnings: protocolWarnings("codex", provider)
+    };
+  }));
+}
+async function restoreBytes(path, previous, fileIo) {
+  try {
+    if (previous === void 0) {
+      await rm2(path, { force: true });
+      return;
+    }
+    await fileIo.write(path, previous.toString("utf8"), 384);
+  } catch {
+  }
+}
+async function writeProviderConfig({ appType, provider, apiKey, home, io } = {}) {
+  if (appType === "claude") return writeClaudeConfig({ provider, apiKey, home, io });
+  if (appType === "codex") return writeCodexConfig({ provider, apiKey, home, io });
+  throw new WriterError(`no writer for app type "${appType}"`, { kind: "unsupported" });
+}
+
 // src/host/manager-routes.mjs
 var MANAGER_API_BASE = "/api/dsh-ccswitch-manager";
 var MANAGER_NAMESPACE = "dsh-ccswitch-plugin";
 var MAX_PROVIDERS = 500;
 var SAFE_REASONS = /* @__PURE__ */ new Set(["new", "updated", "unchanged", "removed", "activated", "created"]);
-function isRecord(value) {
+function isRecord2(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 async function readCatalogue(settings) {
@@ -2173,7 +2927,7 @@ async function readCatalogue(settings) {
     const descriptors = await settings?.describe?.();
     const descriptor = (Array.isArray(descriptors) ? descriptors : []).find((entry) => entry?.ns === MANAGER_NAMESPACE);
     if (descriptor === void 0) return { providers: {}, revision: void 0, exists: false };
-    const providers = isRecord(descriptor.value?.providers) ? descriptor.value.providers : {};
+    const providers = isRecord2(descriptor.value?.providers) ? descriptor.value.providers : {};
     return { providers, revision: descriptor.revision, exists: true };
   } catch {
     return { providers: {}, revision: void 0, exists: false };
@@ -2239,11 +2993,17 @@ function uniqueKey(displayName, providers) {
 function revisionOf(body) {
   return Number.isInteger(body?.expectedRevision) ? body.expectedRevision : void 0;
 }
+function resolveAppType(provider, override) {
+  if (typeof override === "string" && override !== "") return override;
+  const own = provider?.appType;
+  return typeof own === "string" && own !== "" ? own : "claude";
+}
 function makeManagerRoutes(deps = {}) {
   const settings = deps.settings;
   const credentials = deps.credentials;
   const isLoopback = deps.isLoopback ?? isLoopbackRequest;
   const presets = Array.isArray(deps.presets) ? deps.presets : [];
+  const home = deps.home;
   const applyProvider = deps.applyProvider ?? (async () => {
   });
   let queue = Promise.resolve();
@@ -2288,7 +3048,7 @@ function makeManagerRoutes(deps = {}) {
       handler: async (request, response) => {
         if (!methodFence(request, response, isLoopback, "POST", { requireSameOrigin: true })) return;
         const body = await readJsonBody(request);
-        if (!isRecord(body) || !isRecord(body.provider)) {
+        if (!isRecord2(body) || !isRecord2(body.provider)) {
           writeJson(response, 400, { error: "body must be { provider: object, key?: string }" });
           return;
         }
@@ -2349,7 +3109,7 @@ function makeManagerRoutes(deps = {}) {
       handler: async (request, response) => {
         if (!methodFence(request, response, isLoopback, "POST", { requireSameOrigin: true })) return;
         const body = await readJsonBody(request);
-        if (!isRecord(body) || typeof body.key !== "string" || body.key === "") {
+        if (!isRecord2(body) || typeof body.key !== "string" || body.key === "") {
           writeJson(response, 400, { error: "body must be { key: string }" });
           return;
         }
@@ -2392,7 +3152,7 @@ function makeManagerRoutes(deps = {}) {
       handler: async (request, response) => {
         if (!methodFence(request, response, isLoopback, "POST", { requireSameOrigin: true })) return;
         const body = await readJsonBody(request);
-        if (!isRecord(body) || typeof body.key !== "string" || body.key === "") {
+        if (!isRecord2(body) || typeof body.key !== "string" || body.key === "") {
           writeJson(response, 400, { error: "body must be { key: string }" });
           return;
         }
@@ -2447,8 +3207,86 @@ function makeManagerRoutes(deps = {}) {
         if (!methodFence(request, response, isLoopback, "GET")) return;
         writeJson(response, 200, { presets });
       }
+    },
+    {
+      kind: "exact",
+      path: `${MANAGER_API_BASE}/writers/run`,
+      handler: async (request, response) => {
+        if (!methodFence(request, response, isLoopback, "POST", { requireSameOrigin: true })) return;
+        const body = await readJsonBody(request);
+        if (!isRecord2(body) || typeof body.key !== "string" || body.key === "") {
+          writeJson(response, 400, { error: 'body must be { key: string, appType?: "claude" | "codex" }' });
+          return;
+        }
+        try {
+          const outcome = await serialize(async () => {
+            const { providers } = await readCatalogue(settings);
+            if (!Object.hasOwn(providers, body.key)) {
+              throw Object.assign(new Error("no such provider"), { code: "NOT_FOUND" });
+            }
+            const provider = providers[body.key];
+            const appType = resolveAppType(provider, body.appType);
+            if (!WRITER_APP_TYPES.includes(appType)) {
+              throw Object.assign(new Error("unsupported app type"), { code: "UNSUPPORTED" });
+            }
+            const resolved = await credentials?.resolve?.(provider?.apiKeyEnv);
+            const apiKey = typeof resolved?.value === "string" ? resolved.value : "";
+            if (apiKey === "") {
+              throw Object.assign(new Error("credential is not set"), { code: "NO_CREDENTIAL" });
+            }
+            const written = await writeProviderConfig({ appType, provider, apiKey, home });
+            return { ...written, appType };
+          });
+          writeJson(response, 200, {
+            key: body.key,
+            appType: outcome.appType,
+            written: outcome.files.map((file) => ({
+              path: file.path,
+              keys: file.keys.slice(0, 60).map((key) => redactText(key).slice(0, 120)),
+              removed: file.removed.slice(0, 60).map((key) => redactText(key).slice(0, 120))
+            })),
+            warnings: outcome.warnings.slice(0, 20).map((text) => redactText(text).slice(0, 200))
+          });
+        } catch (err) {
+          if (err?.code === "NOT_FOUND") {
+            writeJson(response, 404, { error: "no such provider" });
+            return;
+          }
+          if (err?.code === "NO_CREDENTIAL") {
+            writeJson(response, 400, {
+              error: "this provider has no key stored, so writing it would leave the tool unable to authenticate"
+            });
+            return;
+          }
+          if (err?.code === "UNSUPPORTED" || err instanceof WriterError) {
+            console.error("[dsh-ccswitch-plugin] writer refused:", redactText(err));
+            writeJson(response, 400, {
+              error: writerRefusalMessage(err)
+            });
+            return;
+          }
+          console.error("[dsh-ccswitch-plugin] writer failed:", redactText(err));
+          writeJson(response, 500, { error: "could not write the tool configuration" });
+        }
+      }
     }
   ];
+}
+function writerRefusalMessage(err) {
+  if (!(err instanceof WriterError)) {
+    return `no writer for that app type; supported: ${WRITER_APP_TYPES.join(", ")}`;
+  }
+  if (err.kind === "unsupported") {
+    return `no writer for that app type; supported: ${WRITER_APP_TYPES.join(", ")}`;
+  }
+  if (err.kind === "credential") {
+    return "this provider has no key stored, so writing it would leave the tool unable to authenticate";
+  }
+  if (err.kind === "parse") {
+    const where = err.line === void 0 ? "" : ` (line ${err.line} column ${err.column})`;
+    return `the existing configuration is not valid JSON${where}, so it was left untouched`;
+  }
+  return "the existing configuration has an unexpected shape, so it was left untouched";
 }
 
 // src/host/index.mjs
