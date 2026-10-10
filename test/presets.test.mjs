@@ -32,6 +32,23 @@ test('the catalogue is non-empty and keys are unique', () => {
   assert.equal(new Set(keys).size, keys.length, 'duplicate preset key')
 })
 
+test('no two presets render the same label in the picker', () => {
+  // cc-switch can give the Claude and Codex halves of a vendor the same name,
+  // because its picker is scoped to one app at a time. This plugin renders one
+  // flat list, so a repeated name is two options the user cannot tell apart —
+  // and they need telling apart, since the two write different config files.
+  // The convention that avoids it, inherited from the hand-written block, is a
+  // " (Codex)" suffix on the Codex side.
+  const byName = new Map()
+  for (const preset of PROVIDER_PRESETS) {
+    byName.set(preset.displayName, [...(byName.get(preset.displayName) ?? []), preset])
+  }
+  const collisions = [...byName]
+    .filter(([, list]) => list.length > 1)
+    .map(([name, list]) => `${name} (${list.map((preset) => preset.key).join(', ')})`)
+  assert.deepEqual(collisions, [], `presets share a display name: ${collisions.join('; ')}`)
+})
+
 test('every preset is immediately usable in this plugin', () => {
   for (const preset of PROVIDER_PRESETS) {
     const label = preset.key
@@ -107,13 +124,18 @@ test('DeepSeek keeps its distinct Claude and Codex endpoints', () => {
   assert.equal(claude.icon, 'deepseek')
   assert.equal(claude.iconColor, '#1E88E5')
 
+  // Looked up by key, not by display name: every Codex-side entry carries a
+  // " (Codex)" suffix so one flat picker list cannot show "DeepSeek" twice, and
+  // a name-based lookup would silently start failing the moment that convention
+  // changed.
+  const codex = presetByKey('deepseek-codex')
+  assert.ok(codex, 'the DeepSeek codex preset is missing')
+  assert.equal(codex.displayName, 'DeepSeek (Codex)')
   // The Codex half points at the bare host, not at `/v1`. cc-switch 4.0.6 writes
   // `base_url = "https://api.deepseek.com"` with `wire_api = "responses"`, and its
   // own comment records that DeepSeek serves Responses natively from that base.
   // This assertion used to be dead code — no Codex-side DeepSeek preset existed,
   // so the `if` never ran — which is how the `/v1` spelling stayed unverified.
-  const codex = PROVIDER_PRESETS.find((preset) => preset.appType === 'codex' && preset.displayName === 'DeepSeek')
-  assert.ok(codex, 'the DeepSeek codex preset is missing')
   assert.equal(codex.baseURL, 'https://api.deepseek.com')
   assert.equal(codex.api, 'openai-responses')
 })

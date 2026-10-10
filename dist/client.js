@@ -2625,9 +2625,9 @@ window.__ModuleLoader__.load({
 		  // The hand-written block above is kept as-is; anything whose endpoint it
 		  // already ships is not repeated here.
 		  //
-		  // `o1`/`[1M]`-style suffixes and OAuth-only entries are excluded: the first
-		  // is display decoration rather than part of the model id, and the second has
-		  // no sign-in path in DSH.
+		  // Excluded: entries with no model id (llm-pi-ai rejects an empty model list),
+		  // OAuth-only entries (DSH has no sign-in path), and endpoint templates like
+		  // `bedrock-runtime.${AWS_REGION}...` that parse as URLs but cannot be dialled.
 		  {
 		    key: "kimi-global-claude",
 		    displayName: "Kimi Global",
@@ -3069,12 +3069,12 @@ window.__ModuleLoader__.load({
 		  // The hand-written block above is kept as-is; anything whose endpoint it
 		  // already ships is not repeated here.
 		  //
-		  // `o1`/`[1M]`-style suffixes and OAuth-only entries are excluded: the first
-		  // is display decoration rather than part of the model id, and the second has
-		  // no sign-in path in DSH.
+		  // Excluded: entries with no model id (llm-pi-ai rejects an empty model list),
+		  // OAuth-only entries (DSH has no sign-in path), and endpoint templates like
+		  // `bedrock-runtime.${AWS_REGION}...` that parse as URLs but cannot be dialled.
 		  {
 		    key: "kimi-global-codex",
-		    displayName: "Kimi Global",
+		    displayName: "Kimi Global (Codex)",
 		    appType: "codex",
 		    family: "kimi",
 		    planKey: "payg",
@@ -3088,7 +3088,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "kimi-for-coding-codex",
-		    displayName: "Kimi For Coding",
+		    displayName: "Kimi For Coding (Codex)",
 		    appType: "codex",
 		    family: "kimi",
 		    planKey: "coding",
@@ -3103,7 +3103,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "kimi-for-coding-global-codex",
-		    displayName: "Kimi For Coding Global",
+		    displayName: "Kimi For Coding Global (Codex)",
 		    appType: "codex",
 		    family: "kimi",
 		    planKey: "coding",
@@ -3117,7 +3117,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "zetaapi-codex",
-		    displayName: "ZetaAPI",
+		    displayName: "ZetaAPI (Codex)",
 		    appType: "codex",
 		    category: "aggregator",
 		    isPartner: true,
@@ -3128,7 +3128,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "apinebula-codex",
-		    displayName: "APINebula",
+		    displayName: "APINebula (Codex)",
 		    appType: "codex",
 		    category: "third_party",
 		    isPartner: true,
@@ -3139,7 +3139,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "aicodemirror-codex",
-		    displayName: "AICodeMirror",
+		    displayName: "AICodeMirror (Codex)",
 		    appType: "codex",
 		    category: "third_party",
 		    isPartner: true,
@@ -3151,7 +3151,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "patewayai-codex",
-		    displayName: "PatewayAI",
+		    displayName: "PatewayAI (Codex)",
 		    appType: "codex",
 		    category: "third_party",
 		    isPartner: true,
@@ -3162,7 +3162,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "fennoai-codex",
-		    displayName: "FennoAI",
+		    displayName: "FennoAI (Codex)",
 		    appType: "codex",
 		    category: "aggregator",
 		    isPartner: true,
@@ -3173,7 +3173,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "runapi-codex",
-		    displayName: "RunAPI",
+		    displayName: "RunAPI (Codex)",
 		    appType: "codex",
 		    category: "aggregator",
 		    isPartner: true,
@@ -3184,7 +3184,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "shengsuanyun-codex",
-		    displayName: "Shengsuanyun",
+		    displayName: "Shengsuanyun (Codex)",
 		    appType: "codex",
 		    category: "aggregator",
 		    isPartner: true,
@@ -3195,7 +3195,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "aigocode-codex",
-		    displayName: "AIGoCode",
+		    displayName: "AIGoCode (Codex)",
 		    appType: "codex",
 		    category: "third_party",
 		    isPartner: true,
@@ -3207,7 +3207,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "qiniu-codex",
-		    displayName: "Qiniu",
+		    displayName: "Qiniu (Codex)",
 		    appType: "codex",
 		    category: "aggregator",
 		    isPartner: true,
@@ -3218,7 +3218,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "aicoding-codex",
-		    displayName: "AICoding",
+		    displayName: "AICoding (Codex)",
 		    appType: "codex",
 		    category: "third_party",
 		    isPartner: true,
@@ -3230,7 +3230,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "subrouter-codex",
-		    displayName: "SubRouter",
+		    displayName: "SubRouter (Codex)",
 		    appType: "codex",
 		    category: "aggregator",
 		    isPartner: true,
@@ -3241,7 +3241,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "fluxa-token-plan-codex",
-		    displayName: "FluxA Token Plan",
+		    displayName: "FluxA Token Plan (Codex)",
 		    appType: "codex",
 		    category: "aggregator",
 		    isPartner: true,
@@ -3252,7 +3252,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "88api-codex",
-		    displayName: "88API",
+		    displayName: "88API (Codex)",
 		    appType: "codex",
 		    category: "aggregator",
 		    isPartner: true,
@@ -3263,7 +3263,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "apikey-fun-codex",
-		    displayName: "APIKEY.FUN",
+		    displayName: "APIKEY.FUN (Codex)",
 		    appType: "codex",
 		    category: "third_party",
 		    isPartner: true,
@@ -3274,7 +3274,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "9527code-codex",
-		    displayName: "9527CODE",
+		    displayName: "9527CODE (Codex)",
 		    appType: "codex",
 		    category: "aggregator",
 		    isPartner: true,
@@ -3285,7 +3285,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "code0-codex",
-		    displayName: "Code0",
+		    displayName: "Code0 (Codex)",
 		    appType: "codex",
 		    category: "aggregator",
 		    isPartner: true,
@@ -3296,7 +3296,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "teamorouter-codex",
-		    displayName: "TeamoRouter",
+		    displayName: "TeamoRouter (Codex)",
 		    appType: "codex",
 		    category: "aggregator",
 		    isPartner: true,
@@ -3307,7 +3307,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "claudecn-codex",
-		    displayName: "ClaudeCN",
+		    displayName: "ClaudeCN (Codex)",
 		    appType: "codex",
 		    category: "third_party",
 		    isPartner: true,
@@ -3318,7 +3318,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "volcengine-agent-plan-codex",
-		    displayName: "\u706B\u5C71 Agent Plan",
+		    displayName: "\u706B\u5C71 Agent Plan (Codex)",
 		    appType: "codex",
 		    family: "volcengine",
 		    planKey: "agentPlan",
@@ -3332,7 +3332,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "volcengine-coding-plan-codex",
-		    displayName: "\u706B\u5C71 Coding Plan",
+		    displayName: "\u706B\u5C71 Coding Plan (Codex)",
 		    appType: "codex",
 		    family: "volcengine",
 		    planKey: "codingPlan",
@@ -3346,7 +3346,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "byteplus-codex",
-		    displayName: "BytePlus",
+		    displayName: "BytePlus (Codex)",
 		    appType: "codex",
 		    category: "cn_official",
 		    isPartner: true,
@@ -3358,7 +3358,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "siliconflow-en-codex",
-		    displayName: "SiliconFlow en",
+		    displayName: "SiliconFlow en (Codex)",
 		    appType: "codex",
 		    family: "siliconflow",
 		    regionKey: "intl",
@@ -3372,7 +3372,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "a6api-codex",
-		    displayName: "A6API",
+		    displayName: "A6API (Codex)",
 		    appType: "codex",
 		    category: "aggregator",
 		    isPartner: true,
@@ -3383,7 +3383,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "compshare-codex",
-		    displayName: "Compshare",
+		    displayName: "Compshare (Codex)",
 		    appType: "codex",
 		    family: "compshare",
 		    planKey: "payg",
@@ -3397,7 +3397,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "compshare-coding-plan-codex",
-		    displayName: "Compshare Coding Plan",
+		    displayName: "Compshare Coding Plan (Codex)",
 		    appType: "codex",
 		    family: "compshare",
 		    planKey: "codingPlan",
@@ -3411,7 +3411,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "ccsub-codex",
-		    displayName: "CCSub",
+		    displayName: "CCSub (Codex)",
 		    appType: "codex",
 		    category: "aggregator",
 		    isPartner: true,
@@ -3422,7 +3422,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "sssaicode-codex",
-		    displayName: "SSSAiCode",
+		    displayName: "SSSAiCode (Codex)",
 		    appType: "codex",
 		    category: "third_party",
 		    isPartner: true,
@@ -3434,7 +3434,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "soleapi-codex",
-		    displayName: "SoleAPI",
+		    displayName: "SoleAPI (Codex)",
 		    appType: "codex",
 		    category: "aggregator",
 		    isPartner: true,
@@ -3445,7 +3445,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "micu-codex",
-		    displayName: "Micu",
+		    displayName: "Micu (Codex)",
 		    appType: "codex",
 		    category: "third_party",
 		    isPartner: true,
@@ -3457,7 +3457,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "rightcode-codex",
-		    displayName: "RightCode",
+		    displayName: "RightCode (Codex)",
 		    appType: "codex",
 		    category: "third_party",
 		    isPartner: true,
@@ -3469,7 +3469,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "cubence-codex",
-		    displayName: "Cubence",
+		    displayName: "Cubence (Codex)",
 		    appType: "codex",
 		    category: "third_party",
 		    isPartner: true,
@@ -3481,7 +3481,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "crazyrouter-codex",
-		    displayName: "CrazyRouter",
+		    displayName: "CrazyRouter (Codex)",
 		    appType: "codex",
 		    category: "third_party",
 		    isPartner: true,
@@ -3493,7 +3493,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "dmxapi-codex",
-		    displayName: "DMXAPI",
+		    displayName: "DMXAPI (Codex)",
 		    appType: "codex",
 		    category: "aggregator",
 		    isPartner: true,
@@ -3504,7 +3504,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "sudocode-chat-codex",
-		    displayName: "SudoCode.chat",
+		    displayName: "SudoCode.chat (Codex)",
 		    appType: "codex",
 		    family: "sudocode",
 		    category: "third_party",
@@ -3516,7 +3516,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "sudocode-us-codex",
-		    displayName: "SudoCode.us",
+		    displayName: "SudoCode.us (Codex)",
 		    appType: "codex",
 		    family: "sudocode",
 		    category: "third_party",
@@ -3528,7 +3528,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "xycai-codex",
-		    displayName: "XycAi",
+		    displayName: "XycAi (Codex)",
 		    appType: "codex",
 		    category: "aggregator",
 		    isPartner: true,
@@ -3539,7 +3539,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "tu-zi-codex",
-		    displayName: "Tu-zi",
+		    displayName: "Tu-zi (Codex)",
 		    appType: "codex",
 		    category: "aggregator",
 		    api: "openai-responses",
@@ -3549,7 +3549,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "amux-codex",
-		    displayName: "Amux",
+		    displayName: "Amux (Codex)",
 		    appType: "codex",
 		    category: "aggregator",
 		    api: "openai-responses",
@@ -3559,7 +3559,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "atlascloud-codex",
-		    displayName: "AtlasCloud",
+		    displayName: "AtlasCloud (Codex)",
 		    appType: "codex",
 		    category: "aggregator",
 		    api: "openai-responses",
@@ -3569,7 +3569,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "soshow-codex",
-		    displayName: "Soshow",
+		    displayName: "Soshow (Codex)",
 		    appType: "codex",
 		    category: "aggregator",
 		    api: "openai-responses",
@@ -3579,7 +3579,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "deepseek-codex",
-		    displayName: "DeepSeek",
+		    displayName: "DeepSeek (Codex)",
 		    appType: "codex",
 		    category: "cn_official",
 		    api: "openai-responses",
@@ -3590,7 +3590,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "zhipu-glm-en-codex",
-		    displayName: "Zhipu GLM en",
+		    displayName: "Zhipu GLM en (Codex)",
 		    appType: "codex",
 		    family: "zhipu",
 		    regionKey: "intl",
@@ -3603,7 +3603,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "baidu-qianfan-codex",
-		    displayName: "Baidu Qianfan",
+		    displayName: "Baidu Qianfan (Codex)",
 		    appType: "codex",
 		    family: "baidu-qianfan",
 		    planKey: "payg",
@@ -3616,7 +3616,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "baidu-qianfan-coding-plan-codex",
-		    displayName: "Baidu Qianfan Coding Plan",
+		    displayName: "Baidu Qianfan Coding Plan (Codex)",
 		    appType: "codex",
 		    family: "baidu-qianfan",
 		    planKey: "codingPlan",
@@ -3629,7 +3629,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "baidu-qianfan-token-plan-codex",
-		    displayName: "Baidu Qianfan Token Plan",
+		    displayName: "Baidu Qianfan Token Plan (Codex)",
 		    appType: "codex",
 		    family: "baidu-qianfan",
 		    planKey: "tokenPlan",
@@ -3642,7 +3642,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "qwen-ai-codex",
-		    displayName: "\u5343\u95EEAI\u5E73\u53F0",
+		    displayName: "\u5343\u95EEAI\u5E73\u53F0 (Codex)",
 		    appType: "codex",
 		    family: "qianwen",
 		    planKey: "payg",
@@ -3655,7 +3655,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "qwen-ai-token-plan-codex",
-		    displayName: "\u5343\u95EEAI\u5E73\u53F0 Token Plan",
+		    displayName: "\u5343\u95EEAI\u5E73\u53F0 Token Plan (Codex)",
 		    appType: "codex",
 		    family: "qianwen",
 		    planKey: "tokenPlan",
@@ -3668,7 +3668,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "qwencloud-codex",
-		    displayName: "QwenCloud",
+		    displayName: "QwenCloud (Codex)",
 		    appType: "codex",
 		    family: "qwencloud",
 		    planKey: "payg",
@@ -3681,7 +3681,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "qwencloud-for-coding-codex",
-		    displayName: "QwenCloud For Coding",
+		    displayName: "QwenCloud For Coding (Codex)",
 		    appType: "codex",
 		    family: "qwencloud",
 		    planKey: "coding",
@@ -3694,7 +3694,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "qwencloud-token-plan-codex",
-		    displayName: "QwenCloud Token Plan",
+		    displayName: "QwenCloud Token Plan (Codex)",
 		    appType: "codex",
 		    family: "qwencloud",
 		    planKey: "tokenPlan",
@@ -3707,7 +3707,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "tencent-hunyuan-codex",
-		    displayName: "Tencent Hunyuan",
+		    displayName: "Tencent Hunyuan (Codex)",
 		    appType: "codex",
 		    family: "tencent",
 		    planKey: "payg",
@@ -3721,7 +3721,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "tencent-token-plan-codex",
-		    displayName: "Tencent Token Plan",
+		    displayName: "Tencent Token Plan (Codex)",
 		    appType: "codex",
 		    family: "tencent",
 		    planKey: "tokenPlan",
@@ -3735,7 +3735,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "tencent-token-plan-intl-codex",
-		    displayName: "Tencent Token Plan (Intl)",
+		    displayName: "Tencent Token Plan (Intl) (Codex)",
 		    appType: "codex",
 		    family: "tencent",
 		    planKey: "tokenPlan",
@@ -3749,7 +3749,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "tencent-token-plan-enterprise-pro-codex",
-		    displayName: "Tencent Token Plan Enterprise Pro",
+		    displayName: "Tencent Token Plan Enterprise Pro (Codex)",
 		    appType: "codex",
 		    family: "tencent",
 		    planKey: "enterprisePro",
@@ -3763,7 +3763,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "stepfun-api-codex",
-		    displayName: "StepFun API",
+		    displayName: "StepFun API (Codex)",
 		    appType: "codex",
 		    family: "stepfun",
 		    planKey: "payg",
@@ -3777,7 +3777,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "stepfun-api-en-codex",
-		    displayName: "StepFun API en",
+		    displayName: "StepFun API en (Codex)",
 		    appType: "codex",
 		    family: "stepfun",
 		    planKey: "payg",
@@ -3791,7 +3791,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "stepfun-en-codex",
-		    displayName: "StepFun en",
+		    displayName: "StepFun en (Codex)",
 		    appType: "codex",
 		    family: "stepfun",
 		    planKey: "stepPlan",
@@ -3805,7 +3805,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "minimax-en-codex",
-		    displayName: "MiniMax en",
+		    displayName: "MiniMax en (Codex)",
 		    appType: "codex",
 		    family: "minimax",
 		    regionKey: "intl",
@@ -3818,7 +3818,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "astron-coding-plan-codex",
-		    displayName: "Astron Coding Plan",
+		    displayName: "Astron Coding Plan (Codex)",
 		    appType: "codex",
 		    category: "cn_official",
 		    api: "openai-responses",
@@ -3828,7 +3828,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "xiaomi-mimo-token-plan-china-codex",
-		    displayName: "Xiaomi MiMo Token Plan (China)",
+		    displayName: "Xiaomi MiMo Token Plan (China) (Codex)",
 		    appType: "codex",
 		    family: "xiaomi-mimo",
 		    planKey: "tokenPlan",
@@ -3841,7 +3841,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "novita-ai-codex",
-		    displayName: "Novita AI",
+		    displayName: "Novita AI (Codex)",
 		    appType: "codex",
 		    category: "aggregator",
 		    api: "openai-responses",
@@ -3852,7 +3852,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "xai-grok-codex",
-		    displayName: "xAI (Grok)",
+		    displayName: "xAI (Grok) (Codex)",
 		    appType: "codex",
 		    category: "third_party",
 		    api: "openai-responses",
@@ -3863,7 +3863,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "opencode-go-codex",
-		    displayName: "OpenCode Go",
+		    displayName: "OpenCode Go (Codex)",
 		    appType: "codex",
 		    family: "opencode",
 		    planKey: "coding",
@@ -3876,7 +3876,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "opencode-zen-codex",
-		    displayName: "OpenCode Zen",
+		    displayName: "OpenCode Zen (Codex)",
 		    appType: "codex",
 		    family: "opencode",
 		    planKey: "payg",
@@ -3889,7 +3889,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "cherryin-codex",
-		    displayName: "CherryIN",
+		    displayName: "CherryIN (Codex)",
 		    appType: "codex",
 		    category: "aggregator",
 		    api: "openai-responses",
@@ -3899,7 +3899,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "relaxycode-codex",
-		    displayName: "RelaxyCode",
+		    displayName: "RelaxyCode (Codex)",
 		    appType: "codex",
 		    category: "third_party",
 		    api: "openai-responses",
@@ -3909,7 +3909,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "e-flowcode-codex",
-		    displayName: "E-FlowCode",
+		    displayName: "E-FlowCode (Codex)",
 		    appType: "codex",
 		    category: "third_party",
 		    api: "openai-responses",
@@ -3920,7 +3920,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "pipellm-codex",
-		    displayName: "PIPELLM",
+		    displayName: "PIPELLM (Codex)",
 		    appType: "codex",
 		    category: "aggregator",
 		    api: "openai-responses",
@@ -3930,7 +3930,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "openrouter-codex",
-		    displayName: "OpenRouter",
+		    displayName: "OpenRouter (Codex)",
 		    appType: "codex",
 		    category: "aggregator",
 		    api: "openai-responses",
@@ -3941,7 +3941,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "therouter-codex",
-		    displayName: "TheRouter",
+		    displayName: "TheRouter (Codex)",
 		    appType: "codex",
 		    category: "aggregator",
 		    api: "openai-responses",
@@ -3951,7 +3951,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "jiekou-ai-codex",
-		    displayName: "JieKou AI",
+		    displayName: "JieKou AI (Codex)",
 		    appType: "codex",
 		    category: "aggregator",
 		    api: "openai-responses",
@@ -3962,7 +3962,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "aicodewith-codex",
-		    displayName: "AICodeWith",
+		    displayName: "AICodeWith (Codex)",
 		    appType: "codex",
 		    category: "aggregator",
 		    api: "openai-responses",
@@ -3973,7 +3973,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "command-code-codex",
-		    displayName: "Command Code",
+		    displayName: "Command Code (Codex)",
 		    appType: "codex",
 		    category: "third_party",
 		    api: "openai-responses",
@@ -3983,7 +3983,7 @@ window.__ModuleLoader__.load({
 		  },
 		  {
 		    key: "modelark-codex",
-		    displayName: "\u6A21\u529B\u65B9\u821F",
+		    displayName: "\u6A21\u529B\u65B9\u821F (Codex)",
 		    appType: "codex",
 		    category: "aggregator",
 		    api: "openai-responses",

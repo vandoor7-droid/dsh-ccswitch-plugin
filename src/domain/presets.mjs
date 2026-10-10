@@ -392,9 +392,9 @@ export const PROVIDER_PRESETS = Object.freeze([
   // The hand-written block above is kept as-is; anything whose endpoint it
   // already ships is not repeated here.
   //
-  // `o1`/`[1M]`-style suffixes and OAuth-only entries are excluded: the first
-  // is display decoration rather than part of the model id, and the second has
-  // no sign-in path in DSH.
+  // Excluded: entries with no model id (llm-pi-ai rejects an empty model list),
+  // OAuth-only entries (DSH has no sign-in path), and endpoint templates like
+  // `bedrock-runtime.${AWS_REGION}...` that parse as URLs but cannot be dialled.
   {
     key: "kimi-global-claude",
     displayName: "Kimi Global",
@@ -837,12 +837,12 @@ export const PROVIDER_PRESETS = Object.freeze([
   // The hand-written block above is kept as-is; anything whose endpoint it
   // already ships is not repeated here.
   //
-  // `o1`/`[1M]`-style suffixes and OAuth-only entries are excluded: the first
-  // is display decoration rather than part of the model id, and the second has
-  // no sign-in path in DSH.
+  // Excluded: entries with no model id (llm-pi-ai rejects an empty model list),
+  // OAuth-only entries (DSH has no sign-in path), and endpoint templates like
+  // `bedrock-runtime.${AWS_REGION}...` that parse as URLs but cannot be dialled.
   {
     key: "kimi-global-codex",
-    displayName: "Kimi Global",
+    displayName: "Kimi Global (Codex)",
     appType: "codex",
     family: "kimi",
     planKey: "payg",
@@ -856,7 +856,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "kimi-for-coding-codex",
-    displayName: "Kimi For Coding",
+    displayName: "Kimi For Coding (Codex)",
     appType: "codex",
     family: "kimi",
     planKey: "coding",
@@ -871,7 +871,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "kimi-for-coding-global-codex",
-    displayName: "Kimi For Coding Global",
+    displayName: "Kimi For Coding Global (Codex)",
     appType: "codex",
     family: "kimi",
     planKey: "coding",
@@ -885,7 +885,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "zetaapi-codex",
-    displayName: "ZetaAPI",
+    displayName: "ZetaAPI (Codex)",
     appType: "codex",
     category: "aggregator",
     isPartner: true,
@@ -896,7 +896,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "apinebula-codex",
-    displayName: "APINebula",
+    displayName: "APINebula (Codex)",
     appType: "codex",
     category: "third_party",
     isPartner: true,
@@ -907,7 +907,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "aicodemirror-codex",
-    displayName: "AICodeMirror",
+    displayName: "AICodeMirror (Codex)",
     appType: "codex",
     category: "third_party",
     isPartner: true,
@@ -919,7 +919,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "patewayai-codex",
-    displayName: "PatewayAI",
+    displayName: "PatewayAI (Codex)",
     appType: "codex",
     category: "third_party",
     isPartner: true,
@@ -930,7 +930,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "fennoai-codex",
-    displayName: "FennoAI",
+    displayName: "FennoAI (Codex)",
     appType: "codex",
     category: "aggregator",
     isPartner: true,
@@ -941,7 +941,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "runapi-codex",
-    displayName: "RunAPI",
+    displayName: "RunAPI (Codex)",
     appType: "codex",
     category: "aggregator",
     isPartner: true,
@@ -952,7 +952,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "shengsuanyun-codex",
-    displayName: "Shengsuanyun",
+    displayName: "Shengsuanyun (Codex)",
     appType: "codex",
     category: "aggregator",
     isPartner: true,
@@ -963,7 +963,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "aigocode-codex",
-    displayName: "AIGoCode",
+    displayName: "AIGoCode (Codex)",
     appType: "codex",
     category: "third_party",
     isPartner: true,
@@ -975,7 +975,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "qiniu-codex",
-    displayName: "Qiniu",
+    displayName: "Qiniu (Codex)",
     appType: "codex",
     category: "aggregator",
     isPartner: true,
@@ -986,7 +986,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "aicoding-codex",
-    displayName: "AICoding",
+    displayName: "AICoding (Codex)",
     appType: "codex",
     category: "third_party",
     isPartner: true,
@@ -998,7 +998,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "subrouter-codex",
-    displayName: "SubRouter",
+    displayName: "SubRouter (Codex)",
     appType: "codex",
     category: "aggregator",
     isPartner: true,
@@ -1009,7 +1009,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "fluxa-token-plan-codex",
-    displayName: "FluxA Token Plan",
+    displayName: "FluxA Token Plan (Codex)",
     appType: "codex",
     category: "aggregator",
     isPartner: true,
@@ -1020,7 +1020,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "88api-codex",
-    displayName: "88API",
+    displayName: "88API (Codex)",
     appType: "codex",
     category: "aggregator",
     isPartner: true,
@@ -1031,7 +1031,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "apikey-fun-codex",
-    displayName: "APIKEY.FUN",
+    displayName: "APIKEY.FUN (Codex)",
     appType: "codex",
     category: "third_party",
     isPartner: true,
@@ -1042,7 +1042,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "9527code-codex",
-    displayName: "9527CODE",
+    displayName: "9527CODE (Codex)",
     appType: "codex",
     category: "aggregator",
     isPartner: true,
@@ -1053,7 +1053,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "code0-codex",
-    displayName: "Code0",
+    displayName: "Code0 (Codex)",
     appType: "codex",
     category: "aggregator",
     isPartner: true,
@@ -1064,7 +1064,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "teamorouter-codex",
-    displayName: "TeamoRouter",
+    displayName: "TeamoRouter (Codex)",
     appType: "codex",
     category: "aggregator",
     isPartner: true,
@@ -1075,7 +1075,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "claudecn-codex",
-    displayName: "ClaudeCN",
+    displayName: "ClaudeCN (Codex)",
     appType: "codex",
     category: "third_party",
     isPartner: true,
@@ -1086,7 +1086,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "volcengine-agent-plan-codex",
-    displayName: "火山 Agent Plan",
+    displayName: "火山 Agent Plan (Codex)",
     appType: "codex",
     family: "volcengine",
     planKey: "agentPlan",
@@ -1100,7 +1100,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "volcengine-coding-plan-codex",
-    displayName: "火山 Coding Plan",
+    displayName: "火山 Coding Plan (Codex)",
     appType: "codex",
     family: "volcengine",
     planKey: "codingPlan",
@@ -1114,7 +1114,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "byteplus-codex",
-    displayName: "BytePlus",
+    displayName: "BytePlus (Codex)",
     appType: "codex",
     category: "cn_official",
     isPartner: true,
@@ -1126,7 +1126,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "siliconflow-en-codex",
-    displayName: "SiliconFlow en",
+    displayName: "SiliconFlow en (Codex)",
     appType: "codex",
     family: "siliconflow",
     regionKey: "intl",
@@ -1140,7 +1140,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "a6api-codex",
-    displayName: "A6API",
+    displayName: "A6API (Codex)",
     appType: "codex",
     category: "aggregator",
     isPartner: true,
@@ -1151,7 +1151,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "compshare-codex",
-    displayName: "Compshare",
+    displayName: "Compshare (Codex)",
     appType: "codex",
     family: "compshare",
     planKey: "payg",
@@ -1165,7 +1165,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "compshare-coding-plan-codex",
-    displayName: "Compshare Coding Plan",
+    displayName: "Compshare Coding Plan (Codex)",
     appType: "codex",
     family: "compshare",
     planKey: "codingPlan",
@@ -1179,7 +1179,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "ccsub-codex",
-    displayName: "CCSub",
+    displayName: "CCSub (Codex)",
     appType: "codex",
     category: "aggregator",
     isPartner: true,
@@ -1190,7 +1190,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "sssaicode-codex",
-    displayName: "SSSAiCode",
+    displayName: "SSSAiCode (Codex)",
     appType: "codex",
     category: "third_party",
     isPartner: true,
@@ -1202,7 +1202,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "soleapi-codex",
-    displayName: "SoleAPI",
+    displayName: "SoleAPI (Codex)",
     appType: "codex",
     category: "aggregator",
     isPartner: true,
@@ -1213,7 +1213,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "micu-codex",
-    displayName: "Micu",
+    displayName: "Micu (Codex)",
     appType: "codex",
     category: "third_party",
     isPartner: true,
@@ -1225,7 +1225,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "rightcode-codex",
-    displayName: "RightCode",
+    displayName: "RightCode (Codex)",
     appType: "codex",
     category: "third_party",
     isPartner: true,
@@ -1237,7 +1237,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "cubence-codex",
-    displayName: "Cubence",
+    displayName: "Cubence (Codex)",
     appType: "codex",
     category: "third_party",
     isPartner: true,
@@ -1249,7 +1249,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "crazyrouter-codex",
-    displayName: "CrazyRouter",
+    displayName: "CrazyRouter (Codex)",
     appType: "codex",
     category: "third_party",
     isPartner: true,
@@ -1261,7 +1261,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "dmxapi-codex",
-    displayName: "DMXAPI",
+    displayName: "DMXAPI (Codex)",
     appType: "codex",
     category: "aggregator",
     isPartner: true,
@@ -1272,7 +1272,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "sudocode-chat-codex",
-    displayName: "SudoCode.chat",
+    displayName: "SudoCode.chat (Codex)",
     appType: "codex",
     family: "sudocode",
     category: "third_party",
@@ -1284,7 +1284,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "sudocode-us-codex",
-    displayName: "SudoCode.us",
+    displayName: "SudoCode.us (Codex)",
     appType: "codex",
     family: "sudocode",
     category: "third_party",
@@ -1296,7 +1296,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "xycai-codex",
-    displayName: "XycAi",
+    displayName: "XycAi (Codex)",
     appType: "codex",
     category: "aggregator",
     isPartner: true,
@@ -1307,7 +1307,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "tu-zi-codex",
-    displayName: "Tu-zi",
+    displayName: "Tu-zi (Codex)",
     appType: "codex",
     category: "aggregator",
     api: "openai-responses",
@@ -1317,7 +1317,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "amux-codex",
-    displayName: "Amux",
+    displayName: "Amux (Codex)",
     appType: "codex",
     category: "aggregator",
     api: "openai-responses",
@@ -1327,7 +1327,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "atlascloud-codex",
-    displayName: "AtlasCloud",
+    displayName: "AtlasCloud (Codex)",
     appType: "codex",
     category: "aggregator",
     api: "openai-responses",
@@ -1337,7 +1337,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "soshow-codex",
-    displayName: "Soshow",
+    displayName: "Soshow (Codex)",
     appType: "codex",
     category: "aggregator",
     api: "openai-responses",
@@ -1347,7 +1347,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "deepseek-codex",
-    displayName: "DeepSeek",
+    displayName: "DeepSeek (Codex)",
     appType: "codex",
     category: "cn_official",
     api: "openai-responses",
@@ -1358,7 +1358,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "zhipu-glm-en-codex",
-    displayName: "Zhipu GLM en",
+    displayName: "Zhipu GLM en (Codex)",
     appType: "codex",
     family: "zhipu",
     regionKey: "intl",
@@ -1371,7 +1371,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "baidu-qianfan-codex",
-    displayName: "Baidu Qianfan",
+    displayName: "Baidu Qianfan (Codex)",
     appType: "codex",
     family: "baidu-qianfan",
     planKey: "payg",
@@ -1384,7 +1384,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "baidu-qianfan-coding-plan-codex",
-    displayName: "Baidu Qianfan Coding Plan",
+    displayName: "Baidu Qianfan Coding Plan (Codex)",
     appType: "codex",
     family: "baidu-qianfan",
     planKey: "codingPlan",
@@ -1397,7 +1397,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "baidu-qianfan-token-plan-codex",
-    displayName: "Baidu Qianfan Token Plan",
+    displayName: "Baidu Qianfan Token Plan (Codex)",
     appType: "codex",
     family: "baidu-qianfan",
     planKey: "tokenPlan",
@@ -1410,7 +1410,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "qwen-ai-codex",
-    displayName: "千问AI平台",
+    displayName: "千问AI平台 (Codex)",
     appType: "codex",
     family: "qianwen",
     planKey: "payg",
@@ -1423,7 +1423,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "qwen-ai-token-plan-codex",
-    displayName: "千问AI平台 Token Plan",
+    displayName: "千问AI平台 Token Plan (Codex)",
     appType: "codex",
     family: "qianwen",
     planKey: "tokenPlan",
@@ -1436,7 +1436,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "qwencloud-codex",
-    displayName: "QwenCloud",
+    displayName: "QwenCloud (Codex)",
     appType: "codex",
     family: "qwencloud",
     planKey: "payg",
@@ -1449,7 +1449,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "qwencloud-for-coding-codex",
-    displayName: "QwenCloud For Coding",
+    displayName: "QwenCloud For Coding (Codex)",
     appType: "codex",
     family: "qwencloud",
     planKey: "coding",
@@ -1462,7 +1462,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "qwencloud-token-plan-codex",
-    displayName: "QwenCloud Token Plan",
+    displayName: "QwenCloud Token Plan (Codex)",
     appType: "codex",
     family: "qwencloud",
     planKey: "tokenPlan",
@@ -1475,7 +1475,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "tencent-hunyuan-codex",
-    displayName: "Tencent Hunyuan",
+    displayName: "Tencent Hunyuan (Codex)",
     appType: "codex",
     family: "tencent",
     planKey: "payg",
@@ -1489,7 +1489,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "tencent-token-plan-codex",
-    displayName: "Tencent Token Plan",
+    displayName: "Tencent Token Plan (Codex)",
     appType: "codex",
     family: "tencent",
     planKey: "tokenPlan",
@@ -1503,7 +1503,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "tencent-token-plan-intl-codex",
-    displayName: "Tencent Token Plan (Intl)",
+    displayName: "Tencent Token Plan (Intl) (Codex)",
     appType: "codex",
     family: "tencent",
     planKey: "tokenPlan",
@@ -1517,7 +1517,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "tencent-token-plan-enterprise-pro-codex",
-    displayName: "Tencent Token Plan Enterprise Pro",
+    displayName: "Tencent Token Plan Enterprise Pro (Codex)",
     appType: "codex",
     family: "tencent",
     planKey: "enterprisePro",
@@ -1531,7 +1531,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "stepfun-api-codex",
-    displayName: "StepFun API",
+    displayName: "StepFun API (Codex)",
     appType: "codex",
     family: "stepfun",
     planKey: "payg",
@@ -1545,7 +1545,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "stepfun-api-en-codex",
-    displayName: "StepFun API en",
+    displayName: "StepFun API en (Codex)",
     appType: "codex",
     family: "stepfun",
     planKey: "payg",
@@ -1559,7 +1559,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "stepfun-en-codex",
-    displayName: "StepFun en",
+    displayName: "StepFun en (Codex)",
     appType: "codex",
     family: "stepfun",
     planKey: "stepPlan",
@@ -1573,7 +1573,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "minimax-en-codex",
-    displayName: "MiniMax en",
+    displayName: "MiniMax en (Codex)",
     appType: "codex",
     family: "minimax",
     regionKey: "intl",
@@ -1586,7 +1586,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "astron-coding-plan-codex",
-    displayName: "Astron Coding Plan",
+    displayName: "Astron Coding Plan (Codex)",
     appType: "codex",
     category: "cn_official",
     api: "openai-responses",
@@ -1596,7 +1596,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "xiaomi-mimo-token-plan-china-codex",
-    displayName: "Xiaomi MiMo Token Plan (China)",
+    displayName: "Xiaomi MiMo Token Plan (China) (Codex)",
     appType: "codex",
     family: "xiaomi-mimo",
     planKey: "tokenPlan",
@@ -1609,7 +1609,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "novita-ai-codex",
-    displayName: "Novita AI",
+    displayName: "Novita AI (Codex)",
     appType: "codex",
     category: "aggregator",
     api: "openai-responses",
@@ -1620,7 +1620,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "xai-grok-codex",
-    displayName: "xAI (Grok)",
+    displayName: "xAI (Grok) (Codex)",
     appType: "codex",
     category: "third_party",
     api: "openai-responses",
@@ -1631,7 +1631,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "opencode-go-codex",
-    displayName: "OpenCode Go",
+    displayName: "OpenCode Go (Codex)",
     appType: "codex",
     family: "opencode",
     planKey: "coding",
@@ -1644,7 +1644,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "opencode-zen-codex",
-    displayName: "OpenCode Zen",
+    displayName: "OpenCode Zen (Codex)",
     appType: "codex",
     family: "opencode",
     planKey: "payg",
@@ -1657,7 +1657,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "cherryin-codex",
-    displayName: "CherryIN",
+    displayName: "CherryIN (Codex)",
     appType: "codex",
     category: "aggregator",
     api: "openai-responses",
@@ -1667,7 +1667,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "relaxycode-codex",
-    displayName: "RelaxyCode",
+    displayName: "RelaxyCode (Codex)",
     appType: "codex",
     category: "third_party",
     api: "openai-responses",
@@ -1677,7 +1677,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "e-flowcode-codex",
-    displayName: "E-FlowCode",
+    displayName: "E-FlowCode (Codex)",
     appType: "codex",
     category: "third_party",
     api: "openai-responses",
@@ -1688,7 +1688,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "pipellm-codex",
-    displayName: "PIPELLM",
+    displayName: "PIPELLM (Codex)",
     appType: "codex",
     category: "aggregator",
     api: "openai-responses",
@@ -1698,7 +1698,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "openrouter-codex",
-    displayName: "OpenRouter",
+    displayName: "OpenRouter (Codex)",
     appType: "codex",
     category: "aggregator",
     api: "openai-responses",
@@ -1709,7 +1709,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "therouter-codex",
-    displayName: "TheRouter",
+    displayName: "TheRouter (Codex)",
     appType: "codex",
     category: "aggregator",
     api: "openai-responses",
@@ -1719,7 +1719,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "jiekou-ai-codex",
-    displayName: "JieKou AI",
+    displayName: "JieKou AI (Codex)",
     appType: "codex",
     category: "aggregator",
     api: "openai-responses",
@@ -1730,7 +1730,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "aicodewith-codex",
-    displayName: "AICodeWith",
+    displayName: "AICodeWith (Codex)",
     appType: "codex",
     category: "aggregator",
     api: "openai-responses",
@@ -1741,7 +1741,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "command-code-codex",
-    displayName: "Command Code",
+    displayName: "Command Code (Codex)",
     appType: "codex",
     category: "third_party",
     api: "openai-responses",
@@ -1751,7 +1751,7 @@ export const PROVIDER_PRESETS = Object.freeze([
   },
   {
     key: "modelark-codex",
-    displayName: "模力方舟",
+    displayName: "模力方舟 (Codex)",
     appType: "codex",
     category: "aggregator",
     api: "openai-responses",
