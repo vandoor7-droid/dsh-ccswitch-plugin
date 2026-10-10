@@ -42,6 +42,23 @@ const RECORD = {
   inFailoverQueue: true,
 }
 
+test('row order comes from the catalogue order, not from a competing tie-break', () => {
+  const providers = toCardProviders(
+    { a: RECORD, b: { ...RECORD, sortIndex: 7 }, c: { ...RECORD, createdAt: undefined } },
+    ['c', 'a', 'b'],
+  )
+  // The Host tie-breaks by row id and cc-switch's `sortedProviders` tie-breaks
+  // by name. Folding `order` in means the list the user sees is exactly the
+  // permutation `/providers/reorder` demands as its input — otherwise a drag
+  // would submit an order built from a ranking the user never saw.
+  assert.deepEqual(
+    [providers.a.sortIndex, providers.b.sortIndex, providers.c.sortIndex],
+    [1, 2, 0],
+  )
+  // A key the order does not name keeps whatever the record carried.
+  assert.equal(toCardProvider('z', RECORD, ['a']).sortIndex, 3)
+})
+
 test('a record becomes the row shape cc-switch reads', () => {
   const provider = toCardProvider('ccs-deepseek-11111111', RECORD)
 
@@ -72,15 +89,25 @@ test('no credential ever reaches the projected row', () => {
   )
 })
 
-test('the parts this plugin does not model stay absent rather than invented', () => {
-  const provider = toCardProvider('k', RECORD)
-  // `meta` drives the quota column; `isPartner` drives a promotion line. Both
-  // are read with optional chaining, so absence renders an empty cell — an
-  // empty object would claim a usage script the plugin has no route for.
-  assert.equal('meta' in provider, false)
-  assert.equal('isPartner' in provider, false)
-  assert.equal('appType' in provider, false, 'cc-switch has no such field')
-  assert.equal('apiKeyEnv' in provider, false, 'nor this one')
+test('membership is carried on the one field upstream reads it from', () => {
+  const applied = toCardProvider('k', { ...RECORD, inUse: true })
+  const available = toCardProvider('k', { ...RECORD, inUse: false })
+  // `ProviderList` decides the Added/Available split with
+  // `provider.meta?.liveConfigManaged === true` for the app id we mount under.
+  // That predicate is this plugin's `inUse`, so membership travels through the
+  // field cc-switch already has rather than a new branch in the copied code.
+  assert.deepEqual(applied.meta, { liveConfigManaged: true })
+  assert.deepEqual(available.meta, { liveConfigManaged: false })
+
+  // Everything else under `meta` stays absent. `usage_script` drives the quota
+  // column's queries and `providerType` drives the Copilot/Codex/xAI badges —
+  // inventing either would claim a route this plugin does not have, and the
+  // quota column would render a cell that can never answer.
+  assert.equal('usage_script' in applied.meta, false)
+  assert.equal('providerType' in applied.meta, false)
+  assert.equal('isPartner' in applied, false)
+  assert.equal('appType' in applied, false, 'cc-switch has no such field')
+  assert.equal('apiKeyEnv' in applied, false, 'nor this one')
 })
 
 test('a blank record projects to a blank row instead of throwing', () => {

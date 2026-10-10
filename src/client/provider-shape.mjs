@@ -31,6 +31,29 @@
  * What it deliberately does **not** carry: any secret. The credential lives
  * behind a reference in the credentials service and never crosses this
  * boundary in either direction.
+ *
+ * ## The two fields that are *not* verbatim
+ *
+ * **`meta.liveConfigManaged`** is how cc-switch's `ProviderList` decides
+ * membership for the `mcode` app id:
+ *
+ * ```ts
+ * case "mcode": return provider.meta?.liveConfigManaged === true;
+ * ```
+ *
+ * That predicate *is* this plugin's `inUse` — "is this provider in the route
+ * table DSH serves". The card's `Added` / `Available` split therefore reads our
+ * membership through the one field upstream already has for it, instead of a
+ * new branch in the copied component. Every other `meta` key stays absent, so
+ * `meta.usage_script` remains `undefined` and the quota column renders empty
+ * rather than querying a route that does not exist.
+ *
+ * **`sortIndex`** is taken from the catalogue's `order` rather than from the
+ * stored field when the key appears there. The two agree on ranking but not on
+ * tie-breaks — the Host breaks ties by row id and `sortedProviders` breaks them
+ * by name — and the list must match the order `/providers/reorder` requires as
+ * its input, or a drag would send back a permutation of a list the user never
+ * saw.
  */
 
 function isRecord(value) {
@@ -66,9 +89,12 @@ export function synthesizeSettingsConfig(record) {
  *   this id back through `sourceProfileId`, so the two names have to stay
  *   paired — see `resolveKey` in `src/client/tauri-shim/commands.mjs`.
  * @param record - the plugin's stored provider.
+ * @param order - the catalogue's `order`, when the caller has it; see the note
+ *   on `sortIndex` above.
  */
-export function toCardProvider(key, record) {
+export function toCardProvider(key, record, order) {
   const source = isRecord(record) ? record : {}
+  const position = Array.isArray(order) ? order.indexOf(key) : -1
   return {
     id: String(key),
     name: String(source.displayName ?? key),
@@ -76,27 +102,24 @@ export function toCardProvider(key, record) {
     websiteUrl: optionalString(source.websiteUrl),
     category: optionalString(source.category),
     createdAt: Number.isInteger(source.createdAt) ? source.createdAt : undefined,
-    sortIndex: Number.isInteger(source.sortIndex) ? source.sortIndex : undefined,
+    sortIndex: position >= 0 ? position : (Number.isInteger(source.sortIndex) ? source.sortIndex : undefined),
     notes: optionalString(source.notes),
     icon: optionalString(source.icon),
     iconColor: optionalString(source.iconColor),
     inFailoverQueue: source.inFailoverQueue === true,
-    // `isPartner` and `meta` are intentionally absent. Both describe things
-    // this plugin does not model — partner promotion, and the per-provider
-    // `usage_script` / `providerType` block the quota column reads — and
-    // inventing either would make the card claim a capability that does not
-    // exist. Every reader uses optional chaining, so an absent `meta` simply
-    // renders an empty quota cell.
+    meta: { liveConfigManaged: source.inUse === true },
+    // `isPartner` is intentionally absent: partner promotion is a storefront
+    // concern this plugin does not have.
   }
 }
 
 /** The whole catalogue, keyed as cc-switch's `get_providers` returns it. */
-export function toCardProviders(providers) {
+export function toCardProviders(providers, order) {
   const source = isRecord(providers) ? providers : {}
   const out = {}
   for (const [key, record] of Object.entries(source)) {
     if (key === '') continue
-    out[key] = toCardProvider(key, record)
+    out[key] = toCardProvider(key, record, order)
   }
   return out
 }

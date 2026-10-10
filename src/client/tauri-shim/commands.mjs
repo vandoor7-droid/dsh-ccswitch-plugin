@@ -52,6 +52,10 @@
  *   reached only through `appType`, which is a label and drives nothing.
  */
 
+// The one place a flat record becomes cc-switch's `Provider`; see the note on
+// `get_providers` below.
+import { toCardProviders } from '../provider-shape.mjs'
+
 export const MANAGER_API = '/api/dsh-ccswitch-manager'
 export const IMPORT_API = '/api/dsh-ccswitch'
 export const PROVIDERS_PATH = `${MANAGER_API}/providers`
@@ -106,18 +110,31 @@ async function readCatalogue(ctx) {
 
 export const INVOKE_ROUTES = {
   /**
-   * The whole catalogue, keyed exactly as cc-switch keys it.
+   * The whole catalogue, in cc-switch's row shape.
    *
    * cc-switch's command returns `IndexMap<String, Provider>` and every caller
-   * does `Object.values(result)` / `result[id]`, so `receive` hands back
-   * `body.providers`, not the envelope. The envelope's `order` is not lost:
-   * rows carry `sortIndex` and `createdAt`, and the copied list re-derives the
-   * order from them the way `sortedProviders` does.
+   * does `Object.values(result)` / `result[id]`, so this is where the plugin's
+   * flat record becomes that shape — the one layer the port is allowed to
+   * change. Doing it here rather than in each component is what lets a copied
+   * file stay verbatim: `ProviderList`, `ProviderCard` and `useDragSort` all
+   * receive rows they recognise.
+   *
+   * `order` rides along only to be folded into each row's `sortIndex`, because
+   * the envelope itself is not part of cc-switch's return type and
+   * `sortedProviders` would tie-break by name where the Host tie-breaks by id.
+   * See `src/client/provider-shape.mjs` for why that matters to a drag.
+   *
+   * Note this only shapes what a *caller* receives: `resolveKey` and
+   * `update_providers_sort_order` read the envelope through `ctx.request`
+   * directly, so they still see `sourceProfileId` and the raw ordering.
    */
   get_providers: {
     path: PROVIDERS_PATH,
     method: 'GET',
-    receive: (body) => (isRecord(body?.providers) ? body.providers : {}),
+    receive: (body) => toCardProviders(
+      isRecord(body?.providers) ? body.providers : {},
+      Array.isArray(body?.order) ? body.order : [],
+    ),
   },
 
   /**

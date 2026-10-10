@@ -54,7 +54,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "build:catalog": "node scripts/build-catalog.mjs",
-    "test": "npm run build && node --test \"test/**/*.test.{js,mjs}\"",
+    "test": "npm run build && node --test --test-force-exit \"test/**/*.test.{js,mjs}\"",
     "pack:check": "npm run build && npm pack --dry-run",
     "prepack": "npm run build"
   },
@@ -148,6 +148,7 @@
     "flexsearch": "0.8.212",
     "framer-motion": "12.23.25",
     "i18next": "25.5.2",
+    "jsdom": "^30.1.2",
     "lucide-react": "0.542.0",
     "motion-dom": "12.23.23",
     "motion-utils": "12.23.6",

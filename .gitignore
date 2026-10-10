@@ -2,3 +2,6 @@ node_modules/
 npm-debug.log*
 .worktrees/
 catalog/
+
+# esbuild/test scratch output (never published; `files` only ships dist/)
+test/.tmp/

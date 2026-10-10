@@ -64,7 +64,7 @@ test("a command with no route throws instead of doing nothing", async () => {
 test("get_providers reads the catalogue without a state-changing marker", async () => {
   const fetchImpl = fakeFetch([{
     status: 200,
-    body: { exists: true, order: ["a"], providers: { a: { displayName: "A" } } },
+    body: { exists: true, revision: 4, order: ["a"], providers: { a: { displayName: "A", baseURL: "https://x.test" } } },
   }]);
   const invoke = createInvoke({ fetchImpl });
   const providers = await invoke("get_providers", { app: "claude" });
@@ -73,11 +73,17 @@ test("get_providers reads the catalogue without a state-changing marker", async 
   assert.equal(fetchImpl.calls[0].url, PROVIDERS);
   assert.equal(fetchImpl.calls[0].method, "GET");
   assert.equal(fetchImpl.calls[0].init.headers, undefined, "a GET makes no origin claim");
-  // The map of rows and nothing else: cc-switch's command returns
-  // `IndexMap<String, Provider>` and its callers do `Object.values(result)`,
-  // so handing back the envelope would enumerate `exists`/`revision` as
-  // providers.
-  assert.deepEqual(providers, { a: { displayName: "A" } });
+  // The map of rows in cc-switch's shape, not the envelope: the command's
+  // contract is `IndexMap<String, Provider>` and callers do
+  // `Object.values(result)`, so `exists`/`revision` must not enumerate as
+  // providers. `sortIndex` comes from `order`, which is why the drag in
+  // `useDragSort` writes back an order the Host accepts.
+  assert.deepEqual(Object.keys(providers), ["a"]);
+  assert.equal(providers.a.id, "a");
+  assert.equal(providers.a.name, "A");
+  assert.equal(providers.a.sortIndex, 0);
+  assert.deepEqual(providers.a.settingsConfig, { baseUrl: "https://x.test", env: { ANTHROPIC_BASE_URL: "https://x.test" } });
+  assert.equal("revision" in providers, false);
 });
 
 test("a command that needs a key resolves the cc-switch id through the catalogue", async () => {
