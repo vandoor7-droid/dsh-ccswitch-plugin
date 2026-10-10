@@ -1107,6 +1107,9 @@ window.__ModuleLoader__.load({
 		    "manager.searchPlaceholder": "\u6309\u540D\u79F0/\u5907\u6CE8/\u8BF7\u6C42\u5730\u5740\u641C\u7D22\u4F9B\u5E94\u5546\u2026",
 		    "manager.searchAriaLabel": "\u641C\u7D22\u4F9B\u5E94\u5546",
 		    "manager.searchClear": "\u6E05\u9664",
+		    "manager.presetFilter": "\u7B5B\u9009\u9884\u8BBE\uFF08\u5382\u5546 / \u522B\u540D / \u57DF\u540D\uFF09\u2026",
+		    "manager.presetFilterAria": "\u7B5B\u9009\u9884\u8BBE",
+		    "manager.presetNoMatch": "\u6CA1\u6709\u5339\u914D\u7684\u9884\u8BBE\u3002",
 		    "manager.noSearchResults": "\u6CA1\u6709\u7B26\u5408\u641C\u7D22\u6761\u4EF6\u7684\u4F9B\u5E94\u5546\u3002",
 		    // The five sections CC Switch's "add provider" list is grouped into
 		    // (`presetGroups.ts`, `PRESET_GROUP_ORDER`), and the two dimensions its
@@ -1325,6 +1328,9 @@ window.__ModuleLoader__.load({
 		    "manager.searchPlaceholder": "Search name, notes, or API address\u2026",
 		    "manager.searchAriaLabel": "Search providers",
 		    "manager.searchClear": "Clear",
+		    "manager.presetFilter": "Filter presets (vendor, alias, domain)\u2026",
+		    "manager.presetFilterAria": "Filter presets",
+		    "manager.presetNoMatch": "No presets match.",
 		    "manager.noSearchResults": "No providers match your search.",
 		    "manager.group.login": "Account sign-in",
 		    "manager.group.vendor": "Model vendors",
@@ -3992,6 +3998,71 @@ window.__ModuleLoader__.load({
 		    icon: "moark"
 		  }
 		]);
+		var PRESET_SEARCH_ALIASES = Object.freeze({
+		  "baidu-qianfan-coding-plan-claude": "\u767E\u5EA6 \u5343\u5E06 \u6587\u5FC3",
+		  "baidu-qianfan-coding-plan-codex": "\u767E\u5EA6 \u5343\u5E06 \u6587\u5FC3",
+		  "baidu-qianfan-token-plan-claude": "\u767E\u5EA6 \u5343\u5E06 \u6587\u5FC3",
+		  "baidu-qianfan-token-plan-codex": "\u767E\u5EA6 \u5343\u5E06 \u6587\u5FC3",
+		  "bailing-claude": "\u8682\u8681 \u767E\u7075 ling",
+		  "bailing-codex": "\u8682\u8681 \u767E\u7075 ling",
+		  "deepseek-claude": "\u6DF1\u5EA6\u6C42\u7D22",
+		  "deepseek-codex": "\u6DF1\u5EA6\u6C42\u7D22",
+		  "gemini-native-claude": "google \u8C37\u6B4C",
+		  "kimi-claude": "\u6708\u4E4B\u6697\u9762 moonshot",
+		  "kimi-codex": "\u6708\u4E4B\u6697\u9762 moonshot",
+		  "kimi-for-coding-claude": "\u6708\u4E4B\u6697\u9762 moonshot",
+		  "kimi-for-coding-codex": "\u6708\u4E4B\u6697\u9762 moonshot",
+		  "kimi-for-coding-global-claude": "\u6708\u4E4B\u6697\u9762 moonshot",
+		  "kimi-for-coding-global-codex": "\u6708\u4E4B\u6697\u9762 moonshot",
+		  "kimi-global-claude": "\u6708\u4E4B\u6697\u9762 moonshot",
+		  "kimi-global-codex": "\u6708\u4E4B\u6697\u9762 moonshot",
+		  "longcat-claude": "\u7F8E\u56E2",
+		  "longcat-codex": "\u7F8E\u56E2",
+		  "minimax-claude": "\u6D77\u87BA",
+		  "minimax-codex": "\u6D77\u87BA",
+		  "minimax-en-claude": "\u6D77\u87BA",
+		  "minimax-en-codex": "\u6D77\u87BA",
+		  "modelscope-claude": "\u9B54\u642D",
+		  "modelscope-codex": "\u9B54\u642D",
+		  "qwen-ai-claude": "\u5343\u95EE \u901A\u4E49 \u963F\u91CC \u767E\u70BC bailian aliyun qwen",
+		  "qwen-ai-codex": "\u5343\u95EE \u901A\u4E49 \u963F\u91CC \u767E\u70BC bailian aliyun qwen",
+		  "qwen-ai-token-plan-claude": "\u5343\u95EE \u901A\u4E49 \u963F\u91CC \u767E\u70BC bailian aliyun qwen",
+		  "qwen-ai-token-plan-codex": "\u5343\u95EE \u901A\u4E49 \u963F\u91CC \u767E\u70BC bailian aliyun qwen",
+		  "qwencloud-claude": "\u901A\u4E49 \u963F\u91CC qwen",
+		  "qwencloud-codex": "\u901A\u4E49 \u963F\u91CC qwen",
+		  "qwencloud-for-coding-claude": "\u901A\u4E49 \u963F\u91CC qwen",
+		  "qwencloud-for-coding-codex": "\u901A\u4E49 \u963F\u91CC qwen",
+		  "qwencloud-token-plan-claude": "\u901A\u4E49 \u963F\u91CC qwen",
+		  "qwencloud-token-plan-codex": "\u901A\u4E49 \u963F\u91CC qwen",
+		  "siliconflow-claude": "\u7845\u57FA\u6D41\u52A8",
+		  "siliconflow-codex": "\u7845\u57FA\u6D41\u52A8",
+		  "siliconflow-en-claude": "\u7845\u57FA\u6D41\u52A8",
+		  "siliconflow-en-codex": "\u7845\u57FA\u6D41\u52A8",
+		  "stepfun-claude": "\u9636\u8DC3\u661F\u8FB0",
+		  "stepfun-codex": "\u9636\u8DC3\u661F\u8FB0",
+		  "stepfun-en-claude": "\u9636\u8DC3\u661F\u8FB0",
+		  "stepfun-en-codex": "\u9636\u8DC3\u661F\u8FB0",
+		  "tencent-token-plan-claude": "\u817E\u8BAF \u6DF7\u5143 hunyuan",
+		  "tencent-token-plan-codex": "\u817E\u8BAF \u6DF7\u5143 hunyuan",
+		  "tencent-token-plan-enterprise-pro-claude": "\u817E\u8BAF \u6DF7\u5143 hunyuan",
+		  "tencent-token-plan-enterprise-pro-codex": "\u817E\u8BAF \u6DF7\u5143 hunyuan",
+		  "tencent-token-plan-intl-claude": "\u817E\u8BAF \u6DF7\u5143 hunyuan",
+		  "tencent-token-plan-intl-codex": "\u817E\u8BAF \u6DF7\u5143 hunyuan",
+		  "tu-zi-codex": "\u5154\u5B50 \u5154\u5B50api tuzi",
+		  "volcengine-agent-plan-claude": "\u706B\u5C71 \u8C46\u5305 doubao volcengine \u65B9\u821F ark \u5B57\u8282",
+		  "volcengine-agent-plan-codex": "\u706B\u5C71 \u8C46\u5305 doubao volcengine \u65B9\u821F ark \u5B57\u8282",
+		  "volcengine-coding-plan-claude": "\u706B\u5C71 \u8C46\u5305 doubao volcengine \u65B9\u821F ark \u5B57\u8282",
+		  "volcengine-coding-plan-codex": "\u706B\u5C71 \u8C46\u5305 doubao volcengine \u65B9\u821F ark \u5B57\u8282",
+		  "xai-grok-codex": "grok",
+		  "xiaomi-mimo-claude": "\u5C0F\u7C73",
+		  "xiaomi-mimo-codex": "\u5C0F\u7C73",
+		  "xiaomi-mimo-token-plan-china-claude": "\u5C0F\u7C73",
+		  "xiaomi-mimo-token-plan-china-codex": "\u5C0F\u7C73",
+		  "zhipu-glm-claude": "\u667A\u8C31 glm bigmodel z.ai chatglm",
+		  "zhipu-glm-codex": "\u667A\u8C31 glm bigmodel z.ai chatglm",
+		  "zhipu-glm-en-claude": "\u667A\u8C31 glm bigmodel z.ai chatglm",
+		  "zhipu-glm-en-codex": "\u667A\u8C31 glm bigmodel z.ai chatglm"
+		});
 		var CCS_PROVIDER_CATEGORIES = Object.freeze([
 		  "official",
 		  "cn_official",
@@ -4050,6 +4121,27 @@ window.__ModuleLoader__.load({
 		function groupPresetsByCategory(presets) {
 		  const list = Array.isArray(presets) ? presets : [];
 		  return PRESET_GROUP_ORDER.map((group) => ({ group, presets: list.filter((preset) => presetGroup(preset) === group) })).filter((section) => section.presets.length > 0);
+		}
+		function presetHost(preset) {
+		  const url = preset?.baseURL;
+		  if (typeof url !== "string" || url === "") return "";
+		  try {
+		    return new URL(url).hostname.replace(/^www\./, "");
+		  } catch {
+		    return "";
+		  }
+		}
+		var DOMAIN_PREFIXES = /^(www|api|platform|open|console|cloud|dashboard|app)\./;
+		var DOMAIN_SUFFIXES = /(\.(com|cn|ai|io|net|org|dev|app|top|xyz|cc|co|me|tech|site|pro|vip|us|hk|jp))+$/;
+		function domainBody(host) {
+		  return String(host ?? "").replace(DOMAIN_PREFIXES, "").replace(DOMAIN_SUFFIXES, "");
+		}
+		function presetMatches(preset, query) {
+		  const needle = String(query ?? "").trim().toLowerCase();
+		  if (needle === "") return true;
+		  const host = presetHost(preset).toLowerCase();
+		  const haystack = [preset?.displayName, PRESET_SEARCH_ALIASES[preset?.key], domainBody(host)].filter((value) => typeof value === "string" && value !== "").join(" ").toLowerCase();
+		  return needle.split(/\s+/).every((term) => term.length > 0 && (haystack.includes(term) || term.includes(".") && host.includes(term)));
 		}
 
 		// src/ui/ProviderEditModal.mjs
@@ -4663,6 +4755,7 @@ window.__ModuleLoader__.load({
 		    () => controller.clearSaveFeedback?.()
 		  );
 		  const [presetKey, setPresetKey] = (0, import_react5.useState)("");
+		  const [presetQuery, setPresetQuery] = (0, import_react5.useState)("");
 		  const [query, setQuery] = (0, import_react5.useState)("");
 		  const [rowError, setRowError] = (0, import_react5.useState)(null);
 		  const loadedPresets = (0, import_react5.useRef)(false);
@@ -4679,6 +4772,7 @@ window.__ModuleLoader__.load({
 		  const providers = snapshot.providers ?? {};
 		  const order = Array.isArray(snapshot.order) ? snapshot.order : [];
 		  const presets = Array.isArray(snapshot.presets) ? snapshot.presets : [];
+		  const matchingPresets = presets.filter((preset) => presetMatches(preset, presetQuery));
 		  const busy = snapshot.status === "busy" || snapshot.status === "loading";
 		  const activation = snapshot.activation;
 		  const runRowAction = async (key, action, kind) => {
@@ -4741,6 +4835,18 @@ window.__ModuleLoader__.load({
 		          "label",
 		          { className: "dsh-ccswitch-manager__preset" },
 		          h5("span", { className: "dsh-ccswitch-manager__preset-label" }, tr("manager.presetLabel", "\u9884\u8BBE")),
+		          // The catalogue is large enough that a name-only scan does not find
+		          // what the user is looking for: the alias table behind
+		          // `presetMatches` is what lets 小米 find Xiaomi MiMo and 月之暗面
+		          // find Kimi, neither of which the display name contains.
+		          h5("input", {
+		            type: "text",
+		            className: "dsh-ccswitch-form__input dsh-ccswitch-manager__preset-filter",
+		            value: presetQuery,
+		            placeholder: tr("manager.presetFilter", "\u7B5B\u9009\u9884\u8BBE\uFF08\u5382\u5546 / \u522B\u540D / \u57DF\u540D\uFF09\u2026"),
+		            "aria-label": tr("manager.presetFilterAria", "\u7B5B\u9009\u9884\u8BBE"),
+		            onChange: (event) => setPresetQuery(event.target.value)
+		          }),
 		          h5(
 		            "select",
 		            {
@@ -4749,7 +4855,11 @@ window.__ModuleLoader__.load({
 		              onChange: (event) => applyPreset(event.target.value)
 		            },
 		            h5("option", { value: "" }, tr("manager.presetNone", "\u81EA\u5B9A\u4E49\uFF08\u7A7A\u767D\uFF09")),
-		            ...groupPresetsByCategory(presets).map((section) => h5(
+		            ...matchingPresets.length === 0 ? [h5(
+		              "option",
+		              { key: "__none__", value: "__none__", disabled: true },
+		              tr("manager.presetNoMatch", "\u6CA1\u6709\u5339\u914D\u7684\u9884\u8BBE\u3002")
+		            )] : groupPresetsByCategory(matchingPresets).map((section) => h5(
 		              "optgroup",
 		              {
 		                key: section.group,
@@ -5120,6 +5230,9 @@ window.__ModuleLoader__.load({
 		  ".dsh-ccswitch-manager__preset{display:flex;align-items:center;gap:6px;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;}",
 		  ".dsh-ccswitch-manager__preset-select{box-sizing:border-box;min-height:28px;padding:0 8px;border:1px solid var(--dsw-alias-border-l2);border-radius:7px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-family:inherit;font-size:12px;line-height:18px;}",
 		  ".dsh-ccswitch-manager__preset-select:focus-visible{outline:2px solid var(--dsw-alias-border-l3);outline-offset:1px;}",
+		  // `width:auto` overrides the form input class's `width:100%`, which in a
+		  // flex row would push the select and the buttons onto another line.
+		  ".dsh-ccswitch-manager__preset-filter{flex:1 1 auto;width:auto;min-width:120px;max-width:220px;}",
 		  ".dsh-ccswitch-manager__preset-label{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;white-space:nowrap;}",
 		  ".dsh-ccswitch-manager__note{margin:0;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;overflow-wrap:anywhere;}",
 		  ".dsh-ccswitch-manager__empty{margin:0;color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:20px;}",

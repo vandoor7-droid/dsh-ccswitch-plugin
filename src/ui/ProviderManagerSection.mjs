@@ -16,7 +16,7 @@
 import React, { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { makeTranslator, messagesFor } from "../client/i18n.mjs";
 import { DEFAULT_LOCALE } from "../client/messages.mjs";
-import { groupPresetsByCategory, presetVersionKeys } from "../domain/presets.mjs";
+import { groupPresetsByCategory, presetMatches, presetVersionKeys } from "../domain/presets.mjs";
 import { moveInOrder } from "../client/manager-controller.mjs";
 import { draftFromPreset, draftFromProvider, emptyDraft, ProviderEditModal } from "./ProviderEditModal.mjs";
 
@@ -266,6 +266,7 @@ export function ProviderManagerSection({ controller, t }) {
     () => controller.clearSaveFeedback?.(),
   );
   const [presetKey, setPresetKey] = useState("");
+  const [presetQuery, setPresetQuery] = useState("");
   // The search term lives here rather than in the controller: it filters what
   // this tab draws and has no bearing on the settings document.
   const [query, setQuery] = useState("");
@@ -290,6 +291,11 @@ export function ProviderManagerSection({ controller, t }) {
   const providers = snapshot.providers ?? {};
   const order = Array.isArray(snapshot.order) ? snapshot.order : [];
   const presets = Array.isArray(snapshot.presets) ? snapshot.presets : [];
+  // Narrowed for the picker only. An empty result is deliberately not the
+  // same state as "the Host sent no presets": that one hides the whole
+  // control, while this one has to say so inside the select, or the user
+  // sees a dropdown holding nothing but the blank entry and no reason why.
+  const matchingPresets = presets.filter((preset) => presetMatches(preset, presetQuery));
   const busy = snapshot.status === "busy" || snapshot.status === "loading";
   const activation = snapshot.activation;
 
@@ -386,6 +392,18 @@ export function ProviderManagerSection({ controller, t }) {
         presets.length > 0
           ? h("label", { className: "dsh-ccswitch-manager__preset" },
             h("span", { className: "dsh-ccswitch-manager__preset-label" }, tr("manager.presetLabel", "预设")),
+            // The catalogue is large enough that a name-only scan does not find
+            // what the user is looking for: the alias table behind
+            // `presetMatches` is what lets 小米 find Xiaomi MiMo and 月之暗面
+            // find Kimi, neither of which the display name contains.
+            h("input", {
+              type: "text",
+              className: "dsh-ccswitch-form__input dsh-ccswitch-manager__preset-filter",
+              value: presetQuery,
+              placeholder: tr("manager.presetFilter", "筛选预设（厂商 / 别名 / 域名）…"),
+              "aria-label": tr("manager.presetFilterAria", "筛选预设"),
+              onChange: (event) => setPresetQuery(event.target.value),
+            }),
             h("select", {
               className: "dsh-ccswitch-manager__preset-select",
               value: presetKey,
@@ -393,16 +411,22 @@ export function ProviderManagerSection({ controller, t }) {
             },
               h("option", { value: "" }, tr("manager.presetNone", "自定义（空白）")),
               // Grouped the way CC Switch's "add provider" list is sectioned.
-              // A `<select>` cannot show the section names any other way, and
-              // with 25-odd entries an ungrouped list is a wall.
-              ...groupPresetsByCategory(presets).map((section) => h("optgroup", {
-                key: section.group,
-                // `optgroup` takes a `label` attribute, not children.
-                label: tr(`manager.group.${section.group}`, FALLBACK[`manager.group.${section.group}`]),
-              },
-                ...section.presets.map((preset) => h("option", { key: preset.key, value: preset.key },
-                  presetOptionLabel(preset, tr))),
-              )),
+              // A `<select>` cannot show the section names any other way.
+              //
+              // No match gets its own disabled option rather than an empty
+              // select: a dropdown holding only "自定义（空白）" reads as a
+              // broken filter, not as "nothing matched".
+              ...(matchingPresets.length === 0
+                ? [h("option", { key: "__none__", value: "__none__", disabled: true },
+                  tr("manager.presetNoMatch", "没有匹配的预设。"))]
+                : groupPresetsByCategory(matchingPresets).map((section) => h("optgroup", {
+                  key: section.group,
+                  // `optgroup` takes a `label` attribute, not children.
+                  label: tr(`manager.group.${section.group}`, FALLBACK[`manager.group.${section.group}`]),
+                },
+                  ...section.presets.map((preset) => h("option", { key: preset.key, value: preset.key },
+                    presetOptionLabel(preset, tr))),
+                ))),
             ),
           )
           : null,

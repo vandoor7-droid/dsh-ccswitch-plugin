@@ -136,6 +136,9 @@ export const MESSAGES = {
     "manager.searchPlaceholder": "按名称/备注/请求地址搜索供应商…",
     "manager.searchAriaLabel": "搜索供应商",
     "manager.searchClear": "清除",
+    "manager.presetFilter": "筛选预设（厂商 / 别名 / 域名）…",
+    "manager.presetFilterAria": "筛选预设",
+    "manager.presetNoMatch": "没有匹配的预设。",
     "manager.noSearchResults": "没有符合搜索条件的供应商。",
     // The five sections CC Switch's "add provider" list is grouped into
     // (`presetGroups.ts`, `PRESET_GROUP_ORDER`), and the two dimensions its
@@ -357,6 +360,9 @@ export const MESSAGES = {
     "manager.searchPlaceholder": "Search name, notes, or API address…",
     "manager.searchAriaLabel": "Search providers",
     "manager.searchClear": "Clear",
+    "manager.presetFilter": "Filter presets (vendor, alias, domain)…",
+    "manager.presetFilterAria": "Filter presets",
+    "manager.presetNoMatch": "No presets match.",
     "manager.noSearchResults": "No providers match your search.",
     "manager.group.login": "Account sign-in",
     "manager.group.vendor": "Model vendors",

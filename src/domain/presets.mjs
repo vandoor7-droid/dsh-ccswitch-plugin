@@ -1763,6 +1763,87 @@ export const PROVIDER_PRESETS = Object.freeze([
 ])
 
 /**
+ * Search aliases, transcribed from CC Switch's `presetSearchAliases.ts`.
+ *
+ * Keyed by preset key and never displayed: they exist so a search for a
+ * vendor's common Chinese or corporate name — 小米 for Xiaomi MiMo, 月之暗面
+ * for Kimi, 深度求索 for DeepSeek — finds its entry. The catalogue this port
+ * inherited was small enough that their absence went unnoticed; at this size
+ * a search that only knows display names is what decides whether the picker
+ * is usable at all.
+ *
+ * Re-keyed from CC Switch, which keys the table by preset *name*. This
+ * catalogue suffixes every Codex-side entry with " (Codex)" so one flat list
+ * cannot show the same name twice, so a name-keyed lookup would have missed
+ * the entire Codex half.
+ */
+export const PRESET_SEARCH_ALIASES = Object.freeze({
+  "baidu-qianfan-coding-plan-claude": "百度 千帆 文心",
+  "baidu-qianfan-coding-plan-codex": "百度 千帆 文心",
+  "baidu-qianfan-token-plan-claude": "百度 千帆 文心",
+  "baidu-qianfan-token-plan-codex": "百度 千帆 文心",
+  "bailing-claude": "蚂蚁 百灵 ling",
+  "bailing-codex": "蚂蚁 百灵 ling",
+  "deepseek-claude": "深度求索",
+  "deepseek-codex": "深度求索",
+  "gemini-native-claude": "google 谷歌",
+  "kimi-claude": "月之暗面 moonshot",
+  "kimi-codex": "月之暗面 moonshot",
+  "kimi-for-coding-claude": "月之暗面 moonshot",
+  "kimi-for-coding-codex": "月之暗面 moonshot",
+  "kimi-for-coding-global-claude": "月之暗面 moonshot",
+  "kimi-for-coding-global-codex": "月之暗面 moonshot",
+  "kimi-global-claude": "月之暗面 moonshot",
+  "kimi-global-codex": "月之暗面 moonshot",
+  "longcat-claude": "美团",
+  "longcat-codex": "美团",
+  "minimax-claude": "海螺",
+  "minimax-codex": "海螺",
+  "minimax-en-claude": "海螺",
+  "minimax-en-codex": "海螺",
+  "modelscope-claude": "魔搭",
+  "modelscope-codex": "魔搭",
+  "qwen-ai-claude": "千问 通义 阿里 百炼 bailian aliyun qwen",
+  "qwen-ai-codex": "千问 通义 阿里 百炼 bailian aliyun qwen",
+  "qwen-ai-token-plan-claude": "千问 通义 阿里 百炼 bailian aliyun qwen",
+  "qwen-ai-token-plan-codex": "千问 通义 阿里 百炼 bailian aliyun qwen",
+  "qwencloud-claude": "通义 阿里 qwen",
+  "qwencloud-codex": "通义 阿里 qwen",
+  "qwencloud-for-coding-claude": "通义 阿里 qwen",
+  "qwencloud-for-coding-codex": "通义 阿里 qwen",
+  "qwencloud-token-plan-claude": "通义 阿里 qwen",
+  "qwencloud-token-plan-codex": "通义 阿里 qwen",
+  "siliconflow-claude": "硅基流动",
+  "siliconflow-codex": "硅基流动",
+  "siliconflow-en-claude": "硅基流动",
+  "siliconflow-en-codex": "硅基流动",
+  "stepfun-claude": "阶跃星辰",
+  "stepfun-codex": "阶跃星辰",
+  "stepfun-en-claude": "阶跃星辰",
+  "stepfun-en-codex": "阶跃星辰",
+  "tencent-token-plan-claude": "腾讯 混元 hunyuan",
+  "tencent-token-plan-codex": "腾讯 混元 hunyuan",
+  "tencent-token-plan-enterprise-pro-claude": "腾讯 混元 hunyuan",
+  "tencent-token-plan-enterprise-pro-codex": "腾讯 混元 hunyuan",
+  "tencent-token-plan-intl-claude": "腾讯 混元 hunyuan",
+  "tencent-token-plan-intl-codex": "腾讯 混元 hunyuan",
+  "tu-zi-codex": "兔子 兔子api tuzi",
+  "volcengine-agent-plan-claude": "火山 豆包 doubao volcengine 方舟 ark 字节",
+  "volcengine-agent-plan-codex": "火山 豆包 doubao volcengine 方舟 ark 字节",
+  "volcengine-coding-plan-claude": "火山 豆包 doubao volcengine 方舟 ark 字节",
+  "volcengine-coding-plan-codex": "火山 豆包 doubao volcengine 方舟 ark 字节",
+  "xai-grok-codex": "grok",
+  "xiaomi-mimo-claude": "小米",
+  "xiaomi-mimo-codex": "小米",
+  "xiaomi-mimo-token-plan-china-claude": "小米",
+  "xiaomi-mimo-token-plan-china-codex": "小米",
+  "zhipu-glm-claude": "智谱 glm bigmodel z.ai chatglm",
+  "zhipu-glm-codex": "智谱 glm bigmodel z.ai chatglm",
+  "zhipu-glm-en-claude": "智谱 glm bigmodel z.ai chatglm",
+  "zhipu-glm-en-codex": "智谱 glm bigmodel z.ai chatglm",
+});
+
+/**
  * The eight categories CC Switch's frontend constrains `category` to.
  *
  * The Rust side types it as a free-form `Option<String>`, so this list is not a
@@ -1898,3 +1979,60 @@ export function providerFromPreset(preset) {
     ...(preset.iconColor === undefined ? {} : { iconColor: preset.iconColor }),
   }
 }
+/**
+ * The host of a preset's endpoint, minus a leading `www.`.
+ *
+ * Mirrors CC Switch's `presetDomain`. That reads the preset's `websiteUrl`;
+ * this catalogue carries no website field, so the endpoint the provider will
+ * actually dial is used instead — the same host for every entry that has one,
+ * and the one a user is likelier to remember.
+ */
+export function presetHost(preset) {
+  const url = preset?.baseURL;
+  if (typeof url !== "string" || url === "") return "";
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+}
+
+const DOMAIN_PREFIXES = /^(www|api|platform|open|console|cloud|dashboard|app)\./;
+const DOMAIN_SUFFIXES =
+  /(\.(com|cn|ai|io|net|org|dev|app|top|xyz|cc|co|me|tech|site|pro|vip|us|hk|jp))+$/;
+
+/**
+ * A host's body, with the common prefixes and suffixes stripped.
+ *
+ * Transcribed from CC Switch's `domainBody`. Without it a search for "com" or
+ * "api" matches nearly every entry, which is why the host is matched by its
+ * body, and only a term that itself contains a dot may match the full host.
+ */
+export function domainBody(host) {
+  return String(host ?? "").replace(DOMAIN_PREFIXES, "").replace(DOMAIN_SUFFIXES, "");
+}
+
+/**
+ * Whether a preset matches what the user typed.
+ *
+ * Every whitespace-separated term has to appear somewhere — "zhipu intl" is a
+ * narrowing query, not a widening one — and a term containing a dot may match
+ * the full host as well as the body.
+ *
+ * The alias table is what makes this usable at all: someone looking for
+ * 月之暗面 or 智谱 will not find "Kimi" or "Zhipu GLM" by name.
+ */
+export function presetMatches(preset, query) {
+  const needle = String(query ?? "").trim().toLowerCase();
+  if (needle === "") return true;
+  const host = presetHost(preset).toLowerCase();
+  const haystack = [preset?.displayName, PRESET_SEARCH_ALIASES[preset?.key], domainBody(host)]
+    .filter((value) => typeof value === "string" && value !== "")
+    .join(" ")
+    .toLowerCase();
+  return needle
+    .split(/\s+/)
+    .every((term) => term.length > 0
+      && (haystack.includes(term) || (term.includes(".") && host.includes(term))));
+}
+

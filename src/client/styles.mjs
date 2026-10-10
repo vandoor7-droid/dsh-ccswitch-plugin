@@ -19,6 +19,9 @@ const MANAGER_CSS = [
   ".dsh-ccswitch-manager__preset{display:flex;align-items:center;gap:6px;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;}",
   ".dsh-ccswitch-manager__preset-select{box-sizing:border-box;min-height:28px;padding:0 8px;border:1px solid var(--dsw-alias-border-l2);border-radius:7px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-family:inherit;font-size:12px;line-height:18px;}",
   ".dsh-ccswitch-manager__preset-select:focus-visible{outline:2px solid var(--dsw-alias-border-l3);outline-offset:1px;}",
+  // `width:auto` overrides the form input class's `width:100%`, which in a
+  // flex row would push the select and the buttons onto another line.
+  ".dsh-ccswitch-manager__preset-filter{flex:1 1 auto;width:auto;min-width:120px;max-width:220px;}",
   ".dsh-ccswitch-manager__preset-label{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;white-space:nowrap;}",
   ".dsh-ccswitch-manager__note{margin:0;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;overflow-wrap:anywhere;}",
   ".dsh-ccswitch-manager__empty{margin:0;color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:20px;}",
