@@ -26,15 +26,6 @@ const APPLY_PATH = `${PROVIDERS_PATH}/apply`
 const WITHDRAW_PATH = `${PROVIDERS_PATH}/withdraw`
 const REORDER_PATH = `${PROVIDERS_PATH}/reorder`
 const PRESETS_PATH = `${MANAGER_API_BASE}/presets`
-/**
- * The importer's read-only probe, reused rather than duplicated.
- *
- * It is addressed by `profileId` and re-scans CC Switch's database, so it can
- * only answer for a provider that came through an import — see `probeOne`.
- * Pointing at the same route keeps one definition of "can this endpoint
- * answer?", which is the property that matters more than where it lives.
- */
-const PROBE_PATH = '/api/dsh-ccswitch/probe'
 
 /**
  * The protocols `dsh-llm-pi-ai` can serve, used only when the Host sends none.
@@ -242,62 +233,6 @@ export function sanitizePresets(value) {
 }
 
 /**
- * The probe route only knows CC Switch's database, so it is addressed by the
- * `profileId` a scan produced — not by the provider key this tab uses.
- *
- * These four helpers mirror `import-controller.mjs` deliberately rather than
- * sharing a module: that controller's copies are module-private, and the two
- * tabs sit on the same route contract from opposite sides. If the Host's probe
- * payload changes, both have to be revisited, which is why the pair is called
- * out here rather than quietly duplicated.
- */
-const PROBE_REASONS = new Set(['ok', 'empty', 'http-error', 'timeout', 'network', 'no-credentials'])
-const PROBE_CHECKS = new Set(['models', 'minimal', 'none'])
-
-/** A 401/404 out of the probe *route* means the Host half is older than the UI. */
-function isStaleHost(message) {
-  return /HTTP\s*40[14]\b/.test(message) || /unauthorized/i.test(message)
-}
-
-/** Counts and durations are clamped, not trusted: the Host could be anything. */
-function probeNumber(value) {
-  return Number.isInteger(value) && value >= 0 ? Math.min(value, 600000) : 0
-}
-
-/** Trust only the probe fields we render; anything odd degrades to a failure. */
-export function sanitizeProbe(result) {
-  return {
-    ok: result?.ok === true,
-    reason: PROBE_REASONS.has(result?.reason) ? result.reason : 'network',
-    check: PROBE_CHECKS.has(result?.check) ? result.check : 'none',
-    httpStatus: Number.isInteger(result?.httpStatus) && result.httpStatus > 0 && result.httpStatus < 1000
-      ? result.httpStatus
-      : undefined,
-    detail: typeof result?.detail === 'string' ? result.detail.slice(0, 200) : undefined,
-    latencyMs: probeNumber(result?.latencyMs),
-    modelCount: probeNumber(result?.modelCount),
-    message: typeof result?.message === 'string' ? result.message.slice(0, 300) : '',
-  }
-}
-
-/** Drop probe verdicts for providers that are no longer in the catalogue. */
-export function pruneProbes(probes, providers) {
-  const next = {}
-  for (const [key, value] of Object.entries(probes ?? {})) {
-    if (Object.hasOwn(providers ?? {}, key)) next[key] = value
-  }
-  return next
-}
-
-/** The same map with one key removed; returns the input when it was absent. */
-function withoutProbe(probes, key) {
-  if (!Object.hasOwn(probes ?? {}, key)) return probes ?? {}
-  const next = { ...probes }
-  delete next[key]
-  return next
-}
-
-/**
  * The warnings an apply or withdraw returned.
  *
  * These explain the cases where the catalogue and DSH's route table disagree —
@@ -343,13 +278,6 @@ export function createCCSwitchManagerController({ fetchImpl = defaultFetch, onCh
      * everything else already shows on the row itself.
      */
     notice: undefined,
-    /**
-     * Per-row connection verdicts, keyed by provider key — the manager's
-     * equivalent of the import tab's `probes`. Each value is
-     * `{phase: 'testing'}`, `{phase: 'done', ...outcome}` or
-     * `{phase: 'error', message, staleHost}`.
-     */
-    probes: {},
   }
   const listeners = new Set()
   const publish = (next) => {
@@ -413,10 +341,6 @@ export function createCCSwitchManagerController({ fetchImpl = defaultFetch, onCh
         revision: Number.isInteger(body?.revision) ? body.revision : undefined,
         providers,
         order: sanitizeOrder(body?.order, providers),
-        // Verdicts are dropped along with the rows they describe: a provider
-        // deleted in another tab must not leave a green "connected" badge
-        // behind for a row that is about to be re-created with the same key.
-        probes: pruneProbes(snapshot.probes, providers),
         apiProtocols: sanitizeProtocols(body?.apiProtocols),
         appTypes: sanitizeAppTypes(body?.appTypes),
       })
@@ -679,68 +603,6 @@ export function createCCSwitchManagerController({ fetchImpl = defaultFetch, onCh
     }),
     dismissNotice: () => {
       publish({ ...snapshot, notice: undefined })
-    },
-    /**
-     * Test one row's endpoint without changing anything.
-     *
-     * The probe route reads CC Switch's database and is addressed by the
-     * `profileId` a scan produced, so only a provider that came through an
-     * import can be probed: `sourceProfileId` is that id, written by the
-     * importer. A provider added by hand or from a preset has no such row, and
-     * inventing an id would silently probe whatever provider happened to share
-     * it — so the absence is reported rather than guessed at.
-     *
-     * Resolves `undefined` for a row that cannot be probed or a second click
-     * while one is in flight, matching the importer's `probeOne`: the caller is
-     * an event handler with nothing useful to do about either.
-     */
-    probeOne: async (key) => {
-      const target = optionalText(key)
-      if (target === undefined) return undefined
-      const provider = snapshot.providers?.[target]
-      if (provider === undefined) return undefined
-      if (snapshot.probes?.[target]?.phase === 'testing') return undefined
-      const profileId = optionalText(provider.sourceProfileId)
-      if (profileId === undefined) {
-        publish({
-          ...snapshot,
-          probes: { ...snapshot.probes, [target]: { phase: 'error', message: '', unprobeable: true } },
-        })
-        return undefined
-      }
-      const setProbe = (value) => {
-        publish({ ...snapshot, probes: { ...snapshot.probes, [target]: value } })
-      }
-      setProbe({ phase: 'testing' })
-      try {
-        const body = await request(PROBE_PATH, {
-          method: 'POST',
-          headers: writeHeaders(),
-          body: JSON.stringify({ profileIds: [profileId] }),
-        })
-        const results = Array.isArray(body.results) ? body.results : []
-        const result = results.find((item) => item.profileId === profileId) ?? results[0]
-        // No result at all means the route answered but had nothing for this
-        // id: the CC Switch row is gone, or it is one the scan blocks. That is
-        // a failure to *reach* the probe, not a failed probe, so it is not
-        // dressed up as a connection verdict.
-        if (result === undefined) {
-          setProbe({ phase: 'error', message: '', staleHost: false })
-          return undefined
-        }
-        setProbe({ phase: 'done', ...sanitizeProbe(result) })
-        return result
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        setProbe({ phase: 'error', message, staleHost: isStaleHost(message) })
-        return undefined
-      }
-    },
-    /** Drop one row's verdict, so a stale result cannot outlive its cause. */
-    clearProbe: (key) => {
-      const target = optionalText(key)
-      if (target === undefined) return
-      publish({ ...snapshot, probes: withoutProbe(snapshot.probes, target) })
     },
     /**
      * Drop the previous attempt's failure before a new one begins.

@@ -31606,7 +31606,6 @@ window.__ModuleLoader__.load({
 		var WITHDRAW_PATH = `${PROVIDERS_PATH}/withdraw`;
 		var REORDER_PATH = `${PROVIDERS_PATH}/reorder`;
 		var PRESETS_PATH = `${MANAGER_API_BASE}/presets`;
-		var PROBE_PATH = "/api/dsh-ccswitch/probe";
 		var FALLBACK_PROTOCOLS = ["openai-completions", "openai-responses", "anthropic-messages"];
 		var FALLBACK_APP_TYPES = [
 		  "codex",
@@ -31728,39 +31727,6 @@ window.__ModuleLoader__.load({
 		    iconColor: optionalText(preset.iconColor)
 		  })).filter((preset) => preset.key !== "" && preset.displayName !== "");
 		}
-		var PROBE_REASONS2 = /* @__PURE__ */ new Set(["ok", "empty", "http-error", "timeout", "network", "no-credentials"]);
-		var PROBE_CHECKS2 = /* @__PURE__ */ new Set(["models", "minimal", "none"]);
-		function isStaleHost2(message) {
-		  return /HTTP\s*40[14]\b/.test(message) || /unauthorized/i.test(message);
-		}
-		function probeNumber2(value) {
-		  return Number.isInteger(value) && value >= 0 ? Math.min(value, 6e5) : 0;
-		}
-		function sanitizeProbe2(result) {
-		  return {
-		    ok: result?.ok === true,
-		    reason: PROBE_REASONS2.has(result?.reason) ? result.reason : "network",
-		    check: PROBE_CHECKS2.has(result?.check) ? result.check : "none",
-		    httpStatus: Number.isInteger(result?.httpStatus) && result.httpStatus > 0 && result.httpStatus < 1e3 ? result.httpStatus : void 0,
-		    detail: typeof result?.detail === "string" ? result.detail.slice(0, 200) : void 0,
-		    latencyMs: probeNumber2(result?.latencyMs),
-		    modelCount: probeNumber2(result?.modelCount),
-		    message: typeof result?.message === "string" ? result.message.slice(0, 300) : ""
-		  };
-		}
-		function pruneProbes2(probes, providers) {
-		  const next = {};
-		  for (const [key, value] of Object.entries(probes ?? {})) {
-		    if (Object.hasOwn(providers ?? {}, key)) next[key] = value;
-		  }
-		  return next;
-		}
-		function withoutProbe(probes, key) {
-		  if (!Object.hasOwn(probes ?? {}, key)) return probes ?? {};
-		  const next = { ...probes };
-		  delete next[key];
-		  return next;
-		}
 		function sanitizeWarnings(value) {
 		  return (Array.isArray(value) ? value : []).filter((entry) => typeof entry === "string" && entry.trim() !== "").slice(0, 20);
 		}
@@ -31789,14 +31755,7 @@ window.__ModuleLoader__.load({
 		     * dismissed. Only the "DSH did not take the route" half is worth a banner:
 		     * everything else already shows on the row itself.
 		     */
-		    notice: void 0,
-		    /**
-		     * Per-row connection verdicts, keyed by provider key — the manager's
-		     * equivalent of the import tab's `probes`. Each value is
-		     * `{phase: 'testing'}`, `{phase: 'done', ...outcome}` or
-		     * `{phase: 'error', message, staleHost}`.
-		     */
-		    probes: {}
+		    notice: void 0
 		  };
 		  const listeners = /* @__PURE__ */ new Set();
 		  const publish = (next) => {
@@ -31848,10 +31807,6 @@ window.__ModuleLoader__.load({
 		        revision: Number.isInteger(body?.revision) ? body.revision : void 0,
 		        providers,
 		        order: sanitizeOrder(body?.order, providers),
-		        // Verdicts are dropped along with the rows they describe: a provider
-		        // deleted in another tab must not leave a green "connected" badge
-		        // behind for a row that is about to be re-created with the same key.
-		        probes: pruneProbes2(snapshot.probes, providers),
 		        apiProtocols: sanitizeProtocols(body?.apiProtocols),
 		        appTypes: sanitizeAppTypes(body?.appTypes)
 		      });
@@ -32079,64 +32034,6 @@ window.__ModuleLoader__.load({
 		    }),
 		    dismissNotice: () => {
 		      publish({ ...snapshot, notice: void 0 });
-		    },
-		    /**
-		     * Test one row's endpoint without changing anything.
-		     *
-		     * The probe route reads CC Switch's database and is addressed by the
-		     * `profileId` a scan produced, so only a provider that came through an
-		     * import can be probed: `sourceProfileId` is that id, written by the
-		     * importer. A provider added by hand or from a preset has no such row, and
-		     * inventing an id would silently probe whatever provider happened to share
-		     * it — so the absence is reported rather than guessed at.
-		     *
-		     * Resolves `undefined` for a row that cannot be probed or a second click
-		     * while one is in flight, matching the importer's `probeOne`: the caller is
-		     * an event handler with nothing useful to do about either.
-		     */
-		    probeOne: async (key) => {
-		      const target = optionalText(key);
-		      if (target === void 0) return void 0;
-		      const provider = snapshot.providers?.[target];
-		      if (provider === void 0) return void 0;
-		      if (snapshot.probes?.[target]?.phase === "testing") return void 0;
-		      const profileId = optionalText(provider.sourceProfileId);
-		      if (profileId === void 0) {
-		        publish({
-		          ...snapshot,
-		          probes: { ...snapshot.probes, [target]: { phase: "error", message: "", unprobeable: true } }
-		        });
-		        return void 0;
-		      }
-		      const setProbe = (value) => {
-		        publish({ ...snapshot, probes: { ...snapshot.probes, [target]: value } });
-		      };
-		      setProbe({ phase: "testing" });
-		      try {
-		        const body = await request(PROBE_PATH, {
-		          method: "POST",
-		          headers: writeHeaders(),
-		          body: JSON.stringify({ profileIds: [profileId] })
-		        });
-		        const results = Array.isArray(body.results) ? body.results : [];
-		        const result = results.find((item) => item.profileId === profileId) ?? results[0];
-		        if (result === void 0) {
-		          setProbe({ phase: "error", message: "", staleHost: false });
-		          return void 0;
-		        }
-		        setProbe({ phase: "done", ...sanitizeProbe2(result) });
-		        return result;
-		      } catch (error) {
-		        const message = error instanceof Error ? error.message : String(error);
-		        setProbe({ phase: "error", message, staleHost: isStaleHost2(message) });
-		        return void 0;
-		      }
-		    },
-		    /** Drop one row's verdict, so a stale result cannot outlive its cause. */
-		    clearProbe: (key) => {
-		      const target = optionalText(key);
-		      if (target === void 0) return;
-		      publish({ ...snapshot, probes: withoutProbe(snapshot.probes, target) });
 		    },
 		    /**
 		     * Drop the previous attempt's failure before a new one begins.
