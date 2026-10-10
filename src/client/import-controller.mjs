@@ -1,20 +1,10 @@
 // dsh-ccswitch-plugin — derivative of 2995288295/dsh-ccswitch-importer-plus
 // (Apache-2.0), which is itself a derivative of wtiaw/dsh-ccswitch-importer.
 // Reworked for DSH 0.2.0-rc.2. See NOTICE for the full attribution chain.
+import { writeHeaders } from './http.mjs';
+
 function defaultFetch(url, init) {
   return globalThis.fetch(url, init)
-}
-
-// The Host accepts this header in place of an `Origin` header, which a browser
-// is free to omit on a same-origin POST — exactly how "Test connection" turned
-// into `missing Origin`. A cross-site page cannot send it: a custom header
-// forces a CORS preflight that the Host never answers.
-const SAME_ORIGIN_HEADER = 'x-dsh-ccswitch-origin'
-const SAME_ORIGIN_VALUE = 'same-origin'
-
-/** Headers for every state-changing request; see SAME_ORIGIN_HEADER above. */
-function writeHeaders() {
-  return { 'content-type': 'application/json', [SAME_ORIGIN_HEADER]: SAME_ORIGIN_VALUE }
 }
 
 function importable(profile) {

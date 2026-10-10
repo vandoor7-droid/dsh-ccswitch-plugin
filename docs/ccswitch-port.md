@@ -192,6 +192,29 @@ v1 里下面三条曾经是本插件最"保真"的部分，随决策 #5 / #4 一
 `lib/core/claude-exclusive.js` 保留，但只剩一个用途：**导入时判断哪些 `env` 键属于这个
 provider**，从而收进 `exclusiveEnv` 保证往返不丢。它不再写入、也不再删除任何文件。
 
+## 前端基座（M0）
+
+cc-switch 的前端原样编译复用，靠的是四件事，都在 `scripts/build.mjs` 里：
+
+| 项 | 做法 |
+| --- | --- |
+| **TSX 管线** | `jsx: 'automatic'` + `jsxImportSource: 'react'`（对齐上游 `tsconfig.json` 的 `"jsx": "react-jsx"`）；`@` 别名指向 `src/ccswitch/`（对齐上游 `"@/*": ["src/*"]` 与 `vite.config.ts` 的 `alias`）；`.png/.jpg/.gif/.webp/.svg` 以 `dataurl` 载入，Vite 的 `?url` 后缀由一个小插件剥掉；`import.meta.env.DEV/PROD/MODE` 用 `define` 直接替换 |
+| **依赖版本** | 42 个上游运行时依赖按 `pnpm-lock.yaml` 的**精确版本**进 `devDependencies`（它们被打进 `dist/client.js`，所以是构建期输入而不是运行期依赖）。`@tauri-apps/*` 全部不装——IPC 层由 shim 顶替 |
+| **React 单实例** | `CLIENT_EXTERNALS` 必须含 `react/*`、`react-dom/*`（esbuild 的 `external` 只精确匹配裸名，不带子路径；漏了子路径就会内联第二份 React，症状是 Invalid hook call）。`assertSingleReact()` 用 esbuild metafile 在每次构建时断言没有任何 `node_modules/{react,react-dom,scheduler}` 被读进图里，不满足直接构建失败 |
+| **Tauri invoke → 插件路由** | esbuild `alias` 把 `@tauri-apps/api/core` 指到 `src/client/tauri-shim/core.mjs`，把 `@tauri-apps/api/event` 指到 `event.mjs`。复制过来的组件一行不用改 |
+
+`src/client/tauri-shim/commands.mjs` 是命令 → 路由表。**表里没有的命令一定抛错**
+（`UnmappedCommandError`，错误信息指回 `docs/ccswitch-command-map.md`），绝不静默 no-op；
+`event.mjs` 的 `listen/once/emit` 同理全部抛错——DSH 没有 Tauri 事件总线，对应物是还没做的
+`ctx.remote` 桥，返回一个永不触发的监听器会渲染出一个看起来像"后端没数据"的空态。
+
+`src/client/http.mjs` 把原来在 `import-controller.mjs` 与 `manager-controller.mjs` 里各抄一份的
+同源标记头收成一处，`test/client-host-contract.test.mjs` 断言它与 `src/host/routes.mjs` 的那份
+逐字相同（两份不能互相 import：host 侧会连到 `node:sqlite`）。
+
+**已知需要改写的上游特性**：`src/lib/whatsNew.ts` 的 `import.meta.glob` 是 Vite 的编译期能力，
+esbuild 没有对应物，复制过去之前先改（构建会响亮地失败，不会静默返回空 map）。
+
 ## 与 CC Switch 的偏离
 
 1. **不改写任何外部工具的配置文件。** 这是最大的一条，来自决策 #5。
@@ -225,6 +248,11 @@ provider**，从而收进 `exclusiveEnv` 保证往返不丢。它不再写入、
 | `src/host/routes.mjs` | 扫描 / 导入 / 探活的 HTTP 面 | `commands/*` 的扫描与导入 | 有效 |
 | `src/host/index.mjs` | 组合：命名空间、`applyProvider`、`withdrawProvider` | — | 有效 |
 | `src/ui/ProviderManagerSection.mjs` | 管理页 | CC Switch 的 provider 列表界面 | 有效（启用按钮已换成加入/移出） |
+| `src/client/http.mjs` | 浏览器侧传输助手（同源标记头、JSON 读取） | — | 有效 |
+| `src/client/tauri-shim/core.mjs` | `invoke` → 插件 HTTP 路由 | `@tauri-apps/api/core` | 有效（M0 交付） |
+| `src/client/tauri-shim/commands.mjs` | 命令 → 路由表 | `commands/*.rs` 的注册表 | 部分（未列出的命令抛错） |
+| `src/client/tauri-shim/event.mjs` | 事件总线占位，全部抛错 | `@tauri-apps/api/event` | 待 `ctx.remote` 桥 |
+| `src/ccswitch/` | 上游前端源码原样复制处 | `src/**` | 空，M1 起填充 |
 | `src/host/writers.js` | 投影进外部 live 文件 | `live/project/*`、`live/floor.rs` | **已删除（决策 #5）** |
 
 ## 验证

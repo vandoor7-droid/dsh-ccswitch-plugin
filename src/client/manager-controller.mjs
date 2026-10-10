@@ -1,6 +1,12 @@
 // dsh-ccswitch-plugin — derivative of 2995288295/dsh-ccswitch-importer-plus
 // (Apache-2.0), which is itself a derivative of wtiaw/dsh-ccswitch-importer.
 // Reworked for DSH 0.2.0-rc.2. See NOTICE for the full attribution chain.
+// The Host accepts the browser's own `x-dsh-ccswitch-origin` marker in place of
+// an `Origin` header, which a browser is free to omit on a same-origin POST.
+// The definition lives in `http.mjs` alongside the other browser-half transport
+// helpers, so the importer, the manager and the cc-switch IPC shim cannot drift
+// apart on it.
+import { writeHeaders } from './http.mjs';
 
 /**
  * Browser controller for the provider-manager tab.
@@ -29,13 +35,6 @@ const PRESETS_PATH = `${MANAGER_API_BASE}/presets`
  * answer?", which is the property that matters more than where it lives.
  */
 const PROBE_PATH = '/api/dsh-ccswitch/probe'
-
-// The Host accepts this header in place of an `Origin` header, which a browser
-// is free to omit on a same-origin POST. The two constants are duplicated from
-// `src/host/routes.mjs` rather than imported: that module reaches the scan core
-// and therefore `node:sqlite`, which cannot be bundled for the browser.
-const SAME_ORIGIN_HEADER = 'x-dsh-ccswitch-origin'
-const SAME_ORIGIN_VALUE = 'same-origin'
 
 /**
  * The protocols `dsh-llm-pi-ai` can serve, used only when the Host sends none.
@@ -68,11 +67,6 @@ const FALLBACK_APP_TYPES = [
 
 function defaultFetch(url, init) {
   return globalThis.fetch(url, init)
-}
-
-/** Headers for every state-changing request; see SAME_ORIGIN_HEADER above. */
-function writeHeaders() {
-  return { 'content-type': 'application/json', [SAME_ORIGIN_HEADER]: SAME_ORIGIN_VALUE }
 }
 
 function isRecord(value) {

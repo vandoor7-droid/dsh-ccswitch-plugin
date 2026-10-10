@@ -264,14 +264,16 @@ window.__ModuleLoader__.load({
 		  return controller;
 		}
 
-		// src/client/import-controller.mjs
-		function defaultFetch(url, init) {
-		  return globalThis.fetch(url, init);
-		}
+		// src/client/http.mjs
 		var SAME_ORIGIN_HEADER = "x-dsh-ccswitch-origin";
 		var SAME_ORIGIN_VALUE = "same-origin";
 		function writeHeaders() {
 		  return { "content-type": "application/json", [SAME_ORIGIN_HEADER]: SAME_ORIGIN_VALUE };
+		}
+
+		// src/client/import-controller.mjs
+		function defaultFetch(url, init) {
+		  return globalThis.fetch(url, init);
 		}
 		function importable(profile) {
 		  return profile.status !== "blocked" && profile.credential === "found";
@@ -468,8 +470,6 @@ window.__ModuleLoader__.load({
 		var REORDER_PATH = `${PROVIDERS_PATH}/reorder`;
 		var PRESETS_PATH = `${MANAGER_API_BASE}/presets`;
 		var PROBE_PATH = "/api/dsh-ccswitch/probe";
-		var SAME_ORIGIN_HEADER2 = "x-dsh-ccswitch-origin";
-		var SAME_ORIGIN_VALUE2 = "same-origin";
 		var FALLBACK_PROTOCOLS = ["openai-completions", "openai-responses", "anthropic-messages"];
 		var FALLBACK_APP_TYPES = [
 		  "codex",
@@ -485,9 +485,6 @@ window.__ModuleLoader__.load({
 		];
 		function defaultFetch2(url, init) {
 		  return globalThis.fetch(url, init);
-		}
-		function writeHeaders2() {
-		  return { "content-type": "application/json", [SAME_ORIGIN_HEADER2]: SAME_ORIGIN_VALUE2 };
 		}
 		function isRecord(value) {
 		  return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -769,7 +766,7 @@ window.__ModuleLoader__.load({
 		    try {
 		      const response = await request(path, {
 		        method: "POST",
-		        headers: writeHeaders2(),
+		        headers: writeHeaders(),
 		        body: JSON.stringify(body)
 		      });
 		      const extra = typeof patch === "function" ? patch(response) : void 0;
@@ -991,7 +988,7 @@ window.__ModuleLoader__.load({
 		      try {
 		        const body = await request(PROBE_PATH, {
 		          method: "POST",
-		          headers: writeHeaders2(),
+		          headers: writeHeaders(),
 		          body: JSON.stringify({ profileIds: [profileId] })
 		        });
 		        const results = Array.isArray(body.results) ? body.results : [];
