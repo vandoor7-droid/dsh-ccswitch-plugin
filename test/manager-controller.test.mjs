@@ -42,6 +42,7 @@ function hostProvider(overrides = {}) {
     credential: 'found',
     models: [{ id: 'deepseek-chat' }],
     isCurrent: false,
+    inUse: false,
     inFailoverQueue: false,
     ...overrides,
   }
@@ -53,7 +54,7 @@ function providersBody(overrides = {}) {
       exists: true,
       revision: 7,
       order: ['ccs-deepseek-ab12cd34'],
-      current: undefined,
+      notice: undefined,
       providers: { 'ccs-deepseek-ab12cd34': hostProvider() },
       apiProtocols: ['openai-completions', 'openai-responses', 'anthropic-messages'],
       ...overrides,
@@ -116,6 +117,9 @@ test('malformed provider payloads degrade instead of throwing', async () => {
   assert.deepEqual(real.models, [])
   // Anything other than an explicit `found` reads as missing.
   assert.equal(real.credential, 'missing')
+  // `inUse` is what the membership control binds to; a Host that omits it
+  // reads as not in the route table rather than as truthy.
+  assert.equal(real.inUse, false)
   assert.equal(snapshot.providers['ccs-partial-ab12cd34'].displayName, '')
 })
 
@@ -216,7 +220,7 @@ test('a 409 marks a conflict, re-reads the document, and does not wedge the snap
   assert.equal(snapshot.pendingAction, undefined)
 })
 
-test('refusing to delete the active provider is not reported as a conflict', async () => {
+test('refusing to delete a provider DSH still routes to is not a conflict', async () => {
   // Both answers are 409, but they mean opposite things: a conflict says the
   // document moved and a retry may succeed, while this says the provider is in
   // use and no retry ever will. Folding them together would show the "reload
@@ -225,15 +229,35 @@ test('refusing to delete the active provider is not reported as a conflict', asy
     [PROVIDERS]: providersBody(),
     [`${PROVIDERS}/delete`]: {
       status: 409,
-      body: { reason: 'active-provider', error: 'this provider is active; activate another one before deleting it' },
+      body: { reason: 'in-use', error: 'DSH still routes to this provider; withdraw it first' },
     },
   })
   const controller = createCCSwitchManagerController({ fetchImpl })
   await controller.refresh()
-  await assert.rejects(() => controller.remove('k'), /active/)
+  await assert.rejects(() => controller.remove('k'), (error) => {
+    assert.equal(error.status, 409)
+    assert.equal(error.conflict, false)
+    return /withdraw it first/.test(error.message)
+  })
   const snapshot = controller.getSnapshot()
   assert.equal(snapshot.conflict, false, 'a fact about the provider is not a stale document')
   assert.equal(snapshot.status, 'error')
+
+  // A plain 409 — no reason at all — is still the staleness signal, so the
+  // banner must invite the reload-and-retry it means.
+  const plain = stubFetch({
+    [PROVIDERS]: providersBody(),
+    [`${PROVIDERS}/delete`]: { status: 409, body: { error: 'the settings document changed' } },
+  })
+  const other = createCCSwitchManagerController({ fetchImpl: plain })
+  await other.refresh()
+  await assert.rejects(() => other.remove('k'), (error) => {
+    assert.equal(error.status, 409)
+    assert.equal(error.conflict, true)
+    return /changed/.test(error.message)
+  })
+  assert.equal(other.getSnapshot().conflict, true)
+  assert.equal(other.getSnapshot().status, 'conflict')
 })
 
 test('a rejected save surfaces the Host validation list and clears the busy state', async () => {
@@ -284,74 +308,114 @@ test('delete sends the key and removes the row on the re-read', async () => {
   assert.deepEqual(controller.getSnapshot().order, ['ccs-b-ab12cd34'])
 })
 
-test('remove and activate refuse an empty key without touching the network', async () => {
+test('remove publishes a notice only when the row was actually in use', async () => {
+  const quiet = stubFetch({
+    [PROVIDERS]: providersBody(),
+    [`${PROVIDERS}/delete`]: { body: { key: 'ccs-deepseek-ab12cd34', status: 'removed' } },
+  })
+  const controller = createCCSwitchManagerController({ fetchImpl: quiet })
+  await controller.refresh()
+  await controller.remove('ccs-deepseek-ab12cd34')
+  // An ordinary delete says nothing the badge did not already say, so no
+  // banner is published and nothing has to be dismissed.
+  assert.equal(controller.getSnapshot().notice, undefined)
+
+  const live = stubFetch({
+    [PROVIDERS]: providersBody(),
+    [`${PROVIDERS}/delete`]: { body: { key: 'ccs-deepseek-ab12cd34', status: 'removed', wasInUse: true } },
+  })
+  const other = createCCSwitchManagerController({ fetchImpl: live })
+  await other.refresh()
+  await other.remove('ccs-deepseek-ab12cd34')
+  const { notice } = other.getSnapshot()
+  // The name is captured before the re-read drops the row, so the banner can
+  // still say which provider went.
+  assert.equal(notice.action, 'delete')
+  assert.equal(notice.wasInUse, true)
+  assert.equal(notice.key, 'ccs-deepseek-ab12cd34')
+  assert.equal(notice.name, 'DeepSeek')
+})
+
+test('remove, apply and withdraw refuse an empty key without touching the network', async () => {
   const fetchImpl = stubFetch({ [PROVIDERS]: providersBody() })
   const controller = createCCSwitchManagerController({ fetchImpl })
   await controller.refresh()
   await assert.rejects(() => controller.remove(''), /requires a provider key/)
-  await assert.rejects(() => controller.activate('   '), /requires a provider key/)
+  await assert.rejects(() => controller.apply('   '), /requires a provider key/)
+  await assert.rejects(() => controller.withdraw('   '), /requires a provider key/)
   assert.equal(fetchImpl.calls.length, 1, 'only the initial refresh should have been sent')
 })
 
-test('activate surfaces the warnings the Host returned', async () => {
+test('apply surfaces the warnings the Host returned', async () => {
   const fetchImpl = stubFetch({
     [PROVIDERS]: providersBody(),
-    [`${PROVIDERS}/activate`]: {
+    [`${PROVIDERS}/apply`]: {
       body: {
         key: 'ccs-deepseek-ab12cd34',
-        status: 'activated',
-        applied: true,
+        status: 'applied',
         warnings: ['llm-pi-ai is not installed, so DSH has no route to use it', '  ', 42],
       },
     },
   })
   const controller = createCCSwitchManagerController({ fetchImpl })
   await controller.refresh()
-  await controller.activate('ccs-deepseek-ab12cd34')
-  const { activation } = controller.getSnapshot()
-  assert.equal(activation.key, 'ccs-deepseek-ab12cd34')
-  assert.equal(activation.applied, true)
+  await controller.apply('ccs-deepseek-ab12cd34')
+  const { notice } = controller.getSnapshot()
+  assert.equal(notice.key, 'ccs-deepseek-ab12cd34')
+  assert.equal(notice.name, 'DeepSeek')
+  assert.equal(notice.action, 'apply')
   // Blank and non-string entries are dropped, not rendered as "42".
-  assert.deepEqual(activation.warnings, ['llm-pi-ai is not installed, so DSH has no route to use it'])
+  assert.deepEqual(notice.warnings, ['llm-pi-ai is not installed, so DSH has no route to use it'])
 })
 
-test('an activation the Host did not apply is reported as not applied', async () => {
+test('withdraw reports whether the key was an orphan the catalogue never knew', async () => {
+  const orphan = stubFetch({
+    [PROVIDERS]: providersBody(),
+    [`${PROVIDERS}/withdraw`]: { body: { key: 'ghost', status: 'withdrawn', inCatalogue: false } },
+  })
+  const a = createCCSwitchManagerController({ fetchImpl: orphan })
+  await a.refresh()
+  await a.withdraw('ghost')
+  assert.equal(a.getSnapshot().notice.action, 'withdraw')
+  assert.equal(a.getSnapshot().notice.orphan, true)
+
+  const known = stubFetch({
+    [PROVIDERS]: providersBody(),
+    [`${PROVIDERS}/withdraw`]: { body: { key: 'ccs-deepseek-ab12cd34', status: 'withdrawn', inCatalogue: true } },
+  })
+  const b = createCCSwitchManagerController({ fetchImpl: known })
+  await b.refresh()
+  await b.withdraw('ccs-deepseek-ab12cd34')
+  assert.equal(b.getSnapshot().notice.action, 'withdraw')
+  assert.equal(b.getSnapshot().notice.orphan, false)
+})
+
+test('an apply response with no warnings still reports the membership change', async () => {
   const fetchImpl = stubFetch({
     [PROVIDERS]: providersBody(),
-    [`${PROVIDERS}/activate`]: {
-      body: { key: 'k', status: 'activated', applied: false, warnings: ['the provider is marked active but DSH did not accept it'] },
-    },
+    [`${PROVIDERS}/apply`]: { body: { key: 'k', status: 'applied' } },
   })
   const controller = createCCSwitchManagerController({ fetchImpl })
   await controller.refresh()
-  await controller.activate('k')
-  assert.equal(controller.getSnapshot().activation.applied, false)
+  await controller.apply('k')
+  const { notice } = controller.getSnapshot()
+  // A Host that omits `warnings` still succeeded; the banner is published
+  // with an empty list rather than not at all.
+  assert.equal(notice.action, 'apply')
+  assert.equal(notice.key, 'k')
+  assert.deepEqual(notice.warnings, [])
 })
 
-test('an activation response with no warnings still reports a successful activation', async () => {
+test('dismissNotice clears the report', async () => {
   const fetchImpl = stubFetch({
     [PROVIDERS]: providersBody(),
-    [`${PROVIDERS}/activate`]: { body: { key: 'k', status: 'activated' } },
+    [`${PROVIDERS}/apply`]: { body: { key: 'k', status: 'applied', warnings: ['w'] } },
   })
   const controller = createCCSwitchManagerController({ fetchImpl })
   await controller.refresh()
-  await controller.activate('k')
-  const { activation } = controller.getSnapshot()
-  // A Host that omits `applied` succeeded; only an explicit false means it did not.
-  assert.equal(activation.applied, true)
-  assert.deepEqual(activation.warnings, [])
-})
-
-test('dismissActivation clears the report', async () => {
-  const fetchImpl = stubFetch({
-    [PROVIDERS]: providersBody(),
-    [`${PROVIDERS}/activate`]: { body: { key: 'k', status: 'activated', applied: true, warnings: ['w'] } },
-  })
-  const controller = createCCSwitchManagerController({ fetchImpl })
-  await controller.refresh()
-  await controller.activate('k')
-  controller.dismissActivation()
-  assert.equal(controller.getSnapshot().activation, undefined)
+  await controller.apply('k')
+  controller.dismissNotice()
+  assert.equal(controller.getSnapshot().notice, undefined)
 })
 
 test('clearSaveFeedback drops the previous attempt’s errors without touching the table', async () => {
@@ -399,11 +463,11 @@ test('clearSaveFeedback does not republish a snapshot that is already clean', as
 test('clearSaveFeedback also clears a conflict', async () => {
   const fetchImpl = stubFetch({
     [PROVIDERS]: providersBody(),
-    [`${PROVIDERS}/activate`]: { status: 409, body: { error: 'the settings document changed' } },
+    [`${PROVIDERS}/apply`]: { status: 409, body: { error: 'the settings document changed' } },
   })
   const controller = createCCSwitchManagerController({ fetchImpl })
   await controller.refresh()
-  await controller.activate('k').catch(() => {})
+  await controller.apply('k').catch(() => {})
   assert.equal(controller.getSnapshot().conflict, true)
   controller.clearSaveFeedback()
   assert.equal(controller.getSnapshot().conflict, false)
@@ -850,6 +914,22 @@ test('a rejected reorder reports the failure and leaves the table usable', async
   assert.equal(snapshot.pendingAction, undefined)
 })
 
+// The fallback mirrors SUPPORTED_APP_TYPES in lib/core/scan.js, which cannot be
+// imported here (it reaches node:sqlite), so the test carries its own copy —
+// the point of pinning it is that an older Host still offers every type.
+const FALLBACK_APP_TYPES = [
+  'codex',
+  'claude',
+  'claude-desktop',
+  'opencode',
+  'gemini',
+  'hermes',
+  'grokbuild',
+  'pi',
+  'mcode',
+  'openclaw',
+]
+
 test('the app-type list is carried from the Host, with a fallback for an older one', async () => {
   const withHost = stubFetch({ [PROVIDERS]: providersBody({ appTypes: ['claude', 'codex'] }) })
   const a = createCCSwitchManagerController({ fetchImpl: withHost })
@@ -861,14 +941,14 @@ test('the app-type list is carried from the Host, with a fallback for an older o
   const older = stubFetch({ [PROVIDERS]: providersBody({ appTypes: undefined }) })
   const b = createCCSwitchManagerController({ fetchImpl: older })
   await b.refresh()
-  assert.deepEqual(b.getSnapshot().appTypes, ['claude', 'codex'])
+  assert.deepEqual(b.getSnapshot().appTypes, FALLBACK_APP_TYPES)
 })
 
 test('sanitizeAppTypes drops non-strings and never returns an empty list', () => {
   assert.deepEqual(sanitizeAppTypes(['claude', 'codex']), ['claude', 'codex'])
   assert.deepEqual(sanitizeAppTypes(['claude', 'claude']), ['claude'])
   assert.deepEqual(sanitizeAppTypes(['claude', '', '  ', 42, null]), ['claude'])
-  assert.deepEqual(sanitizeAppTypes('claude'), ['claude', 'codex'])
-  assert.deepEqual(sanitizeAppTypes([]), ['claude', 'codex'])
-  assert.deepEqual(sanitizeAppTypes(undefined), ['claude', 'codex'])
+  assert.deepEqual(sanitizeAppTypes('claude'), FALLBACK_APP_TYPES)
+  assert.deepEqual(sanitizeAppTypes([]), FALLBACK_APP_TYPES)
+  assert.deepEqual(sanitizeAppTypes(undefined), FALLBACK_APP_TYPES)
 })

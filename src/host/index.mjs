@@ -65,16 +65,22 @@ export function apply(ctx) {
     settings: ctx.settings,
     credentials: ctx.credentials,
     presets: PROVIDER_PRESETS,
+    // Membership of `llm-pi-ai`'s route table is the plugin's whole idea of
+    // "applied", so it is read from the live namespace rather than mirrored
+    // into the catalogue. One reader for the list and for delete/withdraw
+    // means the two can never disagree about what is serving traffic.
+    readLiveProviders: providersOf('llm-pi-ai'),
     applyProvider: async (key, provider) => {
-      // Activating a provider here has to mean something to DSH itself, or the
-      // row would light up while every request kept going to the old route.
-      // The provider is projected into `llm-pi-ai` through the *same* mapper
-      // the importer uses, so a provider added by hand and one imported from
-      // CC Switch produce an identical route.
+      // Applying a provider here has to mean something to DSH itself, or the
+      // row would be listed as applied while every request kept going to a
+      // route that did not name it. The provider is projected into
+      // `llm-pi-ai` through the *same* mapper the importer uses, so a provider
+      // added by hand and one imported from CC Switch produce an identical
+      // route.
       const namespaces = await ctx.settings.describe()
       const live = (Array.isArray(namespaces) ? namespaces : []).find((entry) => entry.ns === 'llm-pi-ai')
       if (live === undefined) {
-        return ['llm-pi-ai is not installed, so the provider was marked active but DSH has no route to use it']
+        return ['llm-pi-ai is not installed, so the provider was marked applied but DSH has no route to use it']
       }
       const existing = live.value?.providers?.[key]
       const mapped = toProviderProfile({
@@ -87,6 +93,18 @@ export function apply(ctx) {
       }, existing, key)
       await ctx.settings.mutate('llm-pi-ai', [{ op: 'set', path: ['providers', key], value: mapped }], live.revision)
       return []
+    },
+    withdrawProvider: async (key) => {
+      // Removing the member is the only edit: the catalogue row, its stored
+      // credential and every default stay exactly as they were. That is the
+      // rule CC Switch's `pi_config` states as
+      // `provider_membership_never_changes_pi_auth_or_defaults`, and it is what
+      // makes applying and withdrawing repeatable rather than destructive.
+      const namespaces = await ctx.settings.describe()
+      const live = (Array.isArray(namespaces) ? namespaces : []).find((entry) => entry.ns === 'llm-pi-ai')
+      if (live === undefined) return
+      if (!Object.hasOwn(live.value?.providers ?? {}, key)) return
+      await ctx.settings.mutate('llm-pi-ai', [{ op: 'unset', path: ['providers', key] }], live.revision)
     },
   })
   const allRoutes = [...routes, ...managerRoutes]

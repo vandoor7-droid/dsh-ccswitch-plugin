@@ -54,7 +54,8 @@ export function presetOptionLabel(preset, tr) {
  * by route so a new action has one obvious place to add its wording.
  */
 const FAILURE_TEXT = {
-  activate: ["manager.activateFailed", "启用失败：{message}"],
+  apply: ["manager.applyFailed", "接入失败：{message}"],
+  withdraw: ["manager.withdrawFailed", "移出失败：{message}"],
   delete: ["manager.deleteFailed", "删除失败：{message}"],
   save: ["manager.saveFailed", "保存失败：{message}"],
   reorder: ["manager.reorderFailed", "调整顺序失败：{message}"],
@@ -100,7 +101,10 @@ export function providerRowView(provider, snapshot) {
   return {
     key,
     name: provider?.displayName || key,
-    isCurrent: provider?.isCurrent === true,
+    // Whether DSH currently routes to this row, derived by the Host from its
+    // own route table rather than stored on the catalogue. Several rows can be
+    // `true` at once — that is the additive model, not a bug.
+    inUse: provider?.inUse === true,
     // Anything the Host did not explicitly report as found reads as missing:
     // the failure that matters is a provider whose key is unset, and it must
     // never be dressed up as ready.
@@ -297,7 +301,7 @@ export function ProviderManagerSection({ controller, t }) {
   // sees a dropdown holding nothing but the blank entry and no reason why.
   const matchingPresets = presets.filter((preset) => presetMatches(preset, presetQuery));
   const busy = snapshot.status === "busy" || snapshot.status === "loading";
-  const activation = snapshot.activation;
+  const notice = snapshot.notice;
 
   const runRowAction = async (key, action, kind) => {
     setRowError(null);
@@ -308,11 +312,11 @@ export function ProviderManagerSection({ controller, t }) {
       // where it is shown. A conflict is reported once, at the top, because the
       // whole table it was attempted against is now stale.
       if (error?.conflict) return;
-      // The Host refuses to delete the active provider. That is worth saying on
-      // the row itself, and its own sentence is not translated, so the reason
-      // code selects the localized one.
-      if (error?.reason === "active-provider") {
-        setRowError({ key, message: tr("manager.deleteActive", "该 provider 正在使用中，请先启用其他 provider 再删除。") });
+      // The Host refuses to delete a provider DSH still routes to. That is
+      // worth saying on the row itself, and its own sentence is not translated,
+      // so the reason code selects the localized one.
+      if (error?.reason === "in-use") {
+        setRowError({ key, message: tr("manager.deleteInUse", "该 provider 仍在 DSH 的路由表中，请先移出再删除。") });
         return;
       }
       const message = error instanceof Error ? error.message : String(error);
@@ -321,7 +325,18 @@ export function ProviderManagerSection({ controller, t }) {
     }
   };
 
-  const onActivate = (key) => runRowAction(key, () => controller.activate(key), "activate");
+  /**
+   * The membership toggle: add to DSH's route table, or take it back out.
+   *
+   * One button rather than two, because the operation is its own inverse and
+   * the row already shows which half is current. Nothing else about the
+   * provider changes — not its credential, not its defaults, not its position.
+   */
+  const onMembership = (key) => runRowAction(
+    key,
+    () => (providers[key]?.inUse === true ? controller.withdraw(key) : controller.apply(key)),
+    providers[key]?.inUse === true ? "withdraw" : "apply",
+  );
 
   /**
    * Move one row by one slot.
@@ -460,31 +475,42 @@ export function ProviderManagerSection({ controller, t }) {
           : snapshot.error)
       : null,
 
-    activation
+    notice
       ? h("div", {
         role: "status",
         className: "dsh-ccswitch-manager__activation"
-          + (activation.applied ? "" : " dsh-ccswitch-manager__activation--warn"),
+          + (notice.warnings.length > 0 ? " dsh-ccswitch-manager__activation--warn" : ""),
       },
         h("div", { className: "dsh-ccswitch-manager__activation-head" },
-          h("strong", null, tr("manager.activated", "已启用 {name}", {
-            name: providers[activation.key]?.displayName ?? activation.key,
-          })),
+          // `notice.name` is captured when the write happened, so a banner that
+          // outlives the row it describes (a delete) still says what it was.
+          h("strong", null, (() => {
+            const name = notice.name ?? providers[notice.key]?.displayName ?? notice.key;
+            if (notice.action === "delete") {
+              return notice.wasInUse
+                ? tr("manager.deletedInUse", "已删除 {name}（原本在 DSH 的路由表中，已一并移出）", { name })
+                : tr("manager.deleted", "已删除 {name}", { name });
+            }
+            if (notice.action === "withdraw") {
+              return tr("manager.withdrawn", "已从 DSH 的路由表移出 {name}", { name });
+            }
+            return tr("manager.applied", "已接入 DSH 的路由表：{name}", { name });
+          })()),
           h("button", {
             type: "button",
             className: "dsh-ccswitch-import__link",
-            onClick: () => controller.dismissActivation(),
+            onClick: () => controller.dismissNotice(),
           }, tr("manager.dismiss", "知道了")),
         ),
-        !activation.applied
+        notice.orphan
           ? h("p", { className: "dsh-ccswitch-manager__activation-warning" },
-            tr("manager.activatedNotApplied", "已标记为启用，但 DSH 没有接受该 provider，模型请求仍走原来的路由。"))
+            tr("manager.withdrawnOrphan", "该 key 只存在于 DSH 的路由表里，目录中并没有它，已一并清理。"))
           : null,
-        activation.warnings.length > 0
+        notice.warnings.length > 0
           ? h("div", null,
-            h("p", { className: "dsh-ccswitch-manager__activation-title" }, tr("manager.activationWarnings", "启用提示")),
+            h("p", { className: "dsh-ccswitch-manager__activation-title" }, tr("manager.membershipWarnings", "接入提示")),
             h("ul", { className: "dsh-ccswitch-manager__activation-list" },
-              ...activation.warnings.map((warning, index) => h("li", { key: `${index}-${warning}` }, warning)),
+              ...notice.warnings.map((warning, index) => h("li", { key: `${index}-${warning}` }, warning)),
             ),
           )
           : null,
@@ -554,14 +580,14 @@ export function ProviderManagerSection({ controller, t }) {
           return h("div", {
             key: view.key,
             className: "dsh-ccswitch-manager__row"
-              + (view.isCurrent ? " dsh-ccswitch-manager__row--current" : ""),
+              + (view.inUse ? " dsh-ccswitch-manager__row--applied" : ""),
           },
             h("div", { className: "dsh-ccswitch-manager__content" },
               h("div", { className: "dsh-ccswitch-manager__primary-line" },
                 h("strong", null, name),
-                view.isCurrent
+                view.inUse
                   ? h("span", { className: "dsh-ccswitch-import__badge dsh-ccswitch-import__badge--new" },
-                    tr("manager.active", "当前启用"))
+                    tr("manager.appliedBadge", "已接入"))
                   : null,
               ),
               h("div", { className: "dsh-ccswitch-manager__meta-line" },
@@ -612,12 +638,21 @@ export function ProviderManagerSection({ controller, t }) {
               h("button", {
                 type: "button",
                 className: "dsh-ccswitch-import__link",
-                // Activating the row that is already current is a no-op that
-                // still costs a settings write and a full-catalogue edit.
-                disabled: view.disabled || view.isCurrent,
-                "aria-label": tr("manager.activateAria", "启用 {name}", { name }),
-                onClick: () => onActivate(view.key),
-              }, action === "activate" ? tr("manager.activating", "启用中…") : tr("manager.activate", "启用")),
+                // Never disabled for membership itself: the button is a
+                // toggle, so "already in that state" would mean the wrong
+                // verb. Only a generally busy table takes it out of play.
+                disabled: view.disabled,
+                "aria-label": view.inUse
+                  ? tr("manager.withdrawAria", "从 DSH 移出 {name}", { name })
+                  : tr("manager.applyAria", "加入 DSH 的路由表：{name}", { name }),
+                onClick: () => onMembership(view.key),
+              }, action === "apply"
+                ? tr("manager.applying", "加入中…")
+                : action === "withdraw"
+                  ? tr("manager.withdrawing", "移出中…")
+                  : view.inUse
+                    ? tr("manager.withdraw", "移出")
+                    : tr("manager.apply", "加入")),
               // The move pair, sitting between the primary action and the row's
               // maintenance buttons — the order CC Switch's ProviderCardActions
               // lays them out in (status, primary, up/down, edit, ⋯).

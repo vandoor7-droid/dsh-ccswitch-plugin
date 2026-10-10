@@ -2,13 +2,22 @@
 // (Apache-2.0), which is itself a derivative of wtiaw/dsh-ccswitch-importer.
 // Reworked for DSH 0.2.0-rc.2. See NOTICE for the full attribution chain.
 /**
- * The provider-manager HTTP surface: add, edit, delete and activate the
+ * The provider-manager HTTP surface: add, edit, delete and *member* the
  * providers this plugin owns.
  *
  * These routes sit beside the importer rather than replacing it. The importer
  * answers "what is in CC Switch's database, and bring these across"; the
  * manager answers "what does this plugin own, and change it" — which has to
  * work with no CC Switch installed at all.
+ *
+ * **Membership, not activation.** The catalogue this plugin owns and the route
+ * table `dsh-llm-pi-ai` actually serves are two documents. A provider is
+ * *applied* (added to that route table) or *withdrawn* (taken back out), and
+ * several providers are applied at once — which is how CC Switch's additive
+ * apps manage their live config (`opencode_config.rs`, `pi_config/mod.rs`)
+ * and how `dsh-llm-pi-ai` is shaped, since its `providers` dict has no
+ * "current" field to point at one. Membership is therefore never stored here:
+ * it is read back from the route table on every list, so the two cannot drift.
  *
  * Three properties are deliberate and easy to lose in a rewrite:
  *
@@ -27,9 +36,6 @@
  */
 import {
   CCS_API_PROTOCOLS,
-  activateCCSProvider,
-  currentKeysByApp,
-  effectiveAppType,
   emptyCCSProvider,
   normalizeCCSProvider,
   orderProviders,
@@ -37,8 +43,8 @@ import {
 } from '../domain/ccs-provider.mjs'
 import { credentialRefForProviderKey, newProviderKey } from '../../lib/core/ids.js'
 import { redactText } from '../../lib/core/safety.js'
+import { SUPPORTED_APP_TYPES } from '../../lib/core/scan.js'
 import { isLoopbackRequest, methodFence, readJsonBody, writeJson } from './routes.mjs'
-import { WRITER_APP_TYPES, WriterError, writeProviderConfig } from './writers.js'
 
 export const MANAGER_API_BASE = '/api/dsh-ccswitch-manager'
 
@@ -57,7 +63,7 @@ export const MANAGER_NAMESPACE = 'dsh-ccswitch-plugin'
  */
 const MAX_PROVIDERS = 500
 
-const SAFE_REASONS = new Set(['new', 'updated', 'unchanged', 'removed', 'activated', 'created'])
+const SAFE_REASONS = new Set(['new', 'updated', 'unchanged', 'removed', 'applied', 'withdrawn', 'created'])
 
 function isRecord(value) {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -85,16 +91,27 @@ async function readCatalogue(settings) {
 }
 
 /**
- * The key of the provider marked current, optionally within one app type.
+ * The keys of the providers `dsh-llm-pi-ai` is currently serving.
  *
- * With an app type this answers CC Switch's `get_current_provider(app_type)`;
- * without one it answers "is anything active at all", which is what the list
- * route reports as `current` for callers that predate the per-app model.
+ * Membership lives in *that* document, not in the catalogue: the route table's
+ * `providers` dict is a set by construction, so "applied" and "not applied"
+ * are read back rather than recorded. Storing a flag here would leave two
+ * copies of one fact, and the copy that goes stale is always the one the user
+ * is looking at.
+ *
+ * A route table this plugin cannot read must not take the list down with it —
+ * the catalogue is still editable, and reporting every row as not applied
+ * means the manager offers *apply* rather than *withdraw* for a route it
+ * cannot see, which is the direction that cannot delete somebody's live
+ * configuration by accident.
  */
-function currentKeyOf(providers, appType) {
-  const current = currentKeysByApp(providers)
-  if (typeof appType === 'string' && appType !== '') return current[appType]
-  return Object.values(current)[0]
+async function readLiveKeys(readLiveProviders) {
+  try {
+    const live = await readLiveProviders()
+    return new Set(Object.keys(isRecord(live) ? live : {}))
+  } catch {
+    return new Set()
+  }
 }
 
 /**
@@ -104,9 +121,10 @@ function currentKeyOf(providers, appType) {
  * material, but this rebuilds the object field by field rather than spreading
  * it: a field added to the record later must be opted in here, so a future
  * `apiKey` cannot leak by simply existing. `credential` reports configuredness
- * without the value.
+ * without the value, and `inUse` reports membership of the route table without
+ * reading it — the caller read it once for the whole list.
  */
-function publicProvider(key, provider, credentialConfigured) {
+function publicProvider(key, provider, credentialConfigured, inUse) {
   const models = Array.isArray(provider?.models) ? provider.models : []
   return {
     key,
@@ -129,7 +147,12 @@ function publicProvider(key, provider, credentialConfigured) {
     iconColor: typeof provider?.iconColor === 'string' ? provider.iconColor : undefined,
     appType: typeof provider?.appType === 'string' ? provider.appType : undefined,
     sourceProfileId: typeof provider?.sourceProfileId === 'string' ? provider.sourceProfileId : undefined,
+    // Two different questions that used to be one. `isCurrent` is CC Switch's
+    // own flag, carried through so an imported row survives an edit intact;
+    // `inUse` is whether *this* plugin has the provider in DSH's route table.
+    // Only the second drives anything here.
     isCurrent: provider?.isCurrent === true,
+    inUse: inUse === true,
     inFailoverQueue: provider?.inFailoverQueue === true,
     costMultiplier: typeof provider?.costMultiplier === 'number' ? provider.costMultiplier : undefined,
     limitDailyUsd: typeof provider?.limitDailyUsd === 'number' ? provider.limitDailyUsd : undefined,
@@ -176,40 +199,26 @@ function revisionOf(body) {
   return Number.isInteger(body?.expectedRevision) ? body.expectedRevision : undefined
 }
 
-/**
- * Which writer should handle a provider.
- *
- * The body's `appType` wins when it names one, so the UI can push a provider to
- * a tool other than the one it was filed under. Otherwise the provider's own
- * `appType` decides, and a provider that carries neither falls back to
- * `claude`: that is what CC Switch itself defaults an unlabelled row to, and it
- * is the more forgiving of the two (Claude Code accepts an arbitrary base URL,
- * whereas a Codex route only works for an OpenAI-shaped endpoint).
- */
-function resolveAppType(provider, override) {
-  if (typeof override === 'string' && override !== '') return override
-  const own = provider?.appType
-  return typeof own === 'string' && own !== '' ? own : 'claude'
-}
-
 export function makeManagerRoutes(deps = {}) {
   const settings = deps.settings
   const credentials = deps.credentials
   const isLoopback = deps.isLoopback ?? isLoopbackRequest
   const presets = Array.isArray(deps.presets) ? deps.presets : []
   /**
-   * Where the external tools keep their config. Injected so tests can point the
-   * writers at a temp directory; production leaves it undefined and the writers
-   * fall back to `os.homedir()`.
+   * Read `dsh-llm-pi-ai`'s route table — the definition of "applied". Injected
+   * rather than read here because only the composition half should know which
+   * namespace DSH routes through; this module works in terms of the set it
+   * returns.
    */
-  const home = deps.home
+  const readLiveProviders = deps.readLiveProviders ?? (async () => ({}))
   /**
-   * Project a provider into the namespace DSH itself reads, so activating one
-   * here actually changes which model DSH talks to. Injected rather than
-   * imported because the projection belongs to the importer's mapper, and the
-   * two must agree on what a provider looks like.
+   * Add one provider to that route table, so applying one here actually
+   * changes what DSH serves. Injected because the projection belongs to the
+   * importer's mapper, and the two must agree on what a provider looks like.
    */
   const applyProvider = deps.applyProvider ?? (async () => {})
+  /** Take one provider back out of that route table. */
+  const withdrawProvider = deps.withdrawProvider ?? (async () => {})
 
   /** Serialise a write so two in-flight requests cannot interleave revisions. */
   let queue = Promise.resolve()
@@ -217,42 +226,6 @@ export function makeManagerRoutes(deps = {}) {
     const next = queue.then(work, work)
     queue = next.then(() => undefined, () => undefined)
     return next
-  }
-
-  /**
-   * Resolve the provider's key and rewrite the app's live configuration.
-   *
-   * Shared by the writers route and by activation, so the two can never
-   * disagree about what a write does. Callers map the thrown codes to
-   * responses instead of doing their own detection.
-   *
-   * @throws an error carrying `code: 'UNSUPPORTED'` when no writer exists for
-   *   the app type, `code: 'NO_CREDENTIAL'` when the provider has no key
-   *   stored, or a {@link WriterError} when the target file was refused.
-   */
-  const runWriter = async (provider, appType, outgoing) => {
-    if (!WRITER_APP_TYPES.includes(appType)) {
-      throw Object.assign(new Error('unsupported app type'), { code: 'UNSUPPORTED' })
-    }
-    // A config naming a provider with no key leaves the external tool broken in
-    // a way the user cannot see from here: Claude Code falls back to its own
-    // login, Codex refuses to start. Refusing the write is the only outcome
-    // that leaves the tool working.
-    const resolved = await credentials?.resolve?.(provider?.apiKeyEnv)
-    const apiKey = typeof resolved?.value === 'string' ? resolved.value : ''
-    if (apiKey === '') {
-      throw Object.assign(new Error('credential is not set'), { code: 'NO_CREDENTIAL' })
-    }
-    const written = await writeProviderConfig({ appType, provider, apiKey, home, previous: outgoing })
-    return {
-      appType,
-      files: written.files.map((file) => ({
-        path: file.path,
-        keys: file.keys.slice(0, 60).map((key) => redactText(key).slice(0, 120)),
-        removed: file.removed.slice(0, 60).map((key) => redactText(key).slice(0, 120)),
-      })),
-      warnings: written.warnings.slice(0, 20).map((text) => redactText(text).slice(0, 200)),
-    }
   }
 
   return [
@@ -263,31 +236,38 @@ export function makeManagerRoutes(deps = {}) {
         if (!methodFence(request, response, isLoopback, 'GET')) return
         try {
           const { providers, revision, exists } = await readCatalogue(settings)
-          // CC Switch's own row order, not the document's insertion order.
+          // CC Switch's own row order, not the document's insertion order. That
+          // order is also the failover queue, so the list is what the proxy
+          // will walk.
           const order = orderProviders(providers)
+          const live = await readLiveKeys(readLiveProviders)
           const entries = await Promise.all(
             order.map(async (key) => [
               key,
-              publicProvider(key, providers[key], await credentialState(credentials, providers[key]?.apiKeyEnv)),
+              publicProvider(
+                key,
+                providers[key],
+                await credentialState(credentials, providers[key]?.apiKeyEnv),
+                live.has(key),
+              ),
             ]),
           )
           writeJson(response, 200, {
             exists,
             revision,
             order,
-            // Which provider is active is only answerable per app (CC Switch's
-            // `is_current` is a per-app singleton), so the map is the real
-            // answer. `current` stays for a browser half that predates it.
-            current: currentKeyOf(providers),
-            currentByApp: currentKeysByApp(providers),
+            // Membership, not activation: `inUse` is the set of catalogue keys
+            // currently present in DSH's route table, derived on every read so
+            // the two documents cannot drift. There is no "current" provider —
+            // `dsh-llm-pi-ai` keeps a dict with no active pointer, and several
+            // members are live at once.
             providers: Object.fromEntries(entries),
             apiProtocols: [...CCS_API_PROTOCOLS],
-            // The app types this plugin can act on, taken from the writer list
-            // rather than a second copy in the browser half. A value here is a
-            // promise that activating such a provider does something; the form
-            // still offers a stored value outside the list, or editing an
-            // imported row of another app type would rewrite it on open.
-            appTypes: [...WRITER_APP_TYPES],
+            // Every app type this plugin understands, taken from the scanner
+            // rather than a second copy in the browser half. Nothing gates
+            // capability any more (the writers that used to are retired), so
+            // this is a labelling set for the form and for imported rows.
+            appTypes: [...SUPPORTED_APP_TYPES],
           })
         } catch (err) {
           console.error('[dsh-ccswitch-plugin] manager list failed:', redactText(err))
@@ -363,7 +343,12 @@ export function makeManagerRoutes(deps = {}) {
           writeJson(response, 200, {
             key: result.key,
             status: SAFE_REASONS.has(result.created ? 'created' : 'updated') ? (result.created ? 'created' : 'updated') : 'updated',
-            provider: publicProvider(result.key, result.record, await credentialState(credentials, result.record.apiKeyEnv)),
+            provider: publicProvider(
+              result.key,
+              result.record,
+              await credentialState(credentials, result.record.apiKeyEnv),
+              (await readLiveKeys(readLiveProviders)).has(result.key),
+            ),
           })
         } catch (err) {
           if (err?.code === 'TOO_MANY') {
@@ -392,21 +377,23 @@ export function makeManagerRoutes(deps = {}) {
           const outcome = await serialize(async () => {
             const { providers, revision } = await readCatalogue(settings)
             if (!Object.hasOwn(providers, body.key)) return { missing: true }
-            // CC Switch refuses to delete the provider that is in use —
-            // `services/provider/mod.rs` rejects it with "无法删除当前正在使用的
-            // 供应商" whenever the local record, the database or the proxy route
-            // still points at the row. Here the catalogue is the only pointer,
-            // but the reason carries over: the provider's live configuration is
-            // already written into the other tool, and activation is the only
-            // thing that rewrites it, so removing the row would leave those
-            // files naming a provider this plugin can no longer switch away
-            // from.
-            // The row's OWN app type decides this, matching CC Switch, whose
-            // `is_referenced` check is scoped to `app_type`. A global test
-            // would refuse to delete a Claude provider merely because some
-            // Codex provider happened to be the active one.
-            const deleted = providers[body.key]
-            if (currentKeyOf(providers, effectiveAppType(deleted)) === body.key) return { active: true }
+            // Withdraw before forgetting. A member still routed to by
+            // `dsh-llm-pi-ai` would otherwise become a dangling entry: the
+            // catalogue would no longer hold the row the route table points
+            // at, so nothing could ever take it back out. Order matters here
+            // for the same reason CC Switch's delete refuses while the local
+            // record, the database and the proxy route all still point at the
+            // row (`services/provider/mod.rs`).
+            const live = await readLiveKeys(readLiveProviders)
+            const wasInUse = live.has(body.key)
+            if (wasInUse) {
+              try {
+                await withdrawProvider(body.key)
+              } catch (err) {
+                console.error('[dsh-ccswitch-plugin] withdrawing the provider from DSH failed:', redactText(err))
+                throw Object.assign(new Error('DSH still routes to this provider'), { code: 'WITHDRAW_FAILED' })
+              }
+            }
             const ref = providers[body.key]?.apiKeyEnv
             await settings.mutate(
               MANAGER_NAMESPACE,
@@ -424,25 +411,29 @@ export function makeManagerRoutes(deps = {}) {
                 console.error('[dsh-ccswitch-plugin] credential cleanup failed:', redactText(err))
               }
             }
-            return { missing: false }
+            return { missing: false, wasInUse }
           })
           if (outcome.missing) {
             writeJson(response, 404, { error: 'no such provider' })
             return
           }
-          if (outcome.active) {
-            // 409 because the request conflicts with the row's current state,
-            // but `reason` separates it from the stale-revision 409 the client
-            // already reserves for "the document moved": this one is a fact
-            // about the provider, and retrying it can never succeed.
-            writeJson(response, 409, {
-              reason: 'active-provider',
-              error: 'this provider is active; activate another one before deleting it',
-            })
+          // Reported rather than refused: the withdraw above already removed
+          // the member, so the conflict the response names has resolved by the
+          // time the client reads it. `wasInUse` lets the UI say "and it was
+          // live" instead of implying nothing was serving traffic.
+          if (outcome.wasInUse) {
+            writeJson(response, 200, { key: body.key, status: 'removed', wasInUse: true })
             return
           }
           writeJson(response, 200, { key: body.key, status: 'removed' })
         } catch (err) {
+          if (err?.code === 'WITHDRAW_FAILED') {
+            writeJson(response, 409, {
+              reason: 'in-use',
+              error: 'DSH still routes to this provider; withdraw it first',
+            })
+            return
+          }
           const conflict = /conflict/i.test(String(err?.code ?? '')) || /conflict/i.test(String(err?.message ?? ''))
           console.error('[dsh-ccswitch-plugin] manager delete failed:', redactText(err))
           writeJson(response, conflict ? 409 : 500, {
@@ -453,7 +444,7 @@ export function makeManagerRoutes(deps = {}) {
     },
     {
       kind: 'exact',
-      path: `${MANAGER_API_BASE}/providers/activate`,
+      path: `${MANAGER_API_BASE}/providers/apply`,
       handler: async (request, response) => {
         if (!methodFence(request, response, isLoopback, 'POST', { requireSameOrigin: true })) return
         const body = await readJsonBody(request)
@@ -463,80 +454,67 @@ export function makeManagerRoutes(deps = {}) {
         }
         try {
           const outcome = await serialize(async () => {
-            const { providers, revision } = await readCatalogue(settings)
-            if (!Object.hasOwn(providers, body.key)) return { missing: true }
-            // CC Switch keeps the active provider as a per-app singleton, so
-            // activation is a whole-catalogue edit: the chosen row is marked
-            // and every other row is cleared in the same write, which is the
-            // only way the invariant survives a concurrent edit.
-            // The provider this one displaces, for its own app type. Needed
-            // because a provider-exclusive key may only be removed while the
-            // file still holds the value that provider wrote, so the writer
-            // has to know who its predecessor was.
-            const outgoingKey = currentKeyOf(providers, effectiveAppType(providers[body.key]))
-            const outgoing = outgoingKey === undefined ? undefined : providers[outgoingKey]
-            const next = activateCCSProvider(providers, body.key)
-            await settings.mutate(
-              MANAGER_NAMESPACE,
-              [{ op: 'set', path: ['providers'], value: next }],
-              revisionOf(body) ?? revision,
-            )
-            return { missing: false, provider: next[body.key], outgoing }
+            const { providers } = await readCatalogue(settings)
+            if (!Object.hasOwn(providers, body.key)) return undefined
+            // No catalogue write at all: membership lives in DSH's own route
+            // table, and the catalogue row is untouched by adding or removing
+            // one. This is what makes the operation safe to repeat — it never
+            // races the revision the editor is holding, and it never rewrites
+            // the credential or the defaults alongside it (the rule CC Switch's
+            // `pi_config` calls `provider_membership_never_changes_pi_auth_or_defaults`).
+            const warnings = (await applyProvider(body.key, providers[body.key])) ?? []
+            return { warnings: Array.isArray(warnings) ? warnings : [] }
           })
-          if (outcome.missing) {
+          if (outcome === undefined) {
             writeJson(response, 404, { error: 'no such provider' })
             return
           }
-          // Two independent projections follow the catalogue write, and neither
-          // may undo it: "this provider is active" is already the durable fact,
-          // so a failure here is reported rather than rolled back, and a retry
-          // finishes whichever half did not take.
-          const provider = outcome.provider
-          const appType = resolveAppType(provider)
-          const warnings = []
-
-          // 1. Make DSH itself route to it. Without this the row would light up
-          //    while every model request kept going to the old route.
-          let applied = true
-          try {
-            warnings.push(...((await applyProvider(body.key, provider)) ?? []))
-          } catch (err) {
-            applied = false
-            console.error('[dsh-ccswitch-plugin] projecting the provider into DSH failed:', redactText(err))
-            warnings.push('DSH did not accept the route, so model requests still use the previous one')
-          }
-
-          // 2. Rewrite the tool's own configuration, which is what activating a
-          //    provider means in CC Switch. An app type with no writer yet is
-          //    named rather than skipped: the user asked to activate it, and a
-          //    silent no-op would read as success.
-          let written
-          if (WRITER_APP_TYPES.includes(appType)) {
-            try {
-              written = await runWriter(provider, appType, outcome.outgoing)
-              warnings.push(...written.warnings)
-            } catch (err) {
-              console.error('[dsh-ccswitch-plugin] writing the tool configuration failed:', redactText(err))
-              warnings.push(err?.code === 'NO_CREDENTIAL'
-                ? 'no key is stored for this provider, so its configuration was not written'
-                : writerRefusalMessage(err))
-            }
-          } else {
-            warnings.push(`nothing writes a "${appType}" configuration yet; supported: ${WRITER_APP_TYPES.join(', ')}`)
-          }
-
           writeJson(response, 200, {
             key: body.key,
-            status: 'activated',
-            applied,
-            written,
-            warnings: warnings.slice(0, 20).map((text) => redactText(text).slice(0, 200)),
+            status: 'applied',
+            warnings: outcome.warnings.slice(0, 20).map((text) => redactText(text).slice(0, 200)),
           })
         } catch (err) {
           const conflict = /conflict/i.test(String(err?.code ?? '')) || /conflict/i.test(String(err?.message ?? ''))
-          console.error('[dsh-ccswitch-plugin] manager activate failed:', redactText(err))
+          console.error('[dsh-ccswitch-plugin] manager apply failed:', redactText(err))
           writeJson(response, conflict ? 409 : 500, {
-            error: conflict ? 'the settings document changed; reload and retry' : 'could not activate the provider',
+            error: conflict ? 'the settings document changed; reload and retry' : 'could not apply the provider',
+          })
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: `${MANAGER_API_BASE}/providers/withdraw`,
+      handler: async (request, response) => {
+        if (!methodFence(request, response, isLoopback, 'POST', { requireSameOrigin: true })) return
+        const body = await readJsonBody(request)
+        if (!isRecord(body) || typeof body.key !== 'string' || body.key === '') {
+          writeJson(response, 400, { error: 'body must be { key: string }' })
+          return
+        }
+        try {
+          const known = await serialize(async () => {
+            const { providers } = await readCatalogue(settings)
+            // A member the catalogue has forgotten about is still worth
+            // withdrawing — an orphan in the route table is exactly the state
+            // a failed delete used to leave behind — so "known" only steers
+            // the 404, it does not gate the removal.
+            await withdrawProvider(body.key)
+            return Object.hasOwn(providers, body.key)
+          })
+          writeJson(response, 200, {
+            key: body.key,
+            status: 'withdrawn',
+            // False means the route table held a key the catalogue does not:
+            // useful for the UI to report rather than silently clean up.
+            inCatalogue: known === true,
+          })
+        } catch (err) {
+          const conflict = /conflict/i.test(String(err?.code ?? '')) || /conflict/i.test(String(err?.message ?? ''))
+          console.error('[dsh-ccswitch-plugin] manager withdraw failed:', redactText(err))
+          writeJson(response, conflict ? 409 : 500, {
+            error: conflict ? 'the settings document changed; reload and retry' : 'could not withdraw the provider',
           })
         }
       },
@@ -606,82 +584,5 @@ export function makeManagerRoutes(deps = {}) {
         writeJson(response, 200, { presets })
       },
     },
-    {
-      kind: 'exact',
-      path: `${MANAGER_API_BASE}/writers/run`,
-      handler: async (request, response) => {
-        if (!methodFence(request, response, isLoopback, 'POST', { requireSameOrigin: true })) return
-        const body = await readJsonBody(request)
-        if (!isRecord(body) || typeof body.key !== 'string' || body.key === '') {
-          writeJson(response, 400, { error: 'body must be { key: string, appType?: "claude" | "codex" }' })
-          return
-        }
-        try {
-          // Serialised with every other write: two pushes racing would each
-          // read the target file, and the loser's edits would be computed
-          // against a version that no longer exists.
-          const outcome = await serialize(async () => {
-            const { providers } = await readCatalogue(settings)
-            if (!Object.hasOwn(providers, body.key)) {
-              throw Object.assign(new Error('no such provider'), { code: 'NOT_FOUND' })
-            }
-            const provider = providers[body.key]
-            return runWriter(provider, resolveAppType(provider, body.appType))
-          })
-          writeJson(response, 200, {
-            key: body.key,
-            appType: outcome.appType,
-            // Already redacted and clamped by runWriter.
-            written: outcome.files,
-            warnings: outcome.warnings,
-          })
-        } catch (err) {
-          if (err?.code === 'NOT_FOUND') {
-            writeJson(response, 404, { error: 'no such provider' })
-            return
-          }
-          if (err?.code === 'NO_CREDENTIAL') {
-            writeJson(response, 400, {
-              error: 'this provider has no key stored, so writing it would leave the tool unable to authenticate',
-            })
-            return
-          }
-          if (err?.code === 'UNSUPPORTED' || err instanceof WriterError) {
-            console.error('[dsh-ccswitch-plugin] writer refused:', redactText(err))
-            writeJson(response, 400, {
-              error: writerRefusalMessage(err),
-            })
-            return
-          }
-          console.error('[dsh-ccswitch-plugin] writer failed:', redactText(err))
-          writeJson(response, 500, { error: 'could not write the tool configuration' })
-        }
-      },
-    },
   ]
-}
-
-/**
- * Explain a refused write without leaking a path the user did not name.
- *
- * A `parse`/`shape` refusal is the important one: it means the target file
- * exists and this plugin will not touch it. That has to read as a deliberate
- * refusal rather than a bug, because the file is unchanged and the user's next
- * move is to fix or move it.
- */
-function writerRefusalMessage(err) {
-  if (!(err instanceof WriterError)) {
-    return `no writer for that app type; supported: ${WRITER_APP_TYPES.join(', ')}`
-  }
-  if (err.kind === 'unsupported') {
-    return `no writer for that app type; supported: ${WRITER_APP_TYPES.join(', ')}`
-  }
-  if (err.kind === 'credential') {
-    return 'this provider has no key stored, so writing it would leave the tool unable to authenticate'
-  }
-  if (err.kind === 'parse') {
-    const where = err.line === undefined ? '' : ` (line ${err.line} column ${err.column})`
-    return `the existing configuration is not valid JSON${where}, so it was left untouched`
-  }
-  return 'the existing configuration has an unexpected shape, so it was left untouched'
 }

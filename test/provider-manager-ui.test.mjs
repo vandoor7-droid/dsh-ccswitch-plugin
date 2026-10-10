@@ -5,7 +5,7 @@
 // The manager tab is the first thing in this plugin that writes settings from
 // the browser, so these tests care about what the user is actually told: a row
 // per provider with its credential state, an empty state that distinguishes
-// "nothing yet" from "no namespace", activation warnings that reach the screen,
+// "nothing yet" from "no namespace", membership warnings that reach the screen,
 // and a form that shows every validation problem at once instead of one save
 // at a time.
 //
@@ -274,7 +274,11 @@ function hostProvider(overrides = {}) {
     baseURL: 'https://api.deepseek.com/anthropic',
     credential: 'found',
     models: [{ id: 'deepseek-flash' }, { id: 'deepseek-v4-pro' }],
+    // `isCurrent` is inert provenance carried over from cc-switch's own DB
+    // column; `inUse` is what the row's membership toggle is bound to, derived
+    // by the Host from DSH's route table on every read.
     isCurrent: false,
+    inUse: false,
     inFailoverQueue: false,
     ...overrides,
   }
@@ -342,6 +346,14 @@ test('providerRowView reads the credential and pending state defensively', () =>
   assert.equal(view.modelCount, 2)
   assert.equal(view.pending, false)
 
+  // Membership is read from `inUse` alone — the Host derives it from DSH's
+  // route table. `isCurrent` is provenance from cc-switch's own database and
+  // nothing acts on it any more, so it must never light up the row.
+  assert.equal(view.inUse, false)
+  assert.equal(providerRowView(hostProvider({ inUse: true }), {}).inUse, true)
+  assert.equal(providerRowView(hostProvider({ isCurrent: true }), {}).inUse, false,
+    'isCurrent is inert provenance, not membership')
+
   // Anything that is not an explicit `found` is missing: a provider whose key
   // is unset must never be dressed up as ready.
   assert.equal(providerRowView(hostProvider({ credential: 'maybe' }), {}).credentialFound, false)
@@ -389,21 +401,76 @@ test('the section renders one row per provider with its credential badge', async
   assert.equal(badges.length, 1, 'the missing-credential badge uses the blocked style')
 })
 
-test('the section marks the active provider and its model count', async () => {
+test('the section marks the applied provider and its model count', async () => {
   const controller = await readyController({
-    'ccs-live-ab12cd34': hostProvider({ key: 'ccs-live-ab12cd34', displayName: 'Live', isCurrent: true, inFailoverQueue: true }),
+    'ccs-live-ab12cd34': hostProvider({ key: 'ccs-live-ab12cd34', displayName: 'Live', inUse: true, inFailoverQueue: true }),
+    'ccs-idle-ab12cd34': hostProvider({ key: 'ccs-idle-ab12cd34', displayName: 'Idle' }),
   })
   const harness = createHarness()
   const tree = harness.render(React.createElement(ProviderManagerSection, { controller, t }))
   const text = textOf(tree)
-  assert.match(text, /当前启用/)
+  // The badge is membership in DSH's route table, not a "current" pointer:
+  // several rows can carry it at once under the additive model.
+  assert.match(text, /已接入/)
   assert.match(text, /2 个模型/)
   assert.match(text, /故障转移队列/)
-  // Activating the row that is already current is a no-op write, so the button
-  // is disabled rather than hidden (hiding it would shift the other actions).
-  const activate = findAll(tree, (node) => node.props?.['aria-label'] === '启用 Live')[0]
-  assert.ok(activate, 'the activate button rendered')
-  assert.equal(activate.props.disabled, true)
+
+  const rows = findAll(tree, (node) => typeof node.props?.className === 'string'
+    && node.props.className.includes('dsh-ccswitch-manager__row')
+    && !node.props.className.includes('__row-actions')
+    && !node.props.className.includes('__row-error'))
+  const live = rows.find((row) => textOf(row).includes('Live'))
+  const idle = rows.find((row) => textOf(row).includes('Idle'))
+  assert.ok(live && idle, 'both rows rendered')
+  assert.match(live.props.className, /dsh-ccswitch-manager__row--applied/,
+    'the applied row carries the membership modifier')
+  assert.doesNotMatch(idle.props.className, /dsh-ccswitch-manager__row--applied/)
+
+  // Membership is a toggle, so the button is never disabled for being "already
+  // in that state" — that would mean the wrong verb. Only a busy table does.
+  const withdraw = findAll(live, (node) => node.type === 'button'
+    && node.props?.['aria-label'] === '从 DSH 移出 Live')[0]
+  assert.ok(withdraw, 'the applied row offers a withdraw control')
+  assert.equal(withdraw.props.disabled, false)
+  assert.match(textOf(withdraw), /移出/)
+  assert.doesNotMatch(textOf(withdraw), /移出中/)
+
+  const apply = findAll(idle, (node) => node.type === 'button'
+    && node.props?.['aria-label'] === '加入 DSH 的路由表：Idle')[0]
+  assert.ok(apply, 'the unapplied row offers an apply control')
+  assert.equal(apply.props.disabled, false)
+  assert.match(textOf(apply), /加入/)
+})
+
+test('the membership button applies an unapplied row and withdraws an applied one', async () => {
+  const controller = await readyController({
+    'ccs-live-ab12cd34': hostProvider({ key: 'ccs-live-ab12cd34', displayName: 'Live', inUse: true }),
+    'ccs-idle-ab12cd34': hostProvider({ key: 'ccs-idle-ab12cd34', displayName: 'Idle' }),
+  })
+  // The decision lives in `onMembership`, which reads the row's own `inUse`
+  // from the snapshot; stubbing the controller methods is what proves which
+  // half of the toggle a click actually picked.
+  const calls = []
+  controller.apply = async (key) => { calls.push(['apply', key]) }
+  controller.withdraw = async (key) => { calls.push(['withdraw', key]) }
+  const harness = createHarness()
+  const tree = harness.render(React.createElement(ProviderManagerSection, { controller, t }))
+  const buttonAria = (aria) => findAll(tree, (node) => node.type === 'button' && node.props?.['aria-label'] === aria)[0]
+
+  const withdraw = buttonAria('从 DSH 移出 Live')
+  assert.ok(withdraw, 'the applied row rendered its toggle')
+  withdraw.props.onClick()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.deepEqual(calls, [['withdraw', 'ccs-live-ab12cd34']])
+
+  const apply = buttonAria('加入 DSH 的路由表：Idle')
+  assert.ok(apply, 'the unapplied row rendered its toggle')
+  apply.props.onClick()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.deepEqual(calls, [
+    ['withdraw', 'ccs-live-ab12cd34'],
+    ['apply', 'ccs-idle-ab12cd34'],
+  ])
 })
 
 test('the section shows the empty state, and distinguishes having no namespace', async () => {
@@ -424,25 +491,79 @@ test('the section shows the empty state, and distinguishes having no namespace',
   assert.match(textOf(tree2), /尚未创建设置命名空间/)
 })
 
-test('the section surfaces the warnings an activation returned', async () => {
+test('the section surfaces the warnings an apply returned', async () => {
   const controller = await readyController(
     { 'ccs-deepseek-ab12cd34': hostProvider() },
-    { routes: { [`${PROVIDERS_PATH}/activate`]: { body: {
+    { routes: { [`${PROVIDERS_PATH}/apply`]: { body: {
       key: 'ccs-deepseek-ab12cd34',
-      status: 'activated',
-      applied: false,
+      status: 'applied',
       warnings: ['llm-pi-ai is not installed, so DSH has no route to use it'],
     } } } },
   )
-  await controller.activate('ccs-deepseek-ab12cd34')
+  await controller.apply('ccs-deepseek-ab12cd34')
   const harness = createHarness()
   const tree = harness.render(React.createElement(ProviderManagerSection, { controller, t }))
-  const text = textOf(tree)
-  // The warning is the whole reason the activate route returns a list: without
-  // it the row would read "active" while every request still used the old route.
+  const banner = findAll(tree, (node) => typeof node.props?.className === 'string'
+    && node.props.className.split(' ').includes('dsh-ccswitch-manager__activation'))[0]
+  assert.ok(banner, 'the membership banner rendered')
+  const text = textOf(banner)
+  // The warning is the whole reason the apply route returns a list: without it
+  // the row would read "applied" while DSH had no route to reach it.
   assert.match(text, /llm-pi-ai is not installed/)
-  assert.match(text, /DSH 没有接受该 provider/)
-  assert.match(text, /启用提示/)
+  // The headline names the provider and the action, from `notice.name`.
+  assert.match(text, /已接入 DSH 的路由表：DeepSeek/)
+  assert.match(text, /接入提示/)
+  const items = byType(banner, 'li')
+  assert.equal(items.length, 1, 'the warning list renders each entry')
+  assert.match(textOf(items[0]), /llm-pi-ai is not installed/)
+
+  // The dismiss control is bound to the controller's own clear, so the banner
+  // cannot outlive the action it describes.
+  const dismisses = []
+  const dismissNotice = controller.dismissNotice
+  controller.dismissNotice = () => { dismisses.push(1); dismissNotice() }
+  const dismiss = buttonByText(banner, '知道了')
+  assert.ok(dismiss, 'the banner offers a dismiss control')
+  dismiss.props.onClick()
+  assert.deepEqual(dismisses, [1], 'dismissing goes through controller.dismissNotice')
+  const after = harness.render(React.createElement(ProviderManagerSection, { controller, t }))
+  assert.equal(findAll(after, (node) => typeof node.props?.className === 'string'
+    && node.props.className.split(' ').includes('dsh-ccswitch-manager__activation')).length, 0,
+    'the banner is gone')
+})
+
+test('the section reports a withdraw with its own headline', async () => {
+  const controller = await readyController(
+    { 'ccs-deepseek-ab12cd34': hostProvider({ inUse: true }) },
+    { routes: { [`${PROVIDERS_PATH}/withdraw`]: { body: {
+      key: 'ccs-deepseek-ab12cd34',
+      status: 'withdrawn',
+      inCatalogue: true,
+    } } } },
+  )
+  await controller.withdraw('ccs-deepseek-ab12cd34')
+  const harness = createHarness()
+  const tree = harness.render(React.createElement(ProviderManagerSection, { controller, t }))
+  const banner = findAll(tree, (node) => typeof node.props?.className === 'string'
+    && node.props.className.split(' ').includes('dsh-ccswitch-manager__activation'))[0]
+  assert.ok(banner, 'the membership banner rendered')
+  const text = textOf(banner)
+  assert.match(text, /已从 DSH 的路由表移出 DeepSeek/)
+  // A clean withdraw with nothing to warn about says only that much: the
+  // warning heading is not a permanent fixture of the banner.
+  assert.doesNotMatch(text, /接入提示/)
+
+  // An orphan — a key the route table held that the catalogue never knew —
+  // gets its own line, because only this tab could have produced one.
+  const orphan = await readyController(
+    { 'ccs-deepseek-ab12cd34': hostProvider({ inUse: true }) },
+    { routes: { [`${PROVIDERS_PATH}/withdraw`]: { body: {
+      key: 'ccs-deepseek-ab12cd34', status: 'withdrawn', inCatalogue: false,
+    } } } },
+  )
+  await orphan.withdraw('ccs-deepseek-ab12cd34')
+  const orphanTree = createHarness().render(React.createElement(ProviderManagerSection, { controller: orphan, t }))
+  assert.match(textOf(orphanTree), /目录中并没有它/)
 })
 
 test('the section reports a revision conflict without inventing a row error', async () => {
@@ -1196,8 +1317,9 @@ test('the probe button appears only where the probe route can answer', async () 
   const hand = rows.find((row) => textOf(row).includes('HandAdded'))
   assert.equal(findAll(imported, (node) => textOf(node).includes('测试连接')).length > 0, true)
   assert.equal(findAll(hand, (node) => textOf(node).includes('测试连接')).length, 0)
-  // The hand-added row still renders its other actions.
-  assert.ok(findAll(hand, (node) => node.props?.['aria-label'] === '启用 HandAdded')[0])
+  // The hand-added row still renders its other actions — its membership toggle
+  // above all, which is the one control every row has.
+  assert.ok(findAll(hand, (node) => node.props?.['aria-label'] === '加入 DSH 的路由表：HandAdded')[0])
 })
 
 test('a probe result renders inline on the row that asked for it', async () => {
@@ -1497,12 +1619,12 @@ test('every manager class the components use is defined in the stylesheet', asyn
   const missing = [...used].filter((name) => !defined.has(name)).sort()
   assert.deepEqual(missing, [], `styles.mjs is missing a rule for: ${missing.join(', ')}`)
 
-  // The reverse direction is not an error — a modifier like `__row--current` is
+  // The reverse direction is not an error — a modifier like `__row--applied` is
   // built by concatenation and never appears as a bare literal — but a rule
   // nothing can ever apply is dead weight, so the handful of them that do come
   // from concatenation are named here.
   const concatenated = new Set([
-    'dsh-ccswitch-manager__row--current',
+    'dsh-ccswitch-manager__row--applied',
     'dsh-ccswitch-manager__activation--warn',
   ])
   const unused = [...defined].filter((name) => !used.has(name) && !concatenated.has(name)).sort()

@@ -1909,6 +1909,11 @@ function defineCCSProvider(z) {
     // creation time.
     sortIndex: z.number().step(1).min(0),
     createdAt: z.number(),
+    // Provenance, not behaviour: CC Switch's `is_current` column, carried
+    // across so a row imported from its database keeps the shape it had there.
+    // Nothing in this plugin acts on it any more — activation was retired in
+    // favour of membership of `dsh-llm-pi-ai`'s route table, which is derived
+    // on read and never stored (see `src/host/manager-routes.mjs`).
     isCurrent: z.boolean().default(false),
     inFailoverQueue: z.boolean().default(false),
     costMultiplier: z.number().min(0),
@@ -2061,35 +2066,11 @@ function effectiveAppType(provider) {
   const own = provider?.appType;
   return typeof own === "string" && own !== "" ? own : DEFAULT_APP_TYPE;
 }
-function activateCCSProvider(providers, key) {
-  if (!providers || typeof providers !== "object" || Array.isArray(providers)) {
-    throw new Error("providers must be an object");
-  }
-  if (!Object.hasOwn(providers, key)) throw new Error(`unknown provider: ${key}`);
-  const appType = effectiveAppType(providers[key]);
-  return Object.fromEntries(
-    Object.entries(providers).map(([entryKey, provider]) => [
-      entryKey,
-      effectiveAppType(provider) === appType ? { ...provider, isCurrent: entryKey === key } : provider
-    ])
-  );
-}
-function currentKeysByApp(providers) {
-  const current = {};
-  for (const [key, provider] of Object.entries(providers ?? {})) {
-    if (provider?.isCurrent !== true) continue;
-    const appType = effectiveAppType(provider);
-    if (!Object.hasOwn(current, appType)) current[appType] = key;
-  }
-  return current;
-}
 export {
   CCS_API_PROTOCOLS,
   CCS_PROVIDER_CATEGORIES,
   CCS_REASONING_LEVELS,
   DEFAULT_APP_TYPE,
-  activateCCSProvider,
-  currentKeysByApp,
   defineCCSConfig,
   defineCCSModel,
   defineCCSProvider,

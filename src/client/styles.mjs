@@ -33,7 +33,7 @@ const MANAGER_CSS = [
   ".dsh-ccswitch-manager__row{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;min-width:0;padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-1);}",
   // The active row is marked by its border rather than a fill, so the badge
   // stays readable in both themes.
-  ".dsh-ccswitch-manager__row--current{border-color:var(--dsw-alias-brand-primary);}",
+  ".dsh-ccswitch-manager__row--applied{border-color:var(--dsw-alias-brand-primary);}",
   ".dsh-ccswitch-manager__content{display:flex;flex-direction:column;gap:3px;min-width:0;flex:1 1 auto;}",
   ".dsh-ccswitch-manager__primary-line{display:flex;align-items:baseline;gap:8px;min-width:0;}",
   ".dsh-ccswitch-manager__primary-line strong{min-width:0;color:var(--dsw-alias-label-primary);font-size:13px;font-weight:500;line-height:20px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}",

@@ -15,8 +15,7 @@ import {
   CCS_API_PROTOCOLS,
   CCS_PROVIDER_CATEGORIES,
   CCS_REASONING_LEVELS,
-  activateCCSProvider,
-  currentKeysByApp,
+  DEFAULT_APP_TYPE,
   defineCCSConfig,
   effectiveAppType,
   defineCCSProvider,
@@ -26,6 +25,12 @@ import {
   orderProviders,
   validateCCSProvider,
 } from '../src/domain/ccs-provider.mjs'
+// `isCurrent` survives in the schema/normaliser as inert provenance carried
+// over from CC Switch's own `is_current` column: it round-trips into the edit
+// form and nothing acts on it. The activation helpers that once managed that
+// pointer (`activateCCSProvider`, `currentKeysByApp`) were retired along with
+// the single-active-provider concept — provider membership in DSH's route
+// table is now derived on read, never stored.
 
 /**
  * A recording stand-in for schemastery. Every builder returns the same node
@@ -280,68 +285,14 @@ test('emptyCCSProvider is a usable skeleton that overrides cleanly', () => {
   assert.equal(emptyCCSProvider().displayName, '', 'must not share state between calls')
 })
 
-test('activating one provider clears every other one', () => {
-  const providers = {
-    a: { displayName: 'A', isCurrent: true },
-    b: { displayName: 'B', isCurrent: false },
-    c: { displayName: 'C' },
-  }
-  const next = activateCCSProvider(providers, 'b')
-  // CC Switch's is_current is a per-app singleton, so the write is the whole
-  // catalogue rather than one field.
-  assert.deepEqual(next, {
-    a: { displayName: 'A', isCurrent: false },
-    b: { displayName: 'B', isCurrent: true },
-    c: { displayName: 'C', isCurrent: false },
-  })
-  assert.equal(providers.a.isCurrent, true, 'the input must not be mutated')
-  assert.throws(() => activateCCSProvider(providers, 'missing'), /unknown provider: missing/)
-})
-
-test('activating within one app type leaves every other app type alone', () => {
-  // CC Switch's `set_current_provider` clears the flag `WHERE app_type = ?`, so
-  // the active Claude provider and the active Codex provider coexist. One
-  // global flag would mean activating a Codex provider silently deactivated the
-  // Claude provider the user's other tool is still pointed at.
-  const providers = {
-    'ccs-claude-1': { displayName: 'Claude', appType: 'claude', isCurrent: true },
-    'ccs-codex-1': { displayName: 'Codex', appType: 'codex', isCurrent: true },
-    'ccs-codex-2': { displayName: 'Codex 2', appType: 'codex', isCurrent: false },
-  }
-  const next = activateCCSProvider(providers, 'ccs-codex-2')
-  assert.equal(next['ccs-claude-1'].isCurrent, true, 'the claude pointer is untouched')
-  assert.equal(next['ccs-codex-1'].isCurrent, false)
-  assert.equal(next['ccs-codex-2'].isCurrent, true)
-  // A row of another app type comes back by reference: one this call has no
-  // opinion about must not read as a settings diff on every activation.
-  assert.equal(next['ccs-claude-1'], providers['ccs-claude-1'])
-})
-
-test('the current pointer is reported per app type', () => {
-  assert.deepEqual(
-    currentKeysByApp({
-      a: { displayName: 'A', appType: 'claude', isCurrent: true },
-      b: { displayName: 'B', appType: 'codex', isCurrent: true },
-      c: { displayName: 'C', appType: 'codex' },
-    }),
-    { claude: 'a', codex: 'b' },
-  )
-  assert.deepEqual(currentKeysByApp({}), {})
-})
-
 test('a record with no appType counts as claude', () => {
   // Records written before appType was captured can only be Claude Code
   // providers, and the manager route resolves an unspecified app type the same
   // way — if the two disagreed, a badge would land on two providers at once.
+  assert.equal(DEFAULT_APP_TYPE, 'claude')
   assert.equal(effectiveAppType({}), 'claude')
   assert.equal(effectiveAppType({ appType: '' }), 'claude')
   assert.equal(effectiveAppType({ appType: 'codex' }), 'codex')
-  const next = activateCCSProvider({
-    legacy: { displayName: 'Legacy', isCurrent: true },
-    codex: { displayName: 'Codex', appType: 'codex', isCurrent: true },
-  }, 'legacy')
-  assert.equal(next.legacy.isCurrent, true)
-  assert.equal(next.codex.isCurrent, true, 'codex is a different app type')
 })
 
 test('providers come back in CC Switch order', () => {

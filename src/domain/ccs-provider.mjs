@@ -108,6 +108,11 @@ export function defineCCSProvider(z) {
     // creation time.
     sortIndex: z.number().step(1).min(0),
     createdAt: z.number(),
+    // Provenance, not behaviour: CC Switch's `is_current` column, carried
+    // across so a row imported from its database keeps the shape it had there.
+    // Nothing in this plugin acts on it any more — activation was retired in
+    // favour of membership of `dsh-llm-pi-ai`'s route table, which is derived
+    // on read and never stored (see `src/host/manager-routes.mjs`).
     isCurrent: z.boolean().default(false),
     inFailoverQueue: z.boolean().default(false),
     costMultiplier: z.number().min(0),
@@ -335,70 +340,16 @@ export function validateCCSProvider(value) {
  *
  * A record written before `appType` was captured carries none. Those can only
  * be Claude Code providers — it was the only app type this plugin wrote at the
- * time — so the default is `claude`. The manager route resolves an unspecified
- * app type the same way, and the two must agree: if they drifted, activating a
- * provider would clear the pointer for one app type while the row claimed
- * another, and the badge would sit on two providers at once.
+ * time — so the default is `claude`.
+ *
+ * `appType` here is a *label* (which CC Switch app a row came from), not a
+ * capability gate: nothing in the plugin writes external tool configuration
+ * any more, so it neither selects a writer nor decides anything about how the
+ * provider is served.
  */
 export const DEFAULT_APP_TYPE = 'claude'
 
 export function effectiveAppType(provider) {
   const own = provider?.appType
   return typeof own === 'string' && own !== '' ? own : DEFAULT_APP_TYPE
-}
-
-/**
- * Mark one provider current **within its own app type**, leaving every other
- * app type's pointer alone.
- *
- * CC Switch keeps `is_current` as a per-app singleton — its
- * `set_current_provider` (<code>database/dao/providers.rs</code>) clears the
- * flag `WHERE app_type = ?` and then sets it on one row, so the active Claude
- * provider and the active Codex provider coexist and switching one never
- * disturbs the other. A single global flag would make activating a Codex
- * provider silently deactivate the Claude provider that the user's other tool
- * is still pointed at, which is why this is a whole-catalogue edit returning
- * the complete next state rather than a single field write.
- *
- * Providers of other app types are returned untouched, not rewritten with a
- * normalised `isCurrent` — a row this call has no opinion about must not show
- * up as a settings diff on every activation.
- *
- * @param providers - the current catalogue, keyed by provider key.
- * @param key - the provider to activate; must already be present.
- * @throws when the key is not in the catalogue.
- */
-export function activateCCSProvider(providers, key) {
-  if (!providers || typeof providers !== 'object' || Array.isArray(providers)) {
-    throw new Error('providers must be an object')
-  }
-  if (!Object.hasOwn(providers, key)) throw new Error(`unknown provider: ${key}`)
-  const appType = effectiveAppType(providers[key])
-  return Object.fromEntries(
-    Object.entries(providers).map(([entryKey, provider]) => [
-      entryKey,
-      effectiveAppType(provider) === appType
-        ? { ...provider, isCurrent: entryKey === key }
-        : provider,
-    ]),
-  )
-}
-
-/**
- * The key marked current within each app type, as `{ <appType>: <key> }`.
- *
- * Mirrors `get_current_provider(app_type)`: the question "which provider is
- * active" only has an answer per app, so a caller that wants one global answer
- * is asking the wrong question.
- */
-export function currentKeysByApp(providers) {
-  const current = {}
-  for (const [key, provider] of Object.entries(providers ?? {})) {
-    if (provider?.isCurrent !== true) continue
-    const appType = effectiveAppType(provider)
-    // First wins, so the result does not depend on key order if a document
-    // somehow carries two current rows for one app.
-    if (!Object.hasOwn(current, appType)) current[appType] = key
-  }
-  return current
 }

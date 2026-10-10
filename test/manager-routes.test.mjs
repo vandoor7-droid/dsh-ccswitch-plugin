@@ -132,12 +132,34 @@ test('listing providers reports configuredness, never the key', async () => {
   await routeOf(routes, `${MANAGER_API_BASE}/providers`).handler(fakeReq(), res)
   const body = bodyOf(res)
   assert.equal(statusOf(res), 200)
-  assert.equal(body.current, 'ccs-a-11111111')
+  // There is no single "current" provider any more: membership is a set read
+  // from the route table, not a pointer into the catalogue.
+  assert.equal(body.current, undefined, 'the active-provider pointer is gone')
+  assert.equal(body.currentByApp, undefined, 'and so is the per-app pointer')
   assert.deepEqual(body.order, ['ccs-a-11111111'])
   assert.equal(body.providers['ccs-a-11111111'].credential, 'found')
   assert.equal(body.providers['ccs-a-11111111'].displayName, 'DeepSeek')
+  // The route table was never consulted, so nothing is a member yet.
+  assert.equal(body.providers['ccs-a-11111111'].inUse, false)
+  // The labelling set for the form, taken from the scanner's supported list.
+  assert.deepEqual(body.appTypes, [
+    'codex', 'claude', 'claude-desktop', 'opencode', 'gemini',
+    'hermes', 'grokbuild', 'pi', 'mcode', 'openclaw',
+  ])
   // The whole response, serialized, must not contain the secret anywhere.
   assert.doesNotMatch(JSON.stringify(body), /sk-secret-value/)
+
+  // The same catalogue read against a route table that does serve the key.
+  const memberRoutes = makeManagerRoutes({
+    settings,
+    credentials,
+    isLoopback: () => true,
+    readLiveProviders: async () => ({ 'ccs-a-11111111': { model: 'deepseek-chat' } }),
+  })
+  const memberRes = fakeRes()
+  await routeOf(memberRoutes, `${MANAGER_API_BASE}/providers`).handler(fakeReq(), memberRes)
+  assert.equal(statusOf(memberRes), 200)
+  assert.equal(bodyOf(memberRes).providers['ccs-a-11111111'].inUse, true)
 })
 
 test('a missing namespace reads as empty rather than failing', async () => {
@@ -290,60 +312,137 @@ test('deleting an unknown provider is a 404, not a silent success', async () => 
   assert.equal(statusOf(res), 404)
 })
 
-test('deleting the active provider is refused, and its secret survives', async () => {
-  // CC Switch refuses this too ("无法删除当前正在使用的供应商"): the provider's
-  // configuration is already written into the other tool's files, and only
-  // activation rewrites them, so dropping the row would strand those files on a
-  // provider the plugin can no longer switch away from.
+test('deleting a live provider withdraws it first, then forgets it and its secret', async () => {
+  // Membership lives in DSH's route table, so the row cannot simply be
+  // dropped: a member still routed to would become a dangling entry that
+  // nothing could ever take back out. The withdraw happens before the
+  // catalogue write, and the secret is dropped only after it.
   const settings = fakeSettings({
     'ccs-a-11111111': { ...SAMPLE, isCurrent: true, apiKeyEnv: 'DSH_CCSWITCH_11111111_API_KEY' },
     'ccs-b-22222222': { ...SAMPLE, displayName: 'B' },
   })
   const credentials = fakeCredentials({ DSH_CCSWITCH_11111111_API_KEY: 'sk-live' })
-  const routes = makeManagerRoutes({ settings, credentials, isLoopback: () => true })
+  const order = []
+  const routes = makeManagerRoutes({
+    settings: {
+      ...settings,
+      async mutate(ns, ops, rev) { order.push('mutate'); return settings.mutate(ns, ops, rev) },
+    },
+    credentials: {
+      ...credentials,
+      async unset(ref) { order.push('credential'); return credentials.unset(ref) },
+    },
+    isLoopback: () => true,
+    readLiveProviders: async () => ({ 'ccs-a-11111111': {} }),
+    withdrawProvider: async (key) => { order.push(`withdraw:${key}`) },
+  })
+  const res = fakeRes()
+  await routeOf(routes, `${MANAGER_API_BASE}/providers/delete`).handler(
+    withBody(fakeReq({ method: 'POST', headers: { host: '127.0.0.1:5624', ...POST_HEADERS } }), { key: 'ccs-a-11111111' }),
+    res,
+  )
+  assert.equal(statusOf(res), 200)
+  // `wasInUse` lets the UI say "and it was live" instead of implying nothing
+  // was serving traffic — it is reported, not refused.
+  assert.deepEqual(bodyOf(res), { key: 'ccs-a-11111111', status: 'removed', wasInUse: true })
+  assert.deepEqual(order, ['withdraw:ccs-a-11111111', 'mutate', 'credential'],
+    'withdraw first, then the catalogue write, and the secret only after that')
+  assert.equal(settings.providers['ccs-a-11111111'], undefined)
+  assert.equal(credentials.store.has('DSH_CCSWITCH_11111111_API_KEY'), false)
+})
+
+test('a withdraw that fails refuses the delete and leaves everything in place', async () => {
+  // The row cannot be forgotten while DSH still routes to it: that would
+  // strand the route table on a row the plugin no longer holds, so nothing
+  // could ever take it back out.
+  const settings = fakeSettings({
+    'ccs-a-11111111': { ...SAMPLE, apiKeyEnv: 'DSH_CCSWITCH_11111111_API_KEY' },
+  })
+  const credentials = fakeCredentials({ DSH_CCSWITCH_11111111_API_KEY: 'sk-live' })
+  const routes = makeManagerRoutes({
+    settings,
+    credentials,
+    isLoopback: () => true,
+    readLiveProviders: async () => ({ 'ccs-a-11111111': {} }),
+    withdrawProvider: async () => { throw new Error('llm-pi-ai refused the removal') },
+  })
   const res = fakeRes()
   await routeOf(routes, `${MANAGER_API_BASE}/providers/delete`).handler(
     withBody(fakeReq({ method: 'POST', headers: { host: '127.0.0.1:5624', ...POST_HEADERS } }), { key: 'ccs-a-11111111' }),
     res,
   )
   assert.equal(statusOf(res), 409)
-  // The reason code is what keeps this 409 from reading as a stale document:
-  // the client shows its own localized sentence for the row instead of the
-  // "reload and retry" banner, because retrying cannot help.
-  assert.equal(bodyOf(res).reason, 'active-provider')
-  assert.ok(settings.providers['ccs-a-11111111'], 'the active row is still there')
-  assert.deepEqual(credentials.calls, [], 'and its secret was not touched')
+  // The reason code keeps this 409 from reading as a stale document: the
+  // client shows its own localized sentence for the row, because retrying
+  // cannot help.
+  assert.equal(bodyOf(res).reason, 'in-use')
+  assert.match(bodyOf(res).error, /withdraw it first/)
+  assert.ok(settings.providers['ccs-a-11111111'], 'the catalogue row survives')
+  assert.equal(credentials.store.get('DSH_CCSWITCH_11111111_API_KEY'), 'sk-live', 'and so does its secret')
+  assert.deepEqual(credentials.calls, [], 'nothing was unset')
+  assert.deepEqual(settings.mutations, [], 'and the catalogue was not written')
 })
 
-test('the active provider can be deleted once it is no longer active', async () => {
-  // The guard follows the pointer, not the row: activating another provider
-  // releases the old one, which is what makes the refusal above actionable.
+test('a provider that is not live is deleted with no withdraw call', async () => {
+  // The guard follows the route table, not the row: nothing is a member, so
+  // there is nothing to take back out before the delete.
   const settings = fakeSettings({
     'ccs-a-11111111': { ...SAMPLE, isCurrent: true, apiKeyEnv: 'DSH_CCSWITCH_11111111_API_KEY' },
-    'ccs-b-22222222': { ...SAMPLE, displayName: 'B' },
   })
   const credentials = fakeCredentials({ DSH_CCSWITCH_11111111_API_KEY: 'sk-old' })
-  const routes = makeManagerRoutes({ settings, credentials, isLoopback: () => true })
-  const headers = { host: '127.0.0.1:5624', ...POST_HEADERS }
-
-  await routeOf(routes, `${MANAGER_API_BASE}/providers/activate`).handler(
-    withBody(fakeReq({ method: 'POST', headers }), { key: 'ccs-b-22222222' }),
-    fakeRes(),
-  )
+  const withdrawn = []
+  const routes = makeManagerRoutes({
+    settings,
+    credentials,
+    isLoopback: () => true,
+    readLiveProviders: async () => ({}),
+    withdrawProvider: async (key) => { withdrawn.push(key) },
+  })
   const res = fakeRes()
   await routeOf(routes, `${MANAGER_API_BASE}/providers/delete`).handler(
-    withBody(fakeReq({ method: 'POST', headers }), { key: 'ccs-a-11111111' }),
+    withBody(fakeReq({ method: 'POST', headers: { host: '127.0.0.1:5624', ...POST_HEADERS } }), { key: 'ccs-a-11111111' }),
     res,
   )
   assert.equal(statusOf(res), 200)
+  assert.deepEqual(bodyOf(res), { key: 'ccs-a-11111111', status: 'removed' })
+  assert.equal(bodyOf(res).wasInUse, undefined, 'nothing was serving this row')
+  assert.deepEqual(withdrawn, [], 'the route table was never touched')
   assert.equal(settings.providers['ccs-a-11111111'], undefined)
+  assert.equal(credentials.store.has('DSH_CCSWITCH_11111111_API_KEY'), false)
 })
 
-// --- activate --------------------------------------------------------------
-
-test('activating one provider clears every other one', async () => {
+test('deleting one provider never withdraws another, even while that one is live', async () => {
+  // The withdraw addresses the key being deleted and no other: a live member
+  // of an unrelated row must keep serving traffic.
   const settings = fakeSettings({
-    a: { ...SAMPLE, isCurrent: true },
+    'ccs-codex-22222222': { ...SAMPLE, appType: 'codex', apiKeyEnv: 'DSH_CCSWITCH_22222222_API_KEY' },
+    'ccs-claude-11111111': { ...SAMPLE, appType: 'claude', apiKeyEnv: 'DSH_CCSWITCH_11111111_API_KEY' },
+  })
+  const credentials = fakeCredentials({ DSH_CCSWITCH_11111111_API_KEY: 'sk-claude' })
+  const withdrawn = []
+  const routes = makeManagerRoutes({
+    settings,
+    credentials,
+    isLoopback: () => true,
+    readLiveProviders: async () => ({ 'ccs-codex-22222222': {} }),
+    withdrawProvider: async (key) => { withdrawn.push(key) },
+  })
+  const res = fakeRes()
+  await routeOf(routes, `${MANAGER_API_BASE}/providers/delete`).handler(
+    withBody(fakeReq({ method: 'POST', headers: { host: '127.0.0.1:5624', ...POST_HEADERS } }), { key: 'ccs-claude-11111111' }),
+    res,
+  )
+  assert.equal(statusOf(res), 200)
+  assert.deepEqual(bodyOf(res), { key: 'ccs-claude-11111111', status: 'removed' })
+  assert.deepEqual(withdrawn, [], 'the other member stays in the route table')
+  assert.ok(settings.providers['ccs-codex-22222222'], 'and its row is untouched')
+})
+
+// --- apply / withdraw -------------------------------------------------------
+
+test('applying a provider writes nothing to the catalogue and can be repeated', async () => {
+  const settings = fakeSettings({
+    a: { ...SAMPLE, displayName: 'A', isCurrent: true },
     b: { ...SAMPLE, displayName: 'B' },
   })
   const applied = []
@@ -351,97 +450,146 @@ test('activating one provider clears every other one', async () => {
     settings,
     credentials: fakeCredentials(),
     isLoopback: () => true,
-    applyProvider: async (key, provider) => { applied.push([key, provider.displayName]) },
+    applyProvider: async (key, provider) => { applied.push([key, provider.displayName]); return [] },
   })
-  const res = fakeRes()
-  await routeOf(routes, `${MANAGER_API_BASE}/providers/activate`).handler(
-    withBody(fakeReq({ method: 'POST', headers: { host: '127.0.0.1:5624', ...POST_HEADERS } }), { key: 'b' }),
-    res,
-  )
-  assert.equal(statusOf(res), 200)
-  assert.equal(bodyOf(res).applied, true)
-  assert.equal(settings.providers.a.isCurrent, false)
-  assert.equal(settings.providers.b.isCurrent, true)
+  const before = structuredClone(settings.providers)
+  const post = async (body) => {
+    const res = fakeRes()
+    await routeOf(routes, `${MANAGER_API_BASE}/providers/apply`).handler(
+      withBody(fakeReq({ method: 'POST', headers: { host: '127.0.0.1:5624', ...POST_HEADERS } }), body),
+      res,
+    )
+    return res
+  }
+
+  const first = await post({ key: 'b' })
+  assert.equal(statusOf(first), 200)
+  assert.equal(bodyOf(first).key, 'b')
+  assert.equal(bodyOf(first).status, 'applied')
+  assert.deepEqual(bodyOf(first).warnings, [])
+  // Membership lives in DSH's route table, not here: a catalogue snapshot
+  // before and after must be identical, so applying never races the revision
+  // an open editor is holding and never rewrites credentials or defaults.
+  assert.deepEqual(settings.providers, before, 'the catalogue is untouched')
+  assert.deepEqual(settings.mutations, [], 'and no mutate was issued at all')
   assert.deepEqual(applied, [['b', 'B']])
+
+  // Repeating it — even carrying a revision the server never issued, because
+  // apply does not take one — is a no-op on the catalogue all the same.
+  const second = await post({ key: 'b', expectedRevision: 999 })
+  assert.equal(statusOf(second), 200)
+  assert.equal(bodyOf(second).status, 'applied')
+  assert.deepEqual(settings.providers, before)
+  assert.deepEqual(settings.mutations, [])
+  assert.deepEqual(applied, [['b', 'B'], ['b', 'B']])
+
+  const missing = await post({ key: 'ghost' })
+  assert.equal(statusOf(missing), 404)
+  assert.equal(bodyOf(missing).error, 'no such provider')
+  assert.deepEqual(applied, [['b', 'B'], ['b', 'B']], 'nothing was projected for a key that is not there')
 })
 
-test('activating a Codex provider leaves the active Claude provider alone', async () => {
-  // CC Switch keeps one active provider PER APP (`set_current_provider` clears
-  // the flag `WHERE app_type = ?`), so the two pointers coexist. A single
-  // global flag would let activating a Codex provider silently deactivate the
-  // Claude provider that Claude Code is still configured to use.
-  const settings = fakeSettings({
-    'ccs-claude-11111111': { ...SAMPLE, displayName: 'Claude', appType: 'claude', isCurrent: true },
-    'ccs-codex-22222222': { ...SAMPLE, displayName: 'Codex', appType: 'codex' },
-  })
-  const routes = makeManagerRoutes({
+test('apply surfaces the projection warnings, and a projection throw is a 500', async () => {
+  const settings = fakeSettings({ a: { ...SAMPLE } })
+  const warning = 'llm-pi-ai is not installed, nothing was written'
+  const warned = makeManagerRoutes({
     settings,
     credentials: fakeCredentials(),
     isLoopback: () => true,
-    applyProvider: async () => [],
+    applyProvider: async () => [warning],
   })
-  await routeOf(routes, `${MANAGER_API_BASE}/providers/activate`).handler(
-    withBody(fakeReq({ method: 'POST', headers: { host: '127.0.0.1:5624', ...POST_HEADERS } }), { key: 'ccs-codex-22222222' }),
-    fakeRes(),
-  )
-  assert.equal(settings.providers['ccs-claude-11111111'].isCurrent, true, 'the claude pointer must survive')
-  assert.equal(settings.providers['ccs-codex-22222222'].isCurrent, true)
-})
-
-test('the list reports the active provider per app type', async () => {
-  const settings = fakeSettings({
-    'ccs-claude-11111111': { ...SAMPLE, appType: 'claude', isCurrent: true },
-    'ccs-codex-22222222': { ...SAMPLE, appType: 'codex', isCurrent: true },
-  })
-  const routes = makeManagerRoutes({ settings, credentials: fakeCredentials(), isLoopback: () => true })
   const res = fakeRes()
-  await routeOf(routes, `${MANAGER_API_BASE}/providers`).handler(
-    fakeReq({ method: 'GET', url: `${MANAGER_API_BASE}/providers`, headers: { host: '127.0.0.1:5624' } }),
+  await routeOf(warned, `${MANAGER_API_BASE}/providers/apply`).handler(
+    withBody(fakeReq({ method: 'POST', headers: { host: '127.0.0.1:5624', ...POST_HEADERS } }), { key: 'a' }),
     res,
   )
   assert.equal(statusOf(res), 200)
-  assert.deepEqual(bodyOf(res).currentByApp, {
-    claude: 'ccs-claude-11111111',
-    codex: 'ccs-codex-22222222',
-  })
-})
+  assert.equal(bodyOf(res).status, 'applied')
+  assert.deepEqual(bodyOf(res).warnings, [warning])
 
-test('a non-active provider of another app type does not block a delete', async () => {
-  // The guard follows the row's OWN app pointer. A global test would refuse to
-  // delete any provider merely because some unrelated provider was active.
-  const settings = fakeSettings({
-    'ccs-codex-22222222': { ...SAMPLE, appType: 'codex', isCurrent: true, apiKeyEnv: 'DSH_CCSWITCH_22222222_API_KEY' },
-    'ccs-claude-11111111': { ...SAMPLE, appType: 'claude', apiKeyEnv: 'DSH_CCSWITCH_11111111_API_KEY' },
-  })
-  const routes = makeManagerRoutes({ settings, credentials: fakeCredentials(), isLoopback: () => true })
-  const res = fakeRes()
-  await routeOf(routes, `${MANAGER_API_BASE}/providers/delete`).handler(
-    withBody(fakeReq({ method: 'POST', headers: { host: '127.0.0.1:5624', ...POST_HEADERS } }), { key: 'ccs-claude-11111111' }),
-    res,
-  )
-  assert.equal(statusOf(res), 200)
-})
-
-test('a failed projection still reports the activation it did commit', async () => {
-  // The catalogue write and the projection into DSH are separate steps. Once
-  // the catalogue says "b is active" that is the durable fact; reporting it as
-  // a failure would send the user to retry something that already happened.
-  const settings = fakeSettings({ a: { ...SAMPLE, isCurrent: true }, b: { ...SAMPLE } })
-  const routes = makeManagerRoutes({
+  // A projection that throws has committed nothing anywhere, so there is no
+  // half-done state to report as success — this is a plain server error.
+  const thrown = makeManagerRoutes({
     settings,
     credentials: fakeCredentials(),
     isLoopback: () => true,
     applyProvider: async () => { throw new Error('llm-pi-ai rejected the route') },
   })
-  const res = fakeRes()
-  await routeOf(routes, `${MANAGER_API_BASE}/providers/activate`).handler(
-    withBody(fakeReq({ method: 'POST', headers: { host: '127.0.0.1:5624', ...POST_HEADERS } }), { key: 'b' }),
-    res,
+  const errRes = fakeRes()
+  await routeOf(thrown, `${MANAGER_API_BASE}/providers/apply`).handler(
+    withBody(fakeReq({ method: 'POST', headers: { host: '127.0.0.1:5624', ...POST_HEADERS } }), { key: 'a' }),
+    errRes,
   )
+  assert.equal(statusOf(errRes), 500)
+  assert.match(bodyOf(errRes).error, /could not apply/)
+  assert.deepEqual(settings.mutations, [], 'the catalogue was never written either way')
+})
+
+test('the list shows every live member at once', async () => {
+  // Several members are in the route table simultaneously — that is what
+  // "applied" means now — so each row reports its own membership.
+  const settings = fakeSettings({
+    'ccs-claude-11111111': { ...SAMPLE, appType: 'claude', isCurrent: true },
+    'ccs-codex-22222222': { ...SAMPLE, appType: 'codex' },
+    'ccs-idle-33333333': { ...SAMPLE, displayName: 'Idle' },
+  })
+  const routes = makeManagerRoutes({
+    settings,
+    credentials: fakeCredentials(),
+    isLoopback: () => true,
+    readLiveProviders: async () => ({
+      'ccs-claude-11111111': {},
+      'ccs-codex-22222222': {},
+    }),
+  })
+  const res = fakeRes()
+  await routeOf(routes, `${MANAGER_API_BASE}/providers`).handler(fakeReq(), res)
   assert.equal(statusOf(res), 200)
-  assert.equal(bodyOf(res).applied, false)
-  assert.equal(settings.providers.b.isCurrent, true)
-  assert.match(bodyOf(res).warnings.join(' '), /did not accept/)
+  const body = bodyOf(res)
+  assert.equal(body.current, undefined)
+  assert.equal(body.currentByApp, undefined)
+  assert.equal(Object.keys(body.providers).length, 3)
+  assert.equal(body.providers['ccs-claude-11111111'].inUse, true)
+  assert.equal(body.providers['ccs-codex-22222222'].inUse, true)
+  assert.equal(body.providers['ccs-idle-33333333'].inUse, false)
+})
+
+test('withdrawing removes the member and leaves the catalogue alone', async () => {
+  const settings = fakeSettings({
+    'ccs-a-11111111': { ...SAMPLE, apiKeyEnv: 'DSH_CCSWITCH_11111111_API_KEY' },
+  })
+  const credentials = fakeCredentials({ DSH_CCSWITCH_11111111_API_KEY: 'sk-keep' })
+  const withdrawn = []
+  const routes = makeManagerRoutes({
+    settings,
+    credentials,
+    isLoopback: () => true,
+    readLiveProviders: async () => ({ 'ccs-a-11111111': {}, 'ccs-orphan-99999999': {} }),
+    withdrawProvider: async (key) => { withdrawn.push(key) },
+  })
+  const post = async (key) => {
+    const res = fakeRes()
+    await routeOf(routes, `${MANAGER_API_BASE}/providers/withdraw`).handler(
+      withBody(fakeReq({ method: 'POST', headers: { host: '127.0.0.1:5624', ...POST_HEADERS } }), { key }),
+      res,
+    )
+    return res
+  }
+
+  const known = await post('ccs-a-11111111')
+  assert.equal(statusOf(known), 200)
+  assert.deepEqual(bodyOf(known), { key: 'ccs-a-11111111', status: 'withdrawn', inCatalogue: true })
+
+  // A member the catalogue has forgotten is still worth removing — an orphan
+  // in the route table is exactly the state a failed delete leaves behind.
+  const orphan = await post('ccs-orphan-99999999')
+  assert.equal(statusOf(orphan), 200)
+  assert.deepEqual(bodyOf(orphan), { key: 'ccs-orphan-99999999', status: 'withdrawn', inCatalogue: false })
+
+  assert.deepEqual(withdrawn, ['ccs-a-11111111', 'ccs-orphan-99999999'], 'withdraw is called with the key, known or not')
+  assert.deepEqual(settings.mutations, [], 'the catalogue is never written by a withdraw')
+  assert.ok(settings.providers['ccs-a-11111111'], 'the row stays, so apply is offered again')
+  assert.equal(credentials.store.has('DSH_CCSWITCH_11111111_API_KEY'), true, 'and its secret is kept')
 })
 
 // --- fences ----------------------------------------------------------------
@@ -530,11 +678,16 @@ test('no route uses a dynamic path segment', () => {
     `${MANAGER_API_BASE}/providers`,
     `${MANAGER_API_BASE}/providers/save`,
     `${MANAGER_API_BASE}/providers/delete`,
-    `${MANAGER_API_BASE}/providers/activate`,
+    `${MANAGER_API_BASE}/providers/apply`,
+    `${MANAGER_API_BASE}/providers/withdraw`,
     `${MANAGER_API_BASE}/providers/reorder`,
     `${MANAGER_API_BASE}/presets`,
-    `${MANAGER_API_BASE}/writers/run`,
   ])
+  // The retired subsystem must not come back: neither activation nor the
+  // external-writer runner has a route any more.
+  const paths = routes.map((route) => route.path)
+  assert.ok(!paths.includes(`${MANAGER_API_BASE}/providers/activate`))
+  assert.ok(!paths.includes(`${MANAGER_API_BASE}/writers/run`))
 })
 
 // --- reorder ---------------------------------------------------------------

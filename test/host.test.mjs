@@ -5,20 +5,130 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { apply, inject, name, Config } from '../src/host/index.mjs'
 
-test('Host apply registers injected routes and disposes them', () => {
+// --- fakes for driving a registered route -----------------------------------
+
+function fakeRequest(method, path, body) {
+  const request = {
+    method,
+    url: path,
+    // Loopback + a same-origin marker, so methodFence lets a state-changing
+    // POST through without an Origin header.
+    headers: { host: '127.0.0.1:5624', 'x-dsh-ccswitch-origin': 'same-origin' },
+    socket: { remoteAddress: '127.0.0.1' },
+  }
+  if (body !== undefined) {
+    request[Symbol.asyncIterator] = async function* () { yield Buffer.from(JSON.stringify(body)) }
+  }
+  return request
+}
+
+function fakeResponse() {
+  const calls = []
+  return {
+    calls,
+    writeHead(status, headers) { calls.push(['head', status, headers]) },
+    end(payload) { calls.push(['end', payload]) },
+  }
+}
+
+function statusOf(res) {
+  return res.calls.find((call) => call[0] === 'head')[1]
+}
+
+function bodyOf(res) {
+  return JSON.parse(res.calls.find((call) => call[0] === 'end')[1])
+}
+
+/**
+ * A stand-in for `ctx.settings` holding both namespaces the manager routes
+ * touch: this plugin's catalogue, and `llm-pi-ai` — the route table whose
+ * membership *is* "applied". `describe()` hands out a snapshot per namespace
+ * and `mutate()` applies path ops against a compare-and-set on the revision,
+ * which is what makes an apply/withdraw observable from the outside.
+ */
+function fakeSettings(docs, configured) {
+  const mutations = []
+  return {
+    mutations,
+    docs,
+    async get() { return { providers: {} } },
+    configure(presentation, owner) {
+      configured.push([presentation, owner])
+      return () => {}
+    },
+    async describe() {
+      return Object.entries(docs).map(([ns, doc]) => ({
+        ns,
+        revision: doc.revision,
+        value: structuredClone(doc.value),
+      }))
+    },
+    async mutate(ns, ops, expectedRevision) {
+      const doc = docs[ns]
+      assert.ok(doc, `unexpected namespace ${ns}`)
+      if (expectedRevision !== undefined && expectedRevision !== doc.revision) {
+        throw Object.assign(new Error(`settings namespace "${ns}" changed since it was read`), { code: 'SETTINGS_CONFLICT' })
+      }
+      mutations.push({ ns, ops, expectedRevision })
+      for (const op of ops) {
+        assert.equal(op.path[0], 'providers', `unexpected op path ${op.path.join('.')}`)
+        if (op.path.length === 1) {
+          doc.value.providers = structuredClone(op.value)
+          continue
+        }
+        const key = op.path[1]
+        if (op.op === 'unset') delete doc.value.providers[key]
+        else doc.value.providers[key] = structuredClone(op.value)
+      }
+      doc.revision += 1
+    },
+  }
+}
+
+const LIVE_KEY = 'ccs-live-11111111'
+const COLD_KEY = 'ccs-cold-22222222'
+
+test('Host apply registers injected routes and disposes them', async () => {
   const registered = []
   const disposed = []
   const effects = []
   const configured = []
   let routeCleanup
-  const ctx = {
-    settings: {
-      async get() { return { providers: {} } },
-      configure(presentation, owner) {
-        configured.push([presentation, owner])
-        return () => {}
+  // Two providers in the catalogue; only one of them is a member of
+  // `llm-pi-ai`'s route table, so `inUse` has both answers to give.
+  const settings = fakeSettings({
+    'dsh-ccswitch-plugin': {
+      revision: 3,
+      value: {
+        providers: {
+          [LIVE_KEY]: {
+            displayName: 'Live One',
+            api: 'openai-completions',
+            baseURL: 'https://api.live.test',
+            models: [{ id: 'm-1' }],
+            apiKeyEnv: 'DSH_CCSWITCH_11111111_API_KEY',
+          },
+          [COLD_KEY]: {
+            displayName: 'Cold Two',
+            api: 'openai-completions',
+            baseURL: 'https://cold.test',
+            models: [{ id: 'm-2' }],
+            apiKeyEnv: 'DSH_CCSWITCH_22222222_API_KEY',
+          },
+        },
       },
     },
+    'llm-pi-ai': {
+      revision: 11,
+      value: {
+        providers: {
+          [LIVE_KEY]: { displayName: 'Live One', baseURL: 'https://api.live.test' },
+        },
+      },
+    },
+  }, configured)
+  const ctx = {
+    settings,
     credentials: {},
     fiber: { id: 'root' },
     webServer: {
@@ -51,11 +161,59 @@ test('Host apply registers injected routes and disposes them', () => {
     '/api/dsh-ccswitch-manager/providers',
     '/api/dsh-ccswitch-manager/providers/save',
     '/api/dsh-ccswitch-manager/providers/delete',
-    '/api/dsh-ccswitch-manager/providers/activate',
+    '/api/dsh-ccswitch-manager/providers/apply',
+    '/api/dsh-ccswitch-manager/providers/withdraw',
     '/api/dsh-ccswitch-manager/providers/reorder',
     '/api/dsh-ccswitch-manager/presets',
-    '/api/dsh-ccswitch-manager/writers/run',
   ])
+
+  // The three membership deps apply() injects into makeManagerRoutes must be
+  // the ones actually wired through — driving the registered handlers is the
+  // only assertion that reaches the composition half rather than the routes
+  // in isolation.
+  const routes = new Map(registered.map((route) => [route.path, route]))
+  const call = async (path, request) => {
+    const route = routes.get(path)
+    assert.ok(route, `no route for ${path}`)
+    const res = fakeResponse()
+    await route.handler(request, res)
+    return res
+  }
+
+  // readLiveProviders: membership is read back from `llm-pi-ai` on every list.
+  const list = bodyOf(await call('/api/dsh-ccswitch-manager/providers', fakeRequest('GET', '/api/dsh-ccswitch-manager/providers')))
+  assert.equal(list.providers[LIVE_KEY].inUse, true)
+  assert.equal(list.providers[COLD_KEY].inUse, false)
+
+  // applyProvider: a POST to the apply route must write the member into the
+  // route table, through the injected helper, at the revision it read.
+  const applied = await call(
+    '/api/dsh-ccswitch-manager/providers/apply',
+    fakeRequest('POST', '/api/dsh-ccswitch-manager/providers/apply', { key: COLD_KEY }),
+  )
+  assert.equal(statusOf(applied), 200)
+  assert.deepEqual(bodyOf(applied), { key: COLD_KEY, status: 'applied', warnings: [] })
+  assert.deepEqual(settings.mutations.at(-1), {
+    ns: 'llm-pi-ai',
+    ops: [{ op: 'set', path: ['providers', COLD_KEY], value: settings.docs['llm-pi-ai'].value.providers[COLD_KEY] }],
+    expectedRevision: 11,
+  })
+  assert.equal(Object.hasOwn(settings.docs['llm-pi-ai'].value.providers, COLD_KEY), true)
+
+  // withdrawProvider: the same for taking the member back out.
+  const withdrawn = await call(
+    '/api/dsh-ccswitch-manager/providers/withdraw',
+    fakeRequest('POST', '/api/dsh-ccswitch-manager/providers/withdraw', { key: LIVE_KEY }),
+  )
+  assert.equal(statusOf(withdrawn), 200)
+  assert.deepEqual(bodyOf(withdrawn), { key: LIVE_KEY, status: 'withdrawn', inCatalogue: true })
+  assert.deepEqual(settings.mutations.at(-1), {
+    ns: 'llm-pi-ai',
+    ops: [{ op: 'unset', path: ['providers', LIVE_KEY] }],
+    expectedRevision: 12,
+  })
+  assert.equal(Object.hasOwn(settings.docs['llm-pi-ai'].value.providers, LIVE_KEY), false)
+
   routeCleanup()
   assert.deepEqual(disposed, registered.map((route) => route.path))
 })

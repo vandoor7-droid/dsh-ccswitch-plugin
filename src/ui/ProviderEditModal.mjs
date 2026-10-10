@@ -41,9 +41,24 @@ const MAX_MODELS = 200;
  */
 /**
  * The app types the form offers when the Host sends none. Mirrors
- * `WRITER_APP_TYPES`; see `sanitizeAppTypes` in the manager controller.
+ * `SUPPORTED_APP_TYPES` in `lib/core/scan.js` (which cannot be bundled for the
+ * browser); see `sanitizeAppTypes` in the manager controller for the other copy.
+ *
+ * These are labels for where a row came from, not a capability list: the Host
+ * sends them as-is and nothing refuses a type it does not recognise.
  */
-const FALLBACK_APP_TYPES = ["claude", "codex"];
+const FALLBACK_APP_TYPES = [
+  "codex",
+  "claude",
+  "claude-desktop",
+  "opencode",
+  "gemini",
+  "hermes",
+  "grokbuild",
+  "pi",
+  "mcode",
+  "openclaw",
+];
 
 export const PROBLEM_FALLBACK = {
   'displayName-required': '请填写名称。',
@@ -80,12 +95,12 @@ export function emptyDraft() {
     limitMonthlyUsd: "",
     inFailoverQueue: false,
     models: [blankModel()],
-    // Every stored provider belongs to one app, and this value decides which
-    // tool's config file an activation rewrites. It is set here rather than
-    // left absent: an absent one falls back to `claude` deep in the Host, so a
-    // provider added by hand silently became a Claude Code provider with
-    // nothing on screen saying so. The default is still `claude` — the form
-    // now shows it, and the user can change it.
+    // Every stored provider carries one app: the CC Switch app the row came
+    // from. It is set here rather than left absent so the form shows a value
+    // instead of a blank the user has to guess at — an absent one falls back to
+    // `claude` deep in the Host, so a provider added by hand would silently be
+    // filed under Claude Code with nothing on screen saying so. The label does
+    // not gate anything: nothing here writes an external tool's configuration.
     appType: "claude",
     sourceProfileId: undefined,
     isCurrent: false,
@@ -353,7 +368,7 @@ function field(label, control, hint, hintId) {
  * @param {object} props.initialDraft - see {@link emptyDraft}.
  * @param {'create'|'edit'} props.mode - picks the title.
  * @param {string[]} props.protocols - the Host's authoritative protocol list.
- * @param {string[]} props.appTypes - the app types with a writer, per the Host.
+ * @param {string[]} props.appTypes - the app types the Host knows, per the Host.
  * @param {boolean} [props.saving] - a save is in flight.
  * @param {string[]} [props.errors] - the Host's own validation list after a 400.
  * @param {boolean} [props.conflict] - the last save lost a revision race.

@@ -16,7 +16,8 @@ export const MANAGER_API_BASE = '/api/dsh-ccswitch-manager'
 const PROVIDERS_PATH = `${MANAGER_API_BASE}/providers`
 const SAVE_PATH = `${PROVIDERS_PATH}/save`
 const DELETE_PATH = `${PROVIDERS_PATH}/delete`
-const ACTIVATE_PATH = `${PROVIDERS_PATH}/activate`
+const APPLY_PATH = `${PROVIDERS_PATH}/apply`
+const WITHDRAW_PATH = `${PROVIDERS_PATH}/withdraw`
 const REORDER_PATH = `${PROVIDERS_PATH}/reorder`
 const PRESETS_PATH = `${MANAGER_API_BASE}/presets`
 /**
@@ -46,10 +47,24 @@ const FALLBACK_PROTOCOLS = ['openai-completions', 'openai-responses', 'anthropic
 /**
  * The app types the form offers when the Host sends none.
  *
- * Mirrors `WRITER_APP_TYPES` in `src/host/writers.js` — the app types that
- * have a writer, and so the only ones an activation can do anything for.
+ * Mirrors `SUPPORTED_APP_TYPES` in `lib/core/scan.js`, which cannot be imported
+ * here: that module reaches `node:os`/`node:sqlite` and so cannot be bundled for
+ * the browser. A value here is a *label* (which CC Switch app a row came from),
+ * not a capability — nothing writes external tool configuration any more, so an
+ * unrecognised type is shown rather than refused.
  */
-const FALLBACK_APP_TYPES = ['claude', 'codex']
+const FALLBACK_APP_TYPES = [
+  'codex',
+  'claude',
+  'claude-desktop',
+  'opencode',
+  'gemini',
+  'hermes',
+  'grokbuild',
+  'pi',
+  'mcode',
+  'openclaw',
+]
 
 function defaultFetch(url, init) {
   return globalThis.fetch(url, init)
@@ -117,7 +132,10 @@ export function sanitizeProvider(key, value) {
     iconColor: optionalText(source.iconColor),
     appType: optionalText(source.appType),
     sourceProfileId: optionalText(source.sourceProfileId),
+    // `isCurrent` is provenance from CC Switch's database and is never acted
+    // on; `inUse` is what the row's apply/withdraw control is bound to.
     isCurrent: source.isCurrent === true,
+    inUse: source.inUse === true,
     inFailoverQueue: source.inFailoverQueue === true,
     costMultiplier: finiteNumber(source.costMultiplier),
     limitDailyUsd: finiteNumber(source.limitDailyUsd),
@@ -286,12 +304,11 @@ function withoutProbe(probes, key) {
 }
 
 /**
- * The warnings an activation returned.
+ * The warnings an apply or withdraw returned.
  *
- * These explain the cases where the catalogue now says "this one is active" but
- * DSH itself could not be pointed at it — the one outcome the user cannot see
- * from the row's badge, so they are kept verbatim rather than folded into a
- * generic "saved".
+ * These explain the cases where the catalogue and DSH's route table disagree —
+ * the one outcome the user cannot see from the row's badge, so they are kept
+ * verbatim rather than folded into a generic "saved".
  */
 export function sanitizeWarnings(value) {
   return (Array.isArray(value) ? value : [])
@@ -317,7 +334,6 @@ export function createCCSwitchManagerController({ fetchImpl = defaultFetch, onCh
     exists: false,
     providers: {},
     order: [],
-    current: undefined,
     apiProtocols: [...FALLBACK_PROTOCOLS],
     appTypes: [...FALLBACK_APP_TYPES],
     presets: [],
@@ -327,8 +343,12 @@ export function createCCSwitchManagerController({ fetchImpl = defaultFetch, onCh
     pendingAction: undefined,
     /** The Host's own validation list from a rejected save, for the form. */
     saveErrors: [],
-    /** `{key, applied, warnings}` from the last activation, until dismissed. */
-    activation: undefined,
+    /**
+     * `{key, action, warnings}` from the last apply or withdraw, until
+     * dismissed. Only the "DSH did not take the route" half is worth a banner:
+     * everything else already shows on the row itself.
+     */
+    notice: undefined,
     /**
      * Per-row connection verdicts, keyed by provider key — the manager's
      * equivalent of the import tab's `probes`. Each value is
@@ -403,7 +423,6 @@ export function createCCSwitchManagerController({ fetchImpl = defaultFetch, onCh
         // deleted in another tab must not leave a green "connected" badge
         // behind for a row that is about to be re-created with the same key.
         probes: pruneProbes(snapshot.probes, providers),
-        current: optionalText(body?.current),
         apiProtocols: sanitizeProtocols(body?.apiProtocols),
         appTypes: sanitizeAppTypes(body?.appTypes),
       })
@@ -452,7 +471,7 @@ export function createCCSwitchManagerController({ fetchImpl = defaultFetch, onCh
       // a stale validation message is worse than none, because the field it
       // names may already be fixed.
       saveErrors: [],
-      activation: undefined,
+      notice: undefined,
     })
     try {
       const response = await request(path, {
@@ -484,11 +503,11 @@ export function createCCSwitchManagerController({ fetchImpl = defaultFetch, onCh
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       // 409 is the Host's staleness signal, with one exception: refusing to
-      // delete the active provider is also a 409, but it is a statement about
-      // the row rather than about the document. Calling that a conflict would
-      // hide it behind the stale-document banner and invite a retry that can
-      // never succeed.
-      const conflict = error?.status === 409 && error?.reason !== 'active-provider'
+      // delete a provider DSH still routes to is also a 409, but it is a
+      // statement about the row rather than about the document. Calling that a
+      // conflict would hide it behind the stale-document banner and invite a
+      // retry that can never succeed — the answer is to withdraw it first.
+      const conflict = error?.status === 409 && error?.reason !== 'in-use'
       error.conflict = conflict
       if (conflict) {
         // Re-read first, then publish: performRefresh clears `error`, so doing
@@ -505,7 +524,8 @@ export function createCCSwitchManagerController({ fetchImpl = defaultFetch, onCh
         error: message,
         conflict,
         // Only a save route answers with a per-field list; carrying one from a
-        // delete or activate would put a form's errors on an unrelated dialog.
+        // delete or a membership change would put a form's errors on an
+        // unrelated dialog.
         saveErrors: pendingAction === 'save' && Array.isArray(error?.errors) ? error.errors : [],
         pendingKey: undefined,
         pendingAction: undefined,
@@ -513,6 +533,21 @@ export function createCCSwitchManagerController({ fetchImpl = defaultFetch, onCh
       throw error
     }
   }
+
+  /**
+   * Build the banner for a membership change, capturing the display name now.
+   *
+   * The name has to be taken before the re-read that follows every write: a
+   * delete removes the row, so by the time the banner is rendered the key
+   * alone is all that is left to show.
+   */
+  const rowNotice = (key, action, extra = {}) => ({
+    key,
+    name: snapshot.providers?.[key]?.displayName ?? key,
+    action,
+    warnings: [],
+    ...extra,
+  })
 
   const controller = {
     getSnapshot: () => snapshot,
@@ -562,27 +597,64 @@ export function createCCSwitchManagerController({ fetchImpl = defaultFetch, onCh
       const revision = Number.isInteger(expectedRevision) ? expectedRevision : snapshot.revision
       const body = { key: target }
       if (revision !== undefined) body.expectedRevision = revision
-      return runMutation({ path: DELETE_PATH, body, pendingKey: target, pendingAction: 'delete' })
-    }),
-    activate: (key, expectedRevision) => enqueue(async () => {
-      const target = optionalText(key)
-      if (target === undefined) throw new Error('activate requires a provider key')
-      const revision = Number.isInteger(expectedRevision) ? expectedRevision : snapshot.revision
-      const body = { key: target }
-      if (revision !== undefined) body.expectedRevision = revision
       return runMutation({
-        path: ACTIVATE_PATH,
+        path: DELETE_PATH,
         body,
         pendingKey: target,
-        pendingAction: 'activate',
+        pendingAction: 'delete',
+        patch: (response) => (
+          // Only a row that was serving traffic says anything the badge did
+          // not already say, so an ordinary delete publishes no banner.
+          response?.wasInUse === true
+            ? { notice: rowNotice(target, 'delete', { wasInUse: true }) }
+            : undefined
+        ),
+      })
+    }),
+    /**
+     * Add one provider to DSH's route table.
+     *
+     * Deliberately not a "switch": nothing else is displaced, the catalogue row
+     * is not rewritten, and no revision travels with the call because the
+     * document is not written at all. Two providers can be applied at once,
+     * which is the whole point of the additive model.
+     */
+    apply: (key) => enqueue(async () => {
+      const target = optionalText(key)
+      if (target === undefined) throw new Error('apply requires a provider key')
+      return runMutation({
+        path: APPLY_PATH,
+        body: { key: target },
+        pendingKey: target,
+        pendingAction: 'apply',
         patch: (response) => ({
-          activation: {
-            key: target,
-            // Only an explicit `applied: false` means DSH did not take it; a
-            // Host that omits the field succeeded.
-            applied: response?.applied !== false,
+          notice: rowNotice(target, 'apply', { warnings: sanitizeWarnings(response?.warnings) }),
+        }),
+      })
+    }),
+    /**
+     * Take one provider back out of DSH's route table.
+     *
+     * The mirror of `apply`, and just as narrow: the catalogue row, its stored
+     * credential and every default are left exactly as they were, so applying
+     * again restores the previous state without a re-entry.
+     */
+    withdraw: (key) => enqueue(async () => {
+      const target = optionalText(key)
+      if (target === undefined) throw new Error('withdraw requires a provider key')
+      return runMutation({
+        path: WITHDRAW_PATH,
+        body: { key: target },
+        pendingKey: target,
+        pendingAction: 'withdraw',
+        patch: (response) => ({
+          notice: rowNotice(target, 'withdraw', {
+            // `inCatalogue: false` means the route table held a key the
+            // catalogue does not — worth saying, since only this tab could
+            // have produced one.
+            orphan: response?.inCatalogue === false,
             warnings: sanitizeWarnings(response?.warnings),
-          },
+          }),
         }),
       })
     }),
@@ -611,8 +683,8 @@ export function createCCSwitchManagerController({ fetchImpl = defaultFetch, onCh
       if (revision !== undefined) body.expectedRevision = revision
       return runMutation({ path: REORDER_PATH, body, pendingAction: 'reorder' })
     }),
-    dismissActivation: () => {
-      publish({ ...snapshot, activation: undefined })
+    dismissNotice: () => {
+      publish({ ...snapshot, notice: undefined })
     },
     /**
      * Test one row's endpoint without changing anything.

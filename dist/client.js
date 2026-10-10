@@ -463,14 +463,26 @@ window.__ModuleLoader__.load({
 		var PROVIDERS_PATH = `${MANAGER_API_BASE}/providers`;
 		var SAVE_PATH = `${PROVIDERS_PATH}/save`;
 		var DELETE_PATH = `${PROVIDERS_PATH}/delete`;
-		var ACTIVATE_PATH = `${PROVIDERS_PATH}/activate`;
+		var APPLY_PATH = `${PROVIDERS_PATH}/apply`;
+		var WITHDRAW_PATH = `${PROVIDERS_PATH}/withdraw`;
 		var REORDER_PATH = `${PROVIDERS_PATH}/reorder`;
 		var PRESETS_PATH = `${MANAGER_API_BASE}/presets`;
 		var PROBE_PATH = "/api/dsh-ccswitch/probe";
 		var SAME_ORIGIN_HEADER2 = "x-dsh-ccswitch-origin";
 		var SAME_ORIGIN_VALUE2 = "same-origin";
 		var FALLBACK_PROTOCOLS = ["openai-completions", "openai-responses", "anthropic-messages"];
-		var FALLBACK_APP_TYPES = ["claude", "codex"];
+		var FALLBACK_APP_TYPES = [
+		  "codex",
+		  "claude",
+		  "claude-desktop",
+		  "opencode",
+		  "gemini",
+		  "hermes",
+		  "grokbuild",
+		  "pi",
+		  "mcode",
+		  "openclaw"
+		];
 		function defaultFetch2(url, init) {
 		  return globalThis.fetch(url, init);
 		}
@@ -520,7 +532,10 @@ window.__ModuleLoader__.load({
 		    iconColor: optionalText(source.iconColor),
 		    appType: optionalText(source.appType),
 		    sourceProfileId: optionalText(source.sourceProfileId),
+		    // `isCurrent` is provenance from CC Switch's database and is never acted
+		    // on; `inUse` is what the row's apply/withdraw control is bound to.
 		    isCurrent: source.isCurrent === true,
+		    inUse: source.inUse === true,
 		    inFailoverQueue: source.inFailoverQueue === true,
 		    costMultiplier: finiteNumber(source.costMultiplier),
 		    limitDailyUsd: finiteNumber(source.limitDailyUsd),
@@ -636,7 +651,6 @@ window.__ModuleLoader__.load({
 		    exists: false,
 		    providers: {},
 		    order: [],
-		    current: void 0,
 		    apiProtocols: [...FALLBACK_PROTOCOLS],
 		    appTypes: [...FALLBACK_APP_TYPES],
 		    presets: [],
@@ -646,8 +660,12 @@ window.__ModuleLoader__.load({
 		    pendingAction: void 0,
 		    /** The Host's own validation list from a rejected save, for the form. */
 		    saveErrors: [],
-		    /** `{key, applied, warnings}` from the last activation, until dismissed. */
-		    activation: void 0,
+		    /**
+		     * `{key, action, warnings}` from the last apply or withdraw, until
+		     * dismissed. Only the "DSH did not take the route" half is worth a banner:
+		     * everything else already shows on the row itself.
+		     */
+		    notice: void 0,
 		    /**
 		     * Per-row connection verdicts, keyed by provider key — the manager's
 		     * equivalent of the import tab's `probes`. Each value is
@@ -710,7 +728,6 @@ window.__ModuleLoader__.load({
 		        // deleted in another tab must not leave a green "connected" badge
 		        // behind for a row that is about to be re-created with the same key.
 		        probes: pruneProbes2(snapshot.probes, providers),
-		        current: optionalText(body?.current),
 		        apiProtocols: sanitizeProtocols(body?.apiProtocols),
 		        appTypes: sanitizeAppTypes(body?.appTypes)
 		      });
@@ -747,7 +764,7 @@ window.__ModuleLoader__.load({
 		      // a stale validation message is worse than none, because the field it
 		      // names may already be fixed.
 		      saveErrors: [],
-		      activation: void 0
+		      notice: void 0
 		    });
 		    try {
 		      const response = await request(path, {
@@ -774,7 +791,7 @@ window.__ModuleLoader__.load({
 		      return snapshot;
 		    } catch (error) {
 		      const message = error instanceof Error ? error.message : String(error);
-		      const conflict = error?.status === 409 && error?.reason !== "active-provider";
+		      const conflict = error?.status === 409 && error?.reason !== "in-use";
 		      error.conflict = conflict;
 		      if (conflict) {
 		        try {
@@ -788,7 +805,8 @@ window.__ModuleLoader__.load({
 		        error: message,
 		        conflict,
 		        // Only a save route answers with a per-field list; carrying one from a
-		        // delete or activate would put a form's errors on an unrelated dialog.
+		        // delete or a membership change would put a form's errors on an
+		        // unrelated dialog.
 		        saveErrors: pendingAction === "save" && Array.isArray(error?.errors) ? error.errors : [],
 		        pendingKey: void 0,
 		        pendingAction: void 0
@@ -796,6 +814,13 @@ window.__ModuleLoader__.load({
 		      throw error;
 		    }
 		  };
+		  const rowNotice = (key, action, extra = {}) => ({
+		    key,
+		    name: snapshot.providers?.[key]?.displayName ?? key,
+		    action,
+		    warnings: [],
+		    ...extra
+		  });
 		  const controller = {
 		    getSnapshot: () => snapshot,
 		    subscribe: (listener) => {
@@ -844,27 +869,62 @@ window.__ModuleLoader__.load({
 		      const revision = Number.isInteger(expectedRevision) ? expectedRevision : snapshot.revision;
 		      const body = { key: target };
 		      if (revision !== void 0) body.expectedRevision = revision;
-		      return runMutation({ path: DELETE_PATH, body, pendingKey: target, pendingAction: "delete" });
-		    }),
-		    activate: (key, expectedRevision) => enqueue(async () => {
-		      const target = optionalText(key);
-		      if (target === void 0) throw new Error("activate requires a provider key");
-		      const revision = Number.isInteger(expectedRevision) ? expectedRevision : snapshot.revision;
-		      const body = { key: target };
-		      if (revision !== void 0) body.expectedRevision = revision;
 		      return runMutation({
-		        path: ACTIVATE_PATH,
+		        path: DELETE_PATH,
 		        body,
 		        pendingKey: target,
-		        pendingAction: "activate",
+		        pendingAction: "delete",
+		        patch: (response) => (
+		          // Only a row that was serving traffic says anything the badge did
+		          // not already say, so an ordinary delete publishes no banner.
+		          response?.wasInUse === true ? { notice: rowNotice(target, "delete", { wasInUse: true }) } : void 0
+		        )
+		      });
+		    }),
+		    /**
+		     * Add one provider to DSH's route table.
+		     *
+		     * Deliberately not a "switch": nothing else is displaced, the catalogue row
+		     * is not rewritten, and no revision travels with the call because the
+		     * document is not written at all. Two providers can be applied at once,
+		     * which is the whole point of the additive model.
+		     */
+		    apply: (key) => enqueue(async () => {
+		      const target = optionalText(key);
+		      if (target === void 0) throw new Error("apply requires a provider key");
+		      return runMutation({
+		        path: APPLY_PATH,
+		        body: { key: target },
+		        pendingKey: target,
+		        pendingAction: "apply",
 		        patch: (response) => ({
-		          activation: {
-		            key: target,
-		            // Only an explicit `applied: false` means DSH did not take it; a
-		            // Host that omits the field succeeded.
-		            applied: response?.applied !== false,
+		          notice: rowNotice(target, "apply", { warnings: sanitizeWarnings(response?.warnings) })
+		        })
+		      });
+		    }),
+		    /**
+		     * Take one provider back out of DSH's route table.
+		     *
+		     * The mirror of `apply`, and just as narrow: the catalogue row, its stored
+		     * credential and every default are left exactly as they were, so applying
+		     * again restores the previous state without a re-entry.
+		     */
+		    withdraw: (key) => enqueue(async () => {
+		      const target = optionalText(key);
+		      if (target === void 0) throw new Error("withdraw requires a provider key");
+		      return runMutation({
+		        path: WITHDRAW_PATH,
+		        body: { key: target },
+		        pendingKey: target,
+		        pendingAction: "withdraw",
+		        patch: (response) => ({
+		          notice: rowNotice(target, "withdraw", {
+		            // `inCatalogue: false` means the route table held a key the
+		            // catalogue does not — worth saying, since only this tab could
+		            // have produced one.
+		            orphan: response?.inCatalogue === false,
 		            warnings: sanitizeWarnings(response?.warnings)
-		          }
+		          })
 		        })
 		      });
 		    }),
@@ -893,8 +953,8 @@ window.__ModuleLoader__.load({
 		      if (revision !== void 0) body.expectedRevision = revision;
 		      return runMutation({ path: REORDER_PATH, body, pendingAction: "reorder" });
 		    }),
-		    dismissActivation: () => {
-		      publish({ ...snapshot, activation: void 0 });
+		    dismissNotice: () => {
+		      publish({ ...snapshot, notice: void 0 });
 		    },
 		    /**
 		     * Test one row's endpoint without changing anything.
@@ -1093,7 +1153,7 @@ window.__ModuleLoader__.load({
 		    "reasoning.savedDirty": "\u5DF2\u4FDD\u5B58\uFF0C\u4F46\u4ECD\u6709\u672A\u4FDD\u5B58\u7684\u6539\u52A8",
 		    "reasoning.saveFailed": "\u4FDD\u5B58\u5931\u8D25\uFF1A{message}",
 		    "manager.title": "\u4F9B\u5E94\u5546\u7BA1\u7406",
-		    "manager.hintExpanded": "\u76F4\u63A5\u7BA1\u7406\u672C\u63D2\u4EF6\u62E5\u6709\u7684 provider\uFF1A\u65B0\u589E\u3001\u7F16\u8F91\u3001\u590D\u5236\u3001\u5220\u9664\u3001\u542F\u7528\u3002",
+		    "manager.hintExpanded": "\u76F4\u63A5\u7BA1\u7406\u672C\u63D2\u4EF6\u62E5\u6709\u7684 provider\uFF1A\u65B0\u589E\u3001\u7F16\u8F91\u3001\u590D\u5236\u3001\u5220\u9664\uFF0C\u4EE5\u53CA\u52A0\u5165\u6216\u79FB\u51FA DSH \u7684\u8DEF\u7531\u8868\u3002",
 		    "manager.loading": "\u6B63\u5728\u8BFB\u53D6 provider \u5217\u8868\u2026",
 		    "manager.refresh": "\u5237\u65B0",
 		    "manager.refreshing": "\u5237\u65B0\u4E2D\u2026",
@@ -1134,12 +1194,14 @@ window.__ModuleLoader__.load({
 		    "manager.region.intl": "\u6D77\u5916",
 		    "manager.credentialFound": "\u51ED\u636E\u5DF2\u627E\u5230",
 		    "manager.credentialMissing": "\u7F3A\u5C11\u51ED\u636E",
-		    "manager.active": "\u5F53\u524D\u542F\u7528",
+		    "manager.appliedBadge": "\u5DF2\u63A5\u5165",
 		    "manager.modelCount": "{count} \u4E2A\u6A21\u578B",
 		    "manager.noModels": "\u65E0\u6A21\u578B",
 		    "manager.failover": "\u6545\u969C\u8F6C\u79FB\u961F\u5217",
-		    "manager.activate": "\u542F\u7528",
-		    "manager.activating": "\u542F\u7528\u4E2D\u2026",
+		    "manager.apply": "\u52A0\u5165",
+		    "manager.applying": "\u52A0\u5165\u4E2D\u2026",
+		    "manager.withdraw": "\u79FB\u51FA",
+		    "manager.withdrawing": "\u79FB\u51FA\u4E2D\u2026",
 		    "manager.moveUp": "\u2191",
 		    "manager.moveDown": "\u2193",
 		    "manager.moveUpAria": "\u4E0A\u79FB {name}",
@@ -1151,20 +1213,25 @@ window.__ModuleLoader__.load({
 		    "manager.deleting": "\u5220\u9664\u4E2D\u2026",
 		    "manager.saving": "\u4FDD\u5B58\u4E2D\u2026",
 		    "manager.deleteConfirm": "\u786E\u5B9A\u5220\u9664 provider\u300C{name}\u300D\uFF1F\u8BE5\u64CD\u4F5C\u65E0\u6CD5\u64A4\u9500\u3002",
-		    "manager.activateAria": "\u542F\u7528 {name}",
+		    "manager.applyAria": "\u52A0\u5165 DSH \u7684\u8DEF\u7531\u8868\uFF1A{name}",
+		    "manager.withdrawAria": "\u4ECE DSH \u79FB\u51FA {name}",
 		    "manager.editAria": "\u7F16\u8F91 {name}",
 		    "manager.duplicateAria": "\u590D\u5236 {name}",
 		    "manager.deleteAria": "\u5220\u9664 {name}",
 		    "manager.rowActionsAria": "{name} \u7684\u64CD\u4F5C",
-		    "manager.activated": "\u5DF2\u542F\u7528 {name}",
-		    "manager.activatedNotApplied": "\u5DF2\u6807\u8BB0\u4E3A\u542F\u7528\uFF0C\u4F46 DSH \u6CA1\u6709\u63A5\u53D7\u8BE5 provider\uFF0C\u6A21\u578B\u8BF7\u6C42\u4ECD\u8D70\u539F\u6765\u7684\u8DEF\u7531\u3002",
-		    "manager.activationWarnings": "\u542F\u7528\u63D0\u793A",
+		    "manager.applied": "\u5DF2\u63A5\u5165 DSH \u7684\u8DEF\u7531\u8868\uFF1A{name}",
+		    "manager.withdrawn": "\u5DF2\u4ECE DSH \u7684\u8DEF\u7531\u8868\u79FB\u51FA {name}",
+		    "manager.withdrawnOrphan": "\u8BE5 key \u53EA\u5B58\u5728\u4E8E DSH \u7684\u8DEF\u7531\u8868\u91CC\uFF0C\u76EE\u5F55\u4E2D\u5E76\u6CA1\u6709\u5B83\uFF0C\u5DF2\u4E00\u5E76\u6E05\u7406\u3002",
+		    "manager.deleted": "\u5DF2\u5220\u9664 {name}",
+		    "manager.deletedInUse": "\u5DF2\u5220\u9664 {name}\uFF08\u539F\u672C\u5728 DSH \u7684\u8DEF\u7531\u8868\u4E2D\uFF0C\u5DF2\u4E00\u5E76\u79FB\u51FA\uFF09",
+		    "manager.membershipWarnings": "\u63A5\u5165\u63D0\u793A",
 		    "manager.dismiss": "\u77E5\u9053\u4E86",
 		    "manager.conflict": "\u8BBE\u7F6E\u6587\u6863\u5DF2\u88AB\u5176\u4ED6\u5730\u65B9\u6539\u52A8\uFF0C\u5217\u8868\u5DF2\u5237\u65B0\uFF0C\u8BF7\u91CD\u8BD5\u3002",
 		    "manager.saveFailed": "\u4FDD\u5B58\u5931\u8D25\uFF1A{message}",
 		    "manager.deleteFailed": "\u5220\u9664\u5931\u8D25\uFF1A{message}",
-		    "manager.deleteActive": "\u8BE5 provider \u6B63\u5728\u4F7F\u7528\u4E2D\uFF0C\u8BF7\u5148\u542F\u7528\u5176\u4ED6 provider \u518D\u5220\u9664\u3002",
-		    "manager.activateFailed": "\u542F\u7528\u5931\u8D25\uFF1A{message}",
+		    "manager.deleteInUse": "\u8BE5 provider \u4ECD\u5728 DSH \u7684\u8DEF\u7531\u8868\u4E2D\uFF0C\u8BF7\u5148\u79FB\u51FA\u518D\u5220\u9664\u3002",
+		    "manager.applyFailed": "\u63A5\u5165\u5931\u8D25\uFF1A{message}",
+		    "manager.withdrawFailed": "\u79FB\u51FA\u5931\u8D25\uFF1A{message}",
 		    "manager.createTitle": "\u65B0\u589E provider",
 		    "manager.editTitle": "\u7F16\u8F91 provider",
 		    "manager.close": "\u5173\u95ED",
@@ -1172,7 +1239,7 @@ window.__ModuleLoader__.load({
 		    "manager.fieldApi": "\u534F\u8BAE",
 		    "manager.fieldBaseUrl": "Base URL",
 		    "manager.fieldAppType": "\u5E94\u7528",
-		    "manager.appTypeHint": "\u51B3\u5B9A\u542F\u7528\u65F6\u6539\u5199\u54EA\u4E2A\u5DE5\u5177\u7684\u914D\u7F6E\uFF1B\u53EA\u6709 claude \u548C codex \u6709\u5199\u5165\u5668\u3002",
+		    "manager.appTypeHint": "\u8BE5 provider \u6765\u81EA cc-switch \u7684\u54EA\u4E2A\u5E94\u7528\uFF1B\u4EC5\u4F5C\u6807\u7B7E\uFF0C\u4E0D\u5F71\u54CD DSH \u7684\u8DEF\u7531\u3002",
 		    "manager.fieldApiKey": "API Key",
 		    "manager.apiKeyHint": "\u7559\u7A7A\u8868\u793A\u4FDD\u6301\u5F53\u524D\u5BC6\u94A5\u4E0D\u53D8\u3002",
 		    "manager.apiKeyStored": "\u5DF2\u5B58\u6709\u4E00\u4E2A\u5BC6\u94A5\uFF0C\u6B64\u5904\u4E0D\u4F1A\u56DE\u663E\u3002",
@@ -1314,7 +1381,7 @@ window.__ModuleLoader__.load({
 		    "reasoning.savedDirty": "Saved, but newer edits are still unsaved",
 		    "reasoning.saveFailed": "Save failed: {message}",
 		    "manager.title": "Provider manager",
-		    "manager.hintExpanded": "Manage the providers this plugin owns: add, edit, duplicate, delete, activate.",
+		    "manager.hintExpanded": "Manage the providers this plugin owns: add, edit, duplicate, delete, apply to or withdraw from DSH's route table.",
 		    "manager.loading": "Loading providers\u2026",
 		    "manager.refresh": "Refresh",
 		    "manager.refreshing": "Refreshing\u2026",
@@ -1351,12 +1418,14 @@ window.__ModuleLoader__.load({
 		    "manager.region.intl": "Global",
 		    "manager.credentialFound": "credential found",
 		    "manager.credentialMissing": "credential missing",
-		    "manager.active": "active",
+		    "manager.appliedBadge": "applied",
 		    "manager.modelCount": "{count} models",
 		    "manager.noModels": "no models",
 		    "manager.failover": "failover queue",
-		    "manager.activate": "Activate",
-		    "manager.activating": "Activating\u2026",
+		    "manager.apply": "Apply",
+		    "manager.applying": "Applying\u2026",
+		    "manager.withdraw": "Withdraw",
+		    "manager.withdrawing": "Withdrawing\u2026",
 		    "manager.moveUp": "\u2191",
 		    "manager.moveDown": "\u2193",
 		    "manager.moveUpAria": "Move {name} up",
@@ -1368,20 +1437,25 @@ window.__ModuleLoader__.load({
 		    "manager.deleting": "Deleting\u2026",
 		    "manager.saving": "Saving\u2026",
 		    "manager.deleteConfirm": "Delete the provider \u201C{name}\u201D? This cannot be undone.",
-		    "manager.activateAria": "Activate {name}",
+		    "manager.applyAria": "Add {name} to DSH's route table",
+		    "manager.withdrawAria": "Remove {name} from DSH's route table",
 		    "manager.editAria": "Edit {name}",
 		    "manager.duplicateAria": "Duplicate {name}",
 		    "manager.deleteAria": "Delete {name}",
 		    "manager.rowActionsAria": "Actions for {name}",
-		    "manager.activated": "Activated {name}",
-		    "manager.activatedNotApplied": "Marked active, but DSH did not accept the provider \u2014 requests still use the previous route.",
-		    "manager.activationWarnings": "Activation notes",
+		    "manager.applied": "Added to DSH's route table: {name}",
+		    "manager.withdrawn": "Removed from DSH's route table: {name}",
+		    "manager.withdrawnOrphan": "That key existed only in DSH's route table, not in the catalogue \u2014 it has been cleaned up too.",
+		    "manager.deleted": "Deleted {name}",
+		    "manager.deletedInUse": "Deleted {name} (it was in DSH's route table, so it was withdrawn first)",
+		    "manager.membershipWarnings": "Membership notes",
 		    "manager.dismiss": "Dismiss",
 		    "manager.conflict": "The settings document changed elsewhere. The list has been reloaded \u2014 please retry.",
 		    "manager.saveFailed": "Save failed: {message}",
 		    "manager.deleteFailed": "Delete failed: {message}",
-		    "manager.deleteActive": "This provider is active. Activate another one before deleting it.",
-		    "manager.activateFailed": "Activate failed: {message}",
+		    "manager.deleteInUse": "This provider is still in DSH's route table. Withdraw it first.",
+		    "manager.applyFailed": "Apply failed: {message}",
+		    "manager.withdrawFailed": "Withdraw failed: {message}",
 		    "manager.createTitle": "Add provider",
 		    "manager.editTitle": "Edit provider",
 		    "manager.close": "Close",
@@ -1389,7 +1463,7 @@ window.__ModuleLoader__.load({
 		    "manager.fieldApi": "Protocol",
 		    "manager.fieldBaseUrl": "Base URL",
 		    "manager.fieldAppType": "App",
-		    "manager.appTypeHint": "Which tool's configuration an activation rewrites; only claude and codex have a writer.",
+		    "manager.appTypeHint": "Which CC Switch app this provider came from. A label only \u2014 it does not affect how DSH routes.",
 		    "manager.fieldApiKey": "API key",
 		    "manager.apiKeyHint": "Leave blank to keep the current key.",
 		    "manager.apiKeyStored": "A key is already stored; it is never shown here.",
@@ -4148,7 +4222,18 @@ window.__ModuleLoader__.load({
 		var import_react4 = __toESM(require("react"), 1);
 		var h4 = import_react4.default.createElement;
 		var MAX_MODELS = 200;
-		var FALLBACK_APP_TYPES2 = ["claude", "codex"];
+		var FALLBACK_APP_TYPES2 = [
+		  "codex",
+		  "claude",
+		  "claude-desktop",
+		  "opencode",
+		  "gemini",
+		  "hermes",
+		  "grokbuild",
+		  "pi",
+		  "mcode",
+		  "openclaw"
+		];
 		var PROBLEM_FALLBACK = {
 		  "displayName-required": "\u8BF7\u586B\u5199\u540D\u79F0\u3002",
 		  "api-required": "\u8BF7\u9009\u62E9\u534F\u8BAE\u3002",
@@ -4180,12 +4265,12 @@ window.__ModuleLoader__.load({
 		    limitMonthlyUsd: "",
 		    inFailoverQueue: false,
 		    models: [blankModel()],
-		    // Every stored provider belongs to one app, and this value decides which
-		    // tool's config file an activation rewrites. It is set here rather than
-		    // left absent: an absent one falls back to `claude` deep in the Host, so a
-		    // provider added by hand silently became a Claude Code provider with
-		    // nothing on screen saying so. The default is still `claude` — the form
-		    // now shows it, and the user can change it.
+		    // Every stored provider carries one app: the CC Switch app the row came
+		    // from. It is set here rather than left absent so the form shows a value
+		    // instead of a blank the user has to guess at — an absent one falls back to
+		    // `claude` deep in the Host, so a provider added by hand would silently be
+		    // filed under Claude Code with nothing on screen saying so. The label does
+		    // not gate anything: nothing here writes an external tool's configuration.
 		    appType: "claude",
 		    sourceProfileId: void 0,
 		    isCurrent: false
@@ -4653,7 +4738,8 @@ window.__ModuleLoader__.load({
 		  return parts.length === 0 ? String(preset?.displayName ?? "") : `${preset.displayName} \xB7 ${parts.join(" \xB7 ")}`;
 		}
 		var FAILURE_TEXT = {
-		  activate: ["manager.activateFailed", "\u542F\u7528\u5931\u8D25\uFF1A{message}"],
+		  apply: ["manager.applyFailed", "\u63A5\u5165\u5931\u8D25\uFF1A{message}"],
+		  withdraw: ["manager.withdrawFailed", "\u79FB\u51FA\u5931\u8D25\uFF1A{message}"],
 		  delete: ["manager.deleteFailed", "\u5220\u9664\u5931\u8D25\uFF1A{message}"],
 		  save: ["manager.saveFailed", "\u4FDD\u5B58\u5931\u8D25\uFF1A{message}"],
 		  reorder: ["manager.reorderFailed", "\u8C03\u6574\u987A\u5E8F\u5931\u8D25\uFF1A{message}"]
@@ -4670,7 +4756,10 @@ window.__ModuleLoader__.load({
 		  return {
 		    key,
 		    name: provider?.displayName || key,
-		    isCurrent: provider?.isCurrent === true,
+		    // Whether DSH currently routes to this row, derived by the Host from its
+		    // own route table rather than stored on the catalogue. Several rows can be
+		    // `true` at once — that is the additive model, not a bug.
+		    inUse: provider?.inUse === true,
 		    // Anything the Host did not explicitly report as found reads as missing:
 		    // the failure that matters is a provider whose key is unset, and it must
 		    // never be dressed up as ready.
@@ -4774,15 +4863,15 @@ window.__ModuleLoader__.load({
 		  const presets = Array.isArray(snapshot.presets) ? snapshot.presets : [];
 		  const matchingPresets = presets.filter((preset) => presetMatches(preset, presetQuery));
 		  const busy = snapshot.status === "busy" || snapshot.status === "loading";
-		  const activation = snapshot.activation;
+		  const notice = snapshot.notice;
 		  const runRowAction = async (key, action, kind) => {
 		    setRowError(null);
 		    try {
 		      await action();
 		    } catch (error) {
 		      if (error?.conflict) return;
-		      if (error?.reason === "active-provider") {
-		        setRowError({ key, message: tr("manager.deleteActive", "\u8BE5 provider \u6B63\u5728\u4F7F\u7528\u4E2D\uFF0C\u8BF7\u5148\u542F\u7528\u5176\u4ED6 provider \u518D\u5220\u9664\u3002") });
+		      if (error?.reason === "in-use") {
+		        setRowError({ key, message: tr("manager.deleteInUse", "\u8BE5 provider \u4ECD\u5728 DSH \u7684\u8DEF\u7531\u8868\u4E2D\uFF0C\u8BF7\u5148\u79FB\u51FA\u518D\u5220\u9664\u3002") });
 		        return;
 		      }
 		      const message = error instanceof Error ? error.message : String(error);
@@ -4790,7 +4879,11 @@ window.__ModuleLoader__.load({
 		      setRowError({ key, message: tr(fallbackKey, fallback, { message }) });
 		    }
 		  };
-		  const onActivate = (key) => runRowAction(key, () => controller.activate(key), "activate");
+		  const onMembership = (key) => runRowAction(
+		    key,
+		    () => providers[key]?.inUse === true ? controller.withdraw(key) : controller.apply(key),
+		    providers[key]?.inUse === true ? "withdraw" : "apply"
+		  );
 		  const onMove = (key, delta) => {
 		    const moved = moveInOrder(order, key, delta);
 		    if (moved === order) return;
@@ -4901,37 +4994,46 @@ window.__ModuleLoader__.load({
 		      { role: "alert", className: "dsh-ccswitch-import__error" },
 		      snapshot.conflict ? tr("manager.conflict", "\u8BBE\u7F6E\u6587\u6863\u5DF2\u88AB\u5176\u4ED6\u5730\u65B9\u6539\u52A8\uFF0C\u5217\u8868\u5DF2\u5237\u65B0\uFF0C\u8BF7\u91CD\u8BD5\u3002") : snapshot.error
 		    ) : null,
-		    activation ? h5(
+		    notice ? h5(
 		      "div",
 		      {
 		        role: "status",
-		        className: "dsh-ccswitch-manager__activation" + (activation.applied ? "" : " dsh-ccswitch-manager__activation--warn")
+		        className: "dsh-ccswitch-manager__activation" + (notice.warnings.length > 0 ? " dsh-ccswitch-manager__activation--warn" : "")
 		      },
 		      h5(
 		        "div",
 		        { className: "dsh-ccswitch-manager__activation-head" },
-		        h5("strong", null, tr("manager.activated", "\u5DF2\u542F\u7528 {name}", {
-		          name: providers[activation.key]?.displayName ?? activation.key
-		        })),
+		        // `notice.name` is captured when the write happened, so a banner that
+		        // outlives the row it describes (a delete) still says what it was.
+		        h5("strong", null, (() => {
+		          const name2 = notice.name ?? providers[notice.key]?.displayName ?? notice.key;
+		          if (notice.action === "delete") {
+		            return notice.wasInUse ? tr("manager.deletedInUse", "\u5DF2\u5220\u9664 {name}\uFF08\u539F\u672C\u5728 DSH \u7684\u8DEF\u7531\u8868\u4E2D\uFF0C\u5DF2\u4E00\u5E76\u79FB\u51FA\uFF09", { name: name2 }) : tr("manager.deleted", "\u5DF2\u5220\u9664 {name}", { name: name2 });
+		          }
+		          if (notice.action === "withdraw") {
+		            return tr("manager.withdrawn", "\u5DF2\u4ECE DSH \u7684\u8DEF\u7531\u8868\u79FB\u51FA {name}", { name: name2 });
+		          }
+		          return tr("manager.applied", "\u5DF2\u63A5\u5165 DSH \u7684\u8DEF\u7531\u8868\uFF1A{name}", { name: name2 });
+		        })()),
 		        h5("button", {
 		          type: "button",
 		          className: "dsh-ccswitch-import__link",
-		          onClick: () => controller.dismissActivation()
+		          onClick: () => controller.dismissNotice()
 		        }, tr("manager.dismiss", "\u77E5\u9053\u4E86"))
 		      ),
-		      !activation.applied ? h5(
+		      notice.orphan ? h5(
 		        "p",
 		        { className: "dsh-ccswitch-manager__activation-warning" },
-		        tr("manager.activatedNotApplied", "\u5DF2\u6807\u8BB0\u4E3A\u542F\u7528\uFF0C\u4F46 DSH \u6CA1\u6709\u63A5\u53D7\u8BE5 provider\uFF0C\u6A21\u578B\u8BF7\u6C42\u4ECD\u8D70\u539F\u6765\u7684\u8DEF\u7531\u3002")
+		        tr("manager.withdrawnOrphan", "\u8BE5 key \u53EA\u5B58\u5728\u4E8E DSH \u7684\u8DEF\u7531\u8868\u91CC\uFF0C\u76EE\u5F55\u4E2D\u5E76\u6CA1\u6709\u5B83\uFF0C\u5DF2\u4E00\u5E76\u6E05\u7406\u3002")
 		      ) : null,
-		      activation.warnings.length > 0 ? h5(
+		      notice.warnings.length > 0 ? h5(
 		        "div",
 		        null,
-		        h5("p", { className: "dsh-ccswitch-manager__activation-title" }, tr("manager.activationWarnings", "\u542F\u7528\u63D0\u793A")),
+		        h5("p", { className: "dsh-ccswitch-manager__activation-title" }, tr("manager.membershipWarnings", "\u63A5\u5165\u63D0\u793A")),
 		        h5(
 		          "ul",
 		          { className: "dsh-ccswitch-manager__activation-list" },
-		          ...activation.warnings.map((warning, index) => h5("li", { key: `${index}-${warning}` }, warning))
+		          ...notice.warnings.map((warning, index) => h5("li", { key: `${index}-${warning}` }, warning))
 		        )
 		      ) : null
 		    ) : null,
@@ -4985,7 +5087,7 @@ window.__ModuleLoader__.load({
 		          "div",
 		          {
 		            key: view.key,
-		            className: "dsh-ccswitch-manager__row" + (view.isCurrent ? " dsh-ccswitch-manager__row--current" : "")
+		            className: "dsh-ccswitch-manager__row" + (view.inUse ? " dsh-ccswitch-manager__row--applied" : "")
 		          },
 		          h5(
 		            "div",
@@ -4994,10 +5096,10 @@ window.__ModuleLoader__.load({
 		              "div",
 		              { className: "dsh-ccswitch-manager__primary-line" },
 		              h5("strong", null, name2),
-		              view.isCurrent ? h5(
+		              view.inUse ? h5(
 		                "span",
 		                { className: "dsh-ccswitch-import__badge dsh-ccswitch-import__badge--new" },
-		                tr("manager.active", "\u5F53\u524D\u542F\u7528")
+		                tr("manager.appliedBadge", "\u5DF2\u63A5\u5165")
 		              ) : null
 		            ),
 		            h5(
@@ -5042,12 +5144,13 @@ window.__ModuleLoader__.load({
 		            h5("button", {
 		              type: "button",
 		              className: "dsh-ccswitch-import__link",
-		              // Activating the row that is already current is a no-op that
-		              // still costs a settings write and a full-catalogue edit.
-		              disabled: view.disabled || view.isCurrent,
-		              "aria-label": tr("manager.activateAria", "\u542F\u7528 {name}", { name: name2 }),
-		              onClick: () => onActivate(view.key)
-		            }, action === "activate" ? tr("manager.activating", "\u542F\u7528\u4E2D\u2026") : tr("manager.activate", "\u542F\u7528")),
+		              // Never disabled for membership itself: the button is a
+		              // toggle, so "already in that state" would mean the wrong
+		              // verb. Only a generally busy table takes it out of play.
+		              disabled: view.disabled,
+		              "aria-label": view.inUse ? tr("manager.withdrawAria", "\u4ECE DSH \u79FB\u51FA {name}", { name: name2 }) : tr("manager.applyAria", "\u52A0\u5165 DSH \u7684\u8DEF\u7531\u8868\uFF1A{name}", { name: name2 }),
+		              onClick: () => onMembership(view.key)
+		            }, action === "apply" ? tr("manager.applying", "\u52A0\u5165\u4E2D\u2026") : action === "withdraw" ? tr("manager.withdrawing", "\u79FB\u51FA\u4E2D\u2026") : view.inUse ? tr("manager.withdraw", "\u79FB\u51FA") : tr("manager.apply", "\u52A0\u5165")),
 		            // The move pair, sitting between the primary action and the row's
 		            // maintenance buttons — the order CC Switch's ProviderCardActions
 		            // lays them out in (status, primary, up/down, edit, ⋯).
@@ -5244,7 +5347,7 @@ window.__ModuleLoader__.load({
 		  ".dsh-ccswitch-manager__row{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;min-width:0;padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-1);}",
 		  // The active row is marked by its border rather than a fill, so the badge
 		  // stays readable in both themes.
-		  ".dsh-ccswitch-manager__row--current{border-color:var(--dsw-alias-brand-primary);}",
+		  ".dsh-ccswitch-manager__row--applied{border-color:var(--dsw-alias-brand-primary);}",
 		  ".dsh-ccswitch-manager__content{display:flex;flex-direction:column;gap:3px;min-width:0;flex:1 1 auto;}",
 		  ".dsh-ccswitch-manager__primary-line{display:flex;align-items:baseline;gap:8px;min-width:0;}",
 		  ".dsh-ccswitch-manager__primary-line strong{min-width:0;color:var(--dsw-alias-label-primary);font-size:13px;font-weight:500;line-height:20px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}",
