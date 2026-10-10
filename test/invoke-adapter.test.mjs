@@ -62,17 +62,22 @@ test("a command with no route throws instead of doing nothing", async () => {
 });
 
 test("get_providers reads the catalogue without a state-changing marker", async () => {
-  const fetchImpl = fakeFetch([{ status: 200, body: { exists: true, order: ["a"], providers: { a: {} } } }]);
+  const fetchImpl = fakeFetch([{
+    status: 200,
+    body: { exists: true, order: ["a"], providers: { a: { displayName: "A" } } },
+  }]);
   const invoke = createInvoke({ fetchImpl });
-  const body = await invoke("get_providers", { app: "claude" });
+  const providers = await invoke("get_providers", { app: "claude" });
 
   assert.equal(fetchImpl.calls.length, 1);
   assert.equal(fetchImpl.calls[0].url, PROVIDERS);
   assert.equal(fetchImpl.calls[0].method, "GET");
   assert.equal(fetchImpl.calls[0].init.headers, undefined, "a GET makes no origin claim");
-  // The whole body, not just `providers`: `order`/`revision`/`exists` are what
-  // a copied list component still needs.
-  assert.deepEqual(body.order, ["a"]);
+  // The map of rows and nothing else: cc-switch's command returns
+  // `IndexMap<String, Provider>` and its callers do `Object.values(result)`,
+  // so handing back the envelope would enumerate `exists`/`revision` as
+  // providers.
+  assert.deepEqual(providers, { a: { displayName: "A" } });
 });
 
 test("a command that needs a key resolves the cc-switch id through the catalogue", async () => {
@@ -122,17 +127,20 @@ test("a missing id is refused before any request", async () => {
   assert.equal(fetchImpl.calls.length, 0);
 });
 
-test("switch_provider is refused rather than silently re-read as a non-displacing apply", async () => {
-  // cc-switch's command displaces every other row; the additive model has no
-  // displacement to perform, so answering it with `apply` would report success
-  // for work that was never done.
-  const fetchImpl = fakeFetch();
+test("switch_provider lands on apply — the additive branch's Add", async () => {
+  // Verified against the source rather than assumed: ProviderList.tsx:340
+  // wires `actions.add` to `onSwitch`, and services/provider/mod.rs:6622
+  // skips set_current_provider for additive apps and only writes live config.
+  const fetchImpl = fakeFetch([
+    { status: 200, body: { providers: { k: { sourceProfileId: "row-1" } } } },
+    { status: 200, body: { key: "k", status: "applied" } },
+  ]);
   const invoke = createInvoke({ fetchImpl });
-  await assert.rejects(
-    () => invoke("switch_provider", { app: "claude", id: "row-1" }),
-    (error) => error instanceof UnmappedCommandError && error.command === "switch_provider",
-  );
-  assert.equal(fetchImpl.calls.length, 0);
+
+  assert.equal(await invoke("switch_provider", { app: "pi", id: "row-1" }), true);
+  assert.equal(fetchImpl.calls[1].url, `${PROVIDERS}/apply`);
+  assert.deepEqual(JSON.parse(fetchImpl.calls[1].init.body), { key: "k" });
+  assert.equal(fetchImpl.calls[1].init.body.includes('"app"'), false, "the app type is not forwarded");
 });
 
 test("removing from the live config lands on withdraw", async () => {
@@ -145,6 +153,73 @@ test("removing from the live config lands on withdraw", async () => {
     true,
   );
   assert.equal(withdrawn.calls[1].url, `${PROVIDERS}/withdraw`);
+});
+
+test("a partial sort update is expanded into the full order the Host requires", async () => {
+  // cc-switch sends `{ updates: [{ id, sortIndex }] }` naming only the rows
+  // that moved; /providers/reorder refuses anything that is not the complete
+  // permutation, because it rewrites every index by position.
+  const fetchImpl = fakeFetch([{
+    status: 200,
+    body: {
+      order: ["a", "b", "c"],
+      providers: {
+        a: { sourceProfileId: "row-a", sortIndex: 0 },
+        b: { sourceProfileId: "row-b", sortIndex: 1 },
+        c: { sourceProfileId: "row-c", sortIndex: 2 },
+      },
+    },
+  }, { status: 200, body: { status: "reordered", order: ["c", "a", "b"] } }]);
+  const invoke = createInvoke({ fetchImpl });
+
+  const ok = await invoke("update_providers_sort_order", {
+    app: "claude",
+    updates: [{ id: "row-a", sortIndex: 1 }, { id: "row-c", sortIndex: 0 }],
+  });
+
+  assert.equal(ok, true);
+  assert.deepEqual(JSON.parse(fetchImpl.calls[1].init.body), { keys: ["c", "a", "b"] });
+});
+
+test("a sort update that names an unknown id is dropped rather than rejected", async () => {
+  const fetchImpl = fakeFetch([{
+    status: 200,
+    body: { order: ["a"], providers: { a: { sortIndex: 0 } } },
+  }, { status: 200, body: { status: "reordered", order: ["a"] } }]);
+  const invoke = createInvoke({ fetchImpl });
+
+  await invoke("update_providers_sort_order", { updates: [{ id: "gone", sortIndex: 5 }] });
+  assert.deepEqual(JSON.parse(fetchImpl.calls[1].init.body), { keys: ["a"] });
+});
+
+test("commands with no route are answered locally instead of omitted", async () => {
+  // `update_tray_menu` runs after every successful mutation in cc-switch, so
+  // an unmapped entry would throw *after* the work had already succeeded.
+  const fetchImpl = fakeFetch();
+  const invoke = createInvoke({ fetchImpl });
+  assert.equal(await invoke("update_tray_menu"), true);
+  assert.equal(await invoke("get_current_provider", { app: "claude" }), "");
+  assert.equal(fetchImpl.calls.length, 0, "neither of them reaches the Host");
+});
+
+test("a new row is stamped with the id the form minted", async () => {
+  // Without this the row is unaddressable afterwards: every later command
+  // resolves `id` through `sourceProfileId`.
+  const fetchImpl = fakeFetch([
+    { status: 200, body: { key: "ccs-new-00000000", status: "created" } },
+  ]);
+  const invoke = createInvoke({ fetchImpl });
+
+  await invoke("add_provider", {
+    app: "claude",
+    id: "uuid-1234",
+    provider: { displayName: "New" },
+    addToLive: false,
+  });
+
+  assert.deepEqual(JSON.parse(fetchImpl.calls[0].init.body), {
+    provider: { displayName: "New", sourceProfileId: "uuid-1234" },
+  });
 });
 
 test("add_provider files the row and, by default, applies it too", async () => {
@@ -201,6 +276,11 @@ test("a Host error rejects with its message, status and reason", async () => {
 
 test("the command table only ever names exact plugin routes", () => {
   for (const [command, route] of Object.entries(INVOKE_ROUTES)) {
+    // Locally answered commands carry no route at all; anything else must.
+    if (typeof route.run === "function") {
+      assert.equal(route.path, undefined, `${command} mixes a local answer with a path`);
+      continue;
+    }
     assert.equal(typeof route.path, "string", `${command} has no path`);
     assert.ok(route.path.startsWith("/api/"), `${command} is not a plugin route: ${route.path}`);
     assert.ok(!route.path.includes("<"), `${command} uses a path parameter DSH cannot match: ${route.path}`);

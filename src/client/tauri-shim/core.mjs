@@ -86,6 +86,9 @@ export function createInvoke({ fetchImpl = defaultFetch, routes = INVOKE_ROUTES 
     const route = Object.hasOwn(routes, command) ? routes[command] : undefined
     if (route === undefined) throw new UnmappedCommandError(command)
     const ctx = { args: args ?? {}, request }
+    // A local answer, for the commands that have no route — see the note on
+    // `update_tray_menu` in ./commands.mjs.
+    if (typeof route.run === 'function') return await route.run(ctx.args, ctx)
     const isRead = (route.method ?? 'POST') === 'GET'
     const body = isRead
       ? undefined
@@ -99,3 +102,32 @@ export function createInvoke({ fetchImpl = defaultFetch, routes = INVOKE_ROUTES 
 
 /** The instance the aliased `@tauri-apps/api/core` hands to copied components. */
 export const invoke = createInvoke()
+
+/**
+ * Whether this is running inside Tauri. It is not, and saying so is the truth
+ * rather than a stub — code branches on it to choose a native path or a web
+ * one, and the web path is the correct one inside a DSH settings page.
+ */
+export function isTauri() {
+  return false
+}
+
+/**
+ * Tauri's streaming channel: Rust pushes chunks into `channel.onmessage`.
+ *
+ * There is no Rust on the other side and no event bus to carry the chunks yet
+ * (`./event.mjs` is the same story), so the constructor refuses rather than
+ * accepting a handler it will never call — a session reader given an inert
+ * channel would wait forever on an empty transcript, which is a silent failure
+ * dressed up as an empty result. M6 builds the `ctx.remote` bridge this needs;
+ * until then the only caller (`lib/api/sessions.ts`) fails loudly on use, not
+ * on import.
+ */
+export class Channel {
+  constructor() {
+    throw new Error(
+      'Tauri Channels are not available in this plugin: session streaming has to be '
+      + 'bridged over ctx.remote first (M6), see src/client/tauri-shim/event.mjs',
+    )
+  }
+}

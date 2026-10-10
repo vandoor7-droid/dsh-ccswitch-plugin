@@ -147,6 +147,13 @@ function publicProvider(key, provider, credentialConfigured, inUse) {
     iconColor: typeof provider?.iconColor === 'string' ? provider.iconColor : undefined,
     appType: typeof provider?.appType === 'string' ? provider.appType : undefined,
     sourceProfileId: typeof provider?.sourceProfileId === 'string' ? provider.sourceProfileId : undefined,
+    // Ordering. The envelope also carries `order`, but cc-switch's list never
+    // reads an envelope — it sorts rows itself from `sortIndex` then
+    // `createdAt` (`useDragSort.sortedProviders`), so both have to be on the
+    // row or the ported list would fall back to key order and a drag would
+    // appear not to have happened.
+    sortIndex: Number.isInteger(provider?.sortIndex) ? provider.sortIndex : undefined,
+    createdAt: Number.isInteger(provider?.createdAt) ? provider.createdAt : undefined,
     // Two different questions that used to be one. `isCurrent` is CC Switch's
     // own flag, carried through so an imported row survives an edit intact;
     // `inUse` is whether *this* plugin has the provider in DSH's route table.

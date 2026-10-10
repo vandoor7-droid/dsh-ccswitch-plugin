@@ -51,7 +51,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "build:catalog": "node scripts/build-catalog.mjs",
-    "test": "npm run build && node --test",
+    "test": "npm run build && node --test \"test/**/*.test.{js,mjs}\"",
     "pack:check": "npm run build && npm pack --dry-run",
     "prepack": "npm run build"
   },
@@ -145,6 +145,8 @@
     "framer-motion": "12.23.25",
     "i18next": "25.5.2",
     "lucide-react": "0.542.0",
+    "motion-dom": "12.23.23",
+    "motion-utils": "12.23.6",
     "react": "^18.3.1",
     "react-dom": "18.3.1",
     "react-hook-form": "7.65.0",

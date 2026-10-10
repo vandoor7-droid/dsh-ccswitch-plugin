@@ -12,7 +12,7 @@
  * other line of a copied component compiles untouched, which is what decision
  * #7 ("reuse the original code unless the stack forces a rewrite") asks for.
  *
- * An entry has the shape:
+ * An entry has one of two shapes — either it goes to a Host route:
  *
  * ```js
  * {
@@ -23,32 +23,42 @@
  * }
  * ```
  *
- * where `ctx` is `{ args, request }` — `args` is what the component passed, and
- * `request({ path, method, body })` performs one Host call, so an entry may
- * make a second one when it has to.
+ * or it is answered locally, because there is no route and inventing a round
+ * trip to hide that would be worse than saying so:
+ *
+ * ```js
+ * { run: (args, ctx) => result }
+ * ```
+ *
+ * For either shape, `ctx` is `{ args, request }` — `args` is what the component
+ * passed, and `request({ path, method, body })` performs one Host call, so an
+ * entry may make a second one when it has to.
  *
  * **A command with no entry throws.** A silent no-op would read as success and
  * is the failure mode that costs the most to find, so the table is allowed to
  * be incomplete but never allowed to guess. `docs/ccswitch-command-map.md`
  * records the disposition of all 328 commands; entries are added here as the
- * corresponding surfaces are ported (M1 onward).
+ * corresponding surfaces are ported.
  *
- * Two projections are deliberately *not* expressed in this table, because they
- * belong to M1 rather than to the transport:
+ * Two translation rules run through every entry:
  *
- * - **cc-switch's `Provider` ↔ this plugin's record.** cc-switch's frontend type
- *   (`src/types.ts`) is `{ id, name, settingsConfig, … }`; the plugin's is
- *   `{ displayName, apiKeyEnv, models, api, baseURL, … }`, and it stores no
- *   `settingsConfig` at all. Until the components are copied in M1, `receive`
- *   returns the plugin's own shape and says so.
- * - **`id` ↔ `key`.** A cc-switch row id reaches this plugin only as
- *   `sourceProfileId`; the catalogue key is derived from it. Commands that take
- *   an `id` resolve it through `resolveKey`, which reads the catalogue once per
- *   call rather than keeping a session-long cache that a delete could stale.
+ * - **`id` ↔ `key`.** cc-switch addresses a row by its UUID; the plugin
+ *   addresses it by a key derived from the display name. `resolveKey` reads
+ *   the catalogue once per call rather than keeping a session-long cache a
+ *   delete could stale, and `add_provider` stamps `sourceProfileId` so a row
+ *   created through the copied form is addressable on the next call.
+ * - **`{ app }` is dropped.** This plugin manages one app (decision #3), so no
+ *   entry forwards it; the per-app branches in the copied components are
+ *   reached only through `appType`, which is a label and drives nothing.
  */
 
 export const MANAGER_API = '/api/dsh-ccswitch-manager'
 export const IMPORT_API = '/api/dsh-ccswitch'
+export const PROVIDERS_PATH = `${MANAGER_API}/providers`
+
+function isRecord(value) {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
 
 /** Pick only the named fields, so an unexpected `args` key never reaches the Host. */
 function bodyOf(args, fields) {
@@ -59,8 +69,6 @@ function bodyOf(args, fields) {
   }
   return out
 }
-
-/** `{ app }` is deliberately absent: this plugin manages one app (decision #3). */
 
 /**
  * Resolve a cc-switch row id to the catalogue key that carries it.
@@ -75,7 +83,7 @@ async function resolveKey(ctx, id) {
   if (typeof id !== 'string' || id === '') {
     throw Object.assign(new Error('this command requires an "id"'), { code: 'MISSING_ID' })
   }
-  const body = await ctx.request({ path: `${MANAGER_API}/providers`, method: 'GET' })
+  const body = await ctx.request({ path: PROVIDERS_PATH, method: 'GET' })
   const providers = body?.providers ?? {}
   for (const [key, provider] of Object.entries(providers)) {
     if (provider?.sourceProfileId === id) return key
@@ -87,55 +95,73 @@ async function resolveKey(ctx, id) {
   )
 }
 
+/** Read the whole catalogue once and index it both ways (`id` ↔ `key`). */
+async function readCatalogue(ctx) {
+  const body = await ctx.request({ path: PROVIDERS_PATH, method: 'GET' })
+  const providers = isRecord(body?.providers) ? body.providers : {}
+  const order = Array.isArray(body?.order) ? body.order.filter((key) => Object.hasOwn(providers, key)) : []
+  for (const key of Object.keys(providers)) if (!order.includes(key)) order.push(key)
+  return { providers, order }
+}
+
 export const INVOKE_ROUTES = {
   /**
-   * The whole catalogue, as this plugin stores it.
+   * The whole catalogue, keyed exactly as cc-switch keys it.
    *
-   * `receive` returns the list **body** rather than only `providers` because
-   * `order`, `revision` and `exists` are the parts a copied list component
-   * still needs (row order, and "this namespace does not exist yet"). The
-   * field-name projection onto cc-switch's `Provider` arrives with M1 — see the
-   * module note above.
+   * cc-switch's command returns `IndexMap<String, Provider>` and every caller
+   * does `Object.values(result)` / `result[id]`, so `receive` hands back
+   * `body.providers`, not the envelope. The envelope's `order` is not lost:
+   * rows carry `sortIndex` and `createdAt`, and the copied list re-derives the
+   * order from them the way `sortedProviders` does.
    */
   get_providers: {
-    path: `${MANAGER_API}/providers`,
+    path: PROVIDERS_PATH,
     method: 'GET',
-    receive: (body) => body ?? {},
+    receive: (body) => (isRecord(body?.providers) ? body.providers : {}),
   },
 
   /**
-   * Add a provider.
+   * Create a provider.
    *
-   * `addToLive` maps straight onto the additive model: cc-switch defaults it to
-   * `true`, meaning "and put it in the live config", which here means "and add
-   * it to DSH's route table". `false` files it in the catalogue only. The two
-   * stay separate calls on purpose — save writes one document and apply writes
-   * the other, so a failure in the second still leaves a provider the user can
-   * retry from, and can see as not-yet-applied.
+   * Two things happen here that cc-switch does not have to think about:
+   *
+   * - **`sourceProfileId` is stamped.** The form mints a UUID for `id`, and
+   *   the plugin's catalogue key is derived from the display name, so without
+   *   this the row would be unaddressable afterwards — every later
+   *   `update`/`delete`/`switch` resolves `id` through `sourceProfileId` and
+   *   would come back `UNKNOWN_PROVIDER`.
+   * - **`addToLive` maps onto the additive model.** cc-switch defaults it to
+   *   `true`, meaning "and put it in the live config"; here that means "and
+   *   add it to DSH's route table". `false` files it in the catalogue only.
+   *   The two stay separate calls on purpose — save writes one document and
+   *   apply writes the other, so a failure in the second still leaves a
+   *   provider the user can retry from, and can see as not-yet-applied.
    */
   add_provider: {
-    path: `${MANAGER_API}/providers/save`,
+    path: `${PROVIDERS_PATH}/save`,
     method: 'POST',
-    send: (args) => bodyOf(args, {
-      provider: (a) => a?.provider,
-      apiKey: (a) => typeof a?.apiKey === 'string' && a.apiKey !== '' ? a.apiKey : undefined,
-    }),
+    send: (args) => {
+      const provider = isRecord(args?.provider) ? args.provider : {}
+      const stamped = typeof provider.sourceProfileId === 'string' && provider.sourceProfileId !== ''
+        ? provider.sourceProfileId
+        : (typeof args?.id === 'string' && args.id !== '' ? args.id : undefined)
+      return bodyOf(args, {
+        provider: () => ({ ...provider, ...(stamped === undefined ? {} : { sourceProfileId: stamped }) }),
+        apiKey: (a) => typeof a?.apiKey === 'string' && a.apiKey !== '' ? a.apiKey : undefined,
+      })
+    },
     receive: async (body, ctx) => {
       const key = body?.key
       if (typeof key !== 'string' || key === '') return undefined
       if (ctx.args?.addToLive === false) return key
-      await ctx.request({
-        path: `${MANAGER_API}/providers/apply`,
-        method: 'POST',
-        body: { key },
-      })
+      await ctx.request({ path: `${PROVIDERS_PATH}/apply`, method: 'POST', body: { key } })
       return key
     },
   },
 
   /** Edit one provider. The same route as the create; `id` selects the row. */
   update_provider: {
-    path: `${MANAGER_API}/providers/save`,
+    path: `${PROVIDERS_PATH}/save`,
     method: 'POST',
     send: async (args, ctx) => ({
       key: await resolveKey(ctx, args?.id),
@@ -155,32 +181,117 @@ export const INVOKE_ROUTES = {
    * `409 reason: 'in-use'` and leaves everything in place.
    */
   delete_provider: {
-    path: `${MANAGER_API}/providers/delete`,
+    path: `${PROVIDERS_PATH}/delete`,
     method: 'POST',
     send: async (args, ctx) => ({ key: await resolveKey(ctx, args?.id) }),
     receive: (body) => body?.status === 'removed',
   },
 
   /**
-   * Deliberately absent: `switch_provider`.
+   * Put a provider into the live configuration — the additive branch's "Add".
    *
-   * cc-switch's `switch_provider` makes one row current **and every other one
-   * not**. The additive model has no displacement to perform — `apply` only
-   * adds — so routing it to `apply` would answer `true` to a caller that
-   * expects the previous provider to have been taken out, which is exactly the
-   * kind of silent semantic change this module refuses to make. It is recorded
-   * as `不适用` in `docs/ccswitch-command-map.md` for the same reason.
+   * cc-switch uses one command for both families, and only the *additive*
+   * meaning applies here. `ProviderList.tsx:340` wires `actions.add` to
+   * `onSwitch`, and `services/provider/mod.rs:6622` is explicit about what
+   * that means for an additive app:
    *
-   * M1 decides for real: the additive list (`buildAdditiveSections`) is what
-   * gets copied, and whatever it actually calls for "put this back in" is what
-   * gets a route — `switch_provider` only if that turns out to be it.
+   * ```rust
+   * // Additive mode apps skip setting is_current (no such concept).
+   * if !app_type.is_additive_mode() { … set_current_provider … }
+   * write_live_for_state(state, &app_type, provider)?;
+   * ```
+   *
+   * i.e. no pointer is moved and nothing else is displaced — which is exactly
+   * what `POST /providers/apply` does. The displacement this module used to
+   * refuse to map only exists in the switch-type branch, and that branch is
+   * cut (decision #3).
    */
+  switch_provider: {
+    path: `${PROVIDERS_PATH}/apply`,
+    method: 'POST',
+    send: async (args, ctx) => ({ key: await resolveKey(ctx, args?.id) }),
+    receive: (body) => body?.status === 'applied',
+  },
 
-  /** Take one provider back out of DSH's route table. */
+  /** Take one provider back out of DSH's route table; the row stays in the catalogue. */
   remove_provider_from_live_config: {
-    path: `${MANAGER_API}/providers/withdraw`,
+    path: `${PROVIDERS_PATH}/withdraw`,
     method: 'POST',
     send: async (args, ctx) => ({ key: await resolveKey(ctx, args?.id) }),
     receive: (body) => body?.status === 'withdrawn',
+  },
+
+  /**
+   * Reorder the list — which is also the failover queue's priority order.
+   *
+   * The payloads do not match: cc-switch sends a **partial** list of
+   * `{ id, sortIndex }` pairs, while `POST /providers/reorder` requires the
+   * complete order and refuses anything else (`NOT_PERMUTATION`), because it
+   * rewrites every row's index by position. So the partial update is merged
+   * onto the catalogue's current order first and the whole thing is sent.
+   *
+   * Rows the caller did not name keep their relative order; a row it did name
+   * takes the new index. Ties fall back to the current order, which is the
+   * same preference `COALESCE(sort_index, 999999), created_at, id` gives a
+   * document that has never been reordered.
+   */
+  update_providers_sort_order: {
+    path: `${PROVIDERS_PATH}/reorder`,
+    method: 'POST',
+    send: async (args, ctx) => {
+      const updates = Array.isArray(args?.updates) ? args.updates : []
+      const { providers, order } = await readCatalogue(ctx)
+      const keyOf = new Map()
+      for (const [key, provider] of Object.entries(providers)) {
+        keyOf.set(key, key)
+        if (typeof provider?.sourceProfileId === 'string' && provider.sourceProfileId !== '') {
+          keyOf.set(provider.sourceProfileId, key)
+        }
+      }
+      const renamed = new Map()
+      const position = new Map(order.map((key, index) => [key, index]))
+      for (const update of updates) {
+        const key = keyOf.get(update?.id)
+        if (key === undefined) continue
+        renamed.set(key, Number.isInteger(update?.sortIndex) ? update.sortIndex : 0)
+      }
+      const rows = order.map((key, index) => {
+        const existing = Number.isInteger(providers[key]?.sortIndex)
+          ? providers[key].sortIndex
+          // Unreordered rows sort after every explicitly indexed one, matching
+          // cc-switch's `999999` sentinel, and keep their original rank.
+          : 999999 + index
+        return { key, sortIndex: renamed.get(key) ?? existing, rank: position.get(key) ?? index }
+      })
+      rows.sort((a, b) => (a.sortIndex - b.sortIndex) || (a.rank - b.rank))
+      return { keys: rows.map((row) => row.key) }
+    },
+    receive: (body) => body?.status === 'reordered',
+  },
+
+  /**
+   * Refresh the tray menu. **An explicit no-op, not an omission.**
+   *
+   * cc-switch calls this after every successful mutation, so leaving the
+   * command unmapped would make every successful add, reorder or switch throw
+   * *after* it had already worked — the worst possible place for a false
+   * failure. DSH has no tray (decision #3 cut it), so the honest answer is the
+   * `true` the command would have returned anyway. Answered locally rather
+   * than through a route: there is no route, and inventing one that reads the
+   * catalogue just to return `true` would hide that.
+   */
+  update_tray_menu: {
+    run: () => true,
+  },
+
+  /**
+   * Which provider is current. Always empty: the additive model has no
+   * current pointer (`mod.rs:6622` — "Additive mode apps skip setting
+   * is_current (no such concept)"), and this plugin retired its own
+   * `isCurrent` flag for the same reason. Callers treat `""` as "none", which
+   * is the accurate answer.
+   */
+  get_current_provider: {
+    run: () => '',
   },
 }
