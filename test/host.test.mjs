@@ -127,9 +127,19 @@ test('Host apply registers injected routes and disposes them', async () => {
       },
     },
   }, configured)
+  // A credentials spy, because "membership never touches credentials" is an
+  // assertion about *absence*: an empty object would let a stray `unset` slip
+  // through as a swallowed `typeof !== 'function'` guard rather than fail.
+  const credentialCalls = []
+  const credentials = {
+    set: (ref, value) => { credentialCalls.push(['set', ref]); return Promise.resolve() },
+    unset: (ref) => { credentialCalls.push(['unset', ref]); return Promise.resolve() },
+    resolve: (ref) => { credentialCalls.push(['resolve', ref]); return Promise.resolve({ value: 'sk-test' }) },
+    describe: (ref) => { credentialCalls.push(['describe', ref]); return Promise.resolve({ configured: true }) },
+  }
   const ctx = {
     settings,
-    credentials: {},
+    credentials,
     fiber: { id: 'root' },
     webServer: {
       register(route) {
@@ -185,6 +195,12 @@ test('Host apply registers injected routes and disposes them', async () => {
   assert.equal(list.providers[LIVE_KEY].inUse, true)
   assert.equal(list.providers[COLD_KEY].inUse, false)
 
+  // The catalogue is snapshotted here so both membership operations can be
+  // checked against it: a member operation must leave the row itself — and the
+  // defaults stored on it — byte-identical (the rule cc-switch states as
+  // `provider_membership_never_changes_pi_auth_or_defaults`).
+  const catalogueBefore = structuredClone(settings.docs['dsh-ccswitch-plugin'].value)
+
   // applyProvider: a POST to the apply route must write the member into the
   // route table, through the injected helper, at the revision it read.
   const applied = await call(
@@ -213,6 +229,25 @@ test('Host apply registers injected routes and disposes them', async () => {
     expectedRevision: 12,
   })
   assert.equal(Object.hasOwn(settings.docs['llm-pi-ai'].value.providers, LIVE_KEY), false)
+
+  // The two invariants membership exists to guarantee. Both are statements
+  // about what did *not* happen, so they are asserted against a snapshot taken
+  // before the first member operation rather than against individual fields.
+  assert.deepEqual(
+    settings.docs['dsh-ccswitch-plugin'].value,
+    catalogueBefore,
+    'applying and withdrawing must leave the catalogue — and every default on it — untouched',
+  )
+  assert.deepEqual(
+    credentialCalls.filter(([operation]) => operation === 'set' || operation === 'unset'),
+    [],
+    'applying and withdrawing must never write or delete a credential',
+  )
+  assert.deepEqual(
+    settings.mutations.map((mutation) => mutation.ns),
+    ['llm-pi-ai', 'llm-pi-ai'],
+    'only DSH\'s route table may be mutated by a member operation',
+  )
 
   routeCleanup()
   assert.deepEqual(disposed, registered.map((route) => route.path))
