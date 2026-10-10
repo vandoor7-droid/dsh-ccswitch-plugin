@@ -1,7 +1,7 @@
 // dsh-ccswitch-plugin — derivative of 2995288295/dsh-ccswitch-importer-plus
 // (Apache-2.0), which is itself a derivative of wtiaw/dsh-ccswitch-importer.
 // Reworked for DSH 0.2.0-rc.2. See NOTICE for the full attribution chain.
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
@@ -65,6 +65,10 @@ export const CLIENT_ALIAS = {
   "@": CCS_SRC,
   "@tauri-apps/api/core": resolve(ROOT, "src/client/tauri-shim/core.mjs"),
   "@tauri-apps/api/event": resolve(ROOT, "src/client/tauri-shim/event.mjs"),
+  // `tailwind-merge` validates class names against its own knowledge, so
+  // `cn()` needs the `dsh-ccs-` prefix baked in — otherwise the merge stops
+  // merging and `cn("dsh-ccs-p-4", "dsh-ccs-p-2")` emits both.
+  "tailwind-merge": resolve(ROOT, "src/client/tauri-shim/tailwind-merge.mjs"),
 };
 
 /** cc-switch's `tsconfig.json`: `"jsx": "react-jsx"` (the automatic runtime). */
@@ -126,6 +130,61 @@ const ASSET_QUERY_PLUGIN = {
     });
   },
 };
+
+const CCS_SOURCE_FILTER = /[\\/]src[\\/]ccswitch[\\/].*\.(ts|tsx|js|jsx)$/;
+
+const LOADERS_BY_EXT = { ".ts": "ts", ".tsx": "tsx", ".js": "js", ".jsx": "jsx" };
+
+/**
+ * Rename cc-switch's Tailwind classes on the way in.
+ *
+ * The vendored sources keep upstream's text; the `dsh-ccs-` prefix is applied
+ * here so nothing in git diverges from `cc-switch-src`, while the stylesheet
+ * (see `ccswitch:styles`) carries the same prefix. Both sides are derived from
+ * one candidate set inside `scripts/ccswitch-style.mjs`, so they cannot drift.
+ *
+ * Files under `src/ccswitch` are the only ones touched: this plugin's own
+ * `.mjs` sources are written against DSH's primitives and use no utilities.
+ */
+const CCS_PREFIX_PLUGIN = {
+  name: "ccswitch-prefix",
+  setup(build) {
+    build.onLoad({ filter: CCS_SOURCE_FILTER, namespace: "file" }, async (args) => {
+      const { candidates, prefixSource } = await import("./ccswitch-style.mjs");
+      const extension = args.path.slice(args.path.lastIndexOf("."));
+      const source = await readFile(args.path, "utf8");
+      return {
+        contents: prefixSource(source, await candidates()),
+        loader: LOADERS_BY_EXT[extension] ?? "ts",
+      };
+    });
+  },
+};
+
+/**
+ * `import css from "ccswitch:styles"` — cc-switch's compiled stylesheet.
+ *
+ * Resolved lazily, so a build that never mounts an upstream component never
+ * runs Tailwind at all. The string is inlined rather than written to a `.css`
+ * file because DSH loads a plugin as one script; there is no asset directory
+ * for it to fetch from.
+ */
+const CCS_STYLES_PLUGIN = {
+  name: "ccswitch-styles",
+  setup(build) {
+    build.onResolve({ filter: /^ccswitch:styles$/ }, () => ({
+      path: "ccswitch:styles",
+      namespace: "ccswitch-styles",
+    }));
+    build.onLoad({ filter: /.*/, namespace: "ccswitch-styles" }, async () => {
+      const { buildCss } = await import("./ccswitch-style.mjs");
+      const css = await buildCss();
+      return { contents: `export default ${JSON.stringify(css)};\n`, loader: "js" };
+    });
+  },
+};
+
+export const CLIENT_PLUGINS = [ASSET_QUERY_PLUGIN, CCS_PREFIX_PLUGIN, CCS_STYLES_PLUGIN];
 
 export function createLoaderBundle(id, commonJs) {
   const body = commonJs.trimEnd().split("\n").map((line) => line ? `\t\t${line}` : "").join("\n");
@@ -247,7 +306,7 @@ export function clientBuildOptions() {
     alias: CLIENT_ALIAS,
     define: CLIENT_DEFINE,
     loader: CLIENT_LOADERS,
-    plugins: [ASSET_QUERY_PLUGIN],
+    plugins: CLIENT_PLUGINS,
     metafile: true,
     ...CLIENT_JSX,
   };
