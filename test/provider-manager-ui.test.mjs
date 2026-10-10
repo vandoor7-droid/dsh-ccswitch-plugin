@@ -13,12 +13,17 @@
 // is no react-dom here and adding one is not worth it — but a component that
 // throws on a shape the Host can actually send is a class of bug that no
 // source-text assertion catches, so the tree is built rather than grepped.
-import test from 'node:test'
+import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import React from 'react'
 import { createCCSwitchManagerController } from '../src/client/manager-controller.mjs'
-import { ProviderManagerSection, emptyState, presetOptionLabel, providerMatches, providerRowView } from '../src/ui/ProviderManagerSection.mjs'
+// The section pulls in cc-switch's TypeScript components, which only a
+// bundler can load — `@/` aliases, `.tsx`, the prefixed stylesheet. Its pure
+// helpers are imported directly so the tests that only need those do not pay
+// for a build.
+import { bundleModule, setupDom, teardownDom } from './helpers/render.mjs'
+import { presetOptionLabel } from '../src/ui/preset-option.mjs'
 import {
   ProviderEditModal,
   draftFromPreset,
@@ -33,6 +38,26 @@ import {
 import { MESSAGES } from '../src/client/messages.mjs'
 import { PROVIDER_PRESETS, presetGroup, presetVersionKeys } from '../src/domain/presets.mjs'
 import { MODELS_FOOTER_SLOT, PLUGINS_TAB_SLOT, registerReasoningSettings } from '../src/client/registration.mjs'
+
+// Compiled rather than imported: the section reaches cc-switch's TypeScript
+// components through the `@/` alias, which Node cannot resolve on its own.
+const section = await bundleModule(
+  'manager-section',
+  'export * from "../../src/ui/ProviderManagerSection.mjs";',
+)
+const { ProviderManagerSection } = section
+
+// The one context the fake renderer has to answer, so `useProvidersQuery` in
+// the section does not throw. Queries are disabled: nothing here asserts on a
+// round trip the section did not make itself.
+const { QueryClient, QueryClientContext } = await import('@tanstack/react-query')
+const sectionQueryClient = new QueryClient({
+  defaultOptions: { queries: { enabled: false, retry: false } },
+})
+
+// `bundleModule` opens a jsdom window for the components that need one; the
+// runner would otherwise report this file as a hang.
+after(() => teardownDom())
 
 const root = new URL('../', import.meta.url)
 const read = (relative) => readFile(new URL(relative, root), 'utf8')
@@ -104,7 +129,22 @@ function makeDispatcher(hooks, effects, markDirty) {
       hooks[i] = getSnapshot()
       return hooks[i]
     },
-    useContext() { next(); return undefined },
+    // `ProviderList` reads react-query's client from context, and
+    // `useProvidersQuery` runs in the section itself. The harness has no
+    // provider element to hang it on, so react-query's client is answered
+    // directly — with fetching disabled, because these tests assert on what the
+    // section draws from the controller, not on a network round trip.
+    //
+    // Every other context falls back to its own default. React only applies
+    // `createContext(default)` when nothing above provides a value, and this
+    // renderer never evaluates a provider, so the default has to be read off
+    // the context itself — react-query's error-boundary context, for one,
+    // dereferences it during the very first render.
+    useContext(context) {
+      next()
+      if (context === QueryClientContext) return sectionQueryClient
+      return context?._currentValue
+    },
     useDeferredValue(value) { next(); return value },
     useTransition() { next(); return [false, (fn) => fn()] },
     useImperativeHandle() { next() },
@@ -317,179 +357,7 @@ async function readyController(providers, extra = {}) {
 
 const t = undefined // the components fall back to their own Chinese strings
 
-// --- the pure decisions ------------------------------------------------------
-
-test('emptyState separates "still reading" from "nothing yet" and "no namespace"', () => {
-  assert.equal(emptyState({ status: 'idle' }), 'loading')
-  assert.equal(emptyState({ status: 'loading' }), 'loading')
-  // A write in flight has not read the document either.
-  assert.equal(emptyState({ status: 'busy' }), 'loading')
-  assert.equal(emptyState({ status: 'ready', exists: true }), 'empty')
-  // No namespace is a different sentence: it is created by the first write.
-  assert.equal(emptyState({ status: 'ready', exists: false }), 'emptyNoNamespace')
-  // A malformed Host must not be read as "namespace exists".
-  assert.equal(emptyState({ status: 'ready', exists: 'yes' }), 'emptyNoNamespace')
-  // Nothing has been read yet, so the tab must not claim the namespace is
-  // missing — the initial snapshot holds `exists: false` before any read.
-  assert.equal(emptyState(undefined), 'loading')
-  assert.equal(emptyState({}), 'loading')
-  // A failed or conflicted read is explained by the banner above; a second line
-  // guessing at the contents would contradict it.
-  assert.equal(emptyState({ status: 'error', error: 'boom' }), null)
-  assert.equal(emptyState({ status: 'conflict', conflict: true }), null)
-})
-
-test('providerRowView reads the credential and pending state defensively', () => {
-  const view = providerRowView(hostProvider(), { status: 'ready' })
-  assert.equal(view.name, 'DeepSeek')
-  assert.equal(view.credentialFound, true)
-  assert.equal(view.modelCount, 2)
-  assert.equal(view.pending, false)
-
-  // Membership is read from `inUse` alone — the Host derives it from DSH's
-  // route table. `isCurrent` is provenance from cc-switch's own database and
-  // nothing acts on it any more, so it must never light up the row.
-  assert.equal(view.inUse, false)
-  assert.equal(providerRowView(hostProvider({ inUse: true }), {}).inUse, true)
-  assert.equal(providerRowView(hostProvider({ isCurrent: true }), {}).inUse, false,
-    'isCurrent is inert provenance, not membership')
-
-  // Anything that is not an explicit `found` is missing: a provider whose key
-  // is unset must never be dressed up as ready.
-  assert.equal(providerRowView(hostProvider({ credential: 'maybe' }), {}).credentialFound, false)
-  assert.equal(providerRowView(hostProvider({ credential: undefined }), {}).credentialFound, false)
-
-  // A provider with no display name falls back to its key rather than rendering
-  // an empty strong element the user cannot identify.
-  const nameless = providerRowView(hostProvider({ displayName: '' }), {})
-  assert.equal(nameless.name, 'ccs-deepseek-ab12cd34')
-
-  // Only the row an operation is running for is busy.
-  const busy = { status: 'busy', pendingKey: 'ccs-deepseek-ab12cd34', pendingAction: 'delete' }
-  assert.equal(providerRowView(hostProvider(), busy).pending, true)
-  assert.equal(providerRowView(hostProvider(), busy).action, 'delete')
-  assert.equal(providerRowView(hostProvider({ key: 'other' }), busy).pending, false)
-  assert.equal(providerRowView(hostProvider({ key: 'other' }), busy).action, undefined)
-})
-
-// --- the section renders -----------------------------------------------------
-
-test('the section renders one row per provider with its credential badge', async () => {
-  const controller = await readyController({
-    'ccs-good-ab12cd34': hostProvider({ key: 'ccs-good-ab12cd34', displayName: 'Good' }),
-    'ccs-nokey-ab12cd34': hostProvider({ key: 'ccs-nokey-ab12cd34', displayName: 'NoKey', credential: 'missing' }),
-  })
-  const harness = createHarness()
-  const tree = harness.render(React.createElement(ProviderManagerSection, { controller, t }))
-
-  const rows = findAll(tree, (node) => typeof node.props?.className === 'string'
-    && node.props.className.includes('dsh-ccswitch-manager__row')
-    && !node.props.className.includes('__row-actions')
-    && !node.props.className.includes('__row-error'))
-  assert.equal(rows.length, 2, 'one row per provider')
-
-  const good = rows.find((row) => textOf(row).includes('Good'))
-  assert.ok(good, 'the "Good" provider rendered')
-  assert.match(textOf(good), /凭据已找到/)
-
-  const nokey = rows.find((row) => textOf(row).includes('NoKey'))
-  assert.ok(nokey, 'the "NoKey" provider rendered')
-  assert.match(textOf(nokey), /缺少凭据/)
-  // The credential badge is a distinct class, so "missing" is visible without
-  // reading the words.
-  const badges = byType(nokey, 'span').filter((span) => String(span.props.className ?? '').includes('badge--blocked'))
-  assert.equal(badges.length, 1, 'the missing-credential badge uses the blocked style')
-})
-
-test('the section marks the applied provider and its model count', async () => {
-  const controller = await readyController({
-    'ccs-live-ab12cd34': hostProvider({ key: 'ccs-live-ab12cd34', displayName: 'Live', inUse: true, inFailoverQueue: true }),
-    'ccs-idle-ab12cd34': hostProvider({ key: 'ccs-idle-ab12cd34', displayName: 'Idle' }),
-  })
-  const harness = createHarness()
-  const tree = harness.render(React.createElement(ProviderManagerSection, { controller, t }))
-  const text = textOf(tree)
-  // The badge is membership in DSH's route table, not a "current" pointer:
-  // several rows can carry it at once under the additive model.
-  assert.match(text, /已接入/)
-  assert.match(text, /2 个模型/)
-  assert.match(text, /故障转移队列/)
-
-  const rows = findAll(tree, (node) => typeof node.props?.className === 'string'
-    && node.props.className.includes('dsh-ccswitch-manager__row')
-    && !node.props.className.includes('__row-actions')
-    && !node.props.className.includes('__row-error'))
-  const live = rows.find((row) => textOf(row).includes('Live'))
-  const idle = rows.find((row) => textOf(row).includes('Idle'))
-  assert.ok(live && idle, 'both rows rendered')
-  assert.match(live.props.className, /dsh-ccswitch-manager__row--applied/,
-    'the applied row carries the membership modifier')
-  assert.doesNotMatch(idle.props.className, /dsh-ccswitch-manager__row--applied/)
-
-  // Membership is a toggle, so the button is never disabled for being "already
-  // in that state" — that would mean the wrong verb. Only a busy table does.
-  const withdraw = findAll(live, (node) => node.type === 'button'
-    && node.props?.['aria-label'] === '从 DSH 移出 Live')[0]
-  assert.ok(withdraw, 'the applied row offers a withdraw control')
-  assert.equal(withdraw.props.disabled, false)
-  assert.match(textOf(withdraw), /移出/)
-  assert.doesNotMatch(textOf(withdraw), /移出中/)
-
-  const apply = findAll(idle, (node) => node.type === 'button'
-    && node.props?.['aria-label'] === '加入 DSH 的路由表：Idle')[0]
-  assert.ok(apply, 'the unapplied row offers an apply control')
-  assert.equal(apply.props.disabled, false)
-  assert.match(textOf(apply), /加入/)
-})
-
-test('the membership button applies an unapplied row and withdraws an applied one', async () => {
-  const controller = await readyController({
-    'ccs-live-ab12cd34': hostProvider({ key: 'ccs-live-ab12cd34', displayName: 'Live', inUse: true }),
-    'ccs-idle-ab12cd34': hostProvider({ key: 'ccs-idle-ab12cd34', displayName: 'Idle' }),
-  })
-  // The decision lives in `onMembership`, which reads the row's own `inUse`
-  // from the snapshot; stubbing the controller methods is what proves which
-  // half of the toggle a click actually picked.
-  const calls = []
-  controller.apply = async (key) => { calls.push(['apply', key]) }
-  controller.withdraw = async (key) => { calls.push(['withdraw', key]) }
-  const harness = createHarness()
-  const tree = harness.render(React.createElement(ProviderManagerSection, { controller, t }))
-  const buttonAria = (aria) => findAll(tree, (node) => node.type === 'button' && node.props?.['aria-label'] === aria)[0]
-
-  const withdraw = buttonAria('从 DSH 移出 Live')
-  assert.ok(withdraw, 'the applied row rendered its toggle')
-  withdraw.props.onClick()
-  await new Promise((resolve) => setTimeout(resolve, 0))
-  assert.deepEqual(calls, [['withdraw', 'ccs-live-ab12cd34']])
-
-  const apply = buttonAria('加入 DSH 的路由表：Idle')
-  assert.ok(apply, 'the unapplied row rendered its toggle')
-  apply.props.onClick()
-  await new Promise((resolve) => setTimeout(resolve, 0))
-  assert.deepEqual(calls, [
-    ['withdraw', 'ccs-live-ab12cd34'],
-    ['apply', 'ccs-idle-ab12cd34'],
-  ])
-})
-
-test('the section shows the empty state, and distinguishes having no namespace', async () => {
-  const empty = createCCSwitchManagerController({
-    fetchImpl: stubFetch({ [PROVIDERS_PATH]: { body: { exists: true, revision: 1, order: [], providers: {}, apiProtocols: [] } } }),
-  })
-  await empty.refresh()
-  const harness = createHarness()
-  const tree = harness.render(React.createElement(ProviderManagerSection, { controller: empty, t }))
-  assert.match(textOf(tree), /还没有 provider/)
-
-  const noNamespace = createCCSwitchManagerController({
-    fetchImpl: stubFetch({ [PROVIDERS_PATH]: { body: { exists: false, order: [], providers: {} } } }),
-  })
-  await noNamespace.refresh()
-  const harness2 = createHarness()
-  const tree2 = harness2.render(React.createElement(ProviderManagerSection, { controller: noNamespace, t }))
-  assert.match(textOf(tree2), /尚未创建设置命名空间/)
-})
+// --- the membership banners --------------------------------------------------
 
 test('the section surfaces the warnings an apply returned', async () => {
   const controller = await readyController(
@@ -587,175 +455,6 @@ test('the section reports a revision conflict without inventing a row error', as
   // The conflict is a whole-table fact, so it is stated once at the top rather
   // than attached to the row the user happened to click.
   assert.match(textOf(tree), /设置文档已被其他地方改动/)
-})
-
-test('a render survives a Host payload with missing and malformed fields', async () => {
-  const controller = createCCSwitchManagerController({
-    fetchImpl: stubFetch({ [PROVIDERS_PATH]: { body: {
-      exists: true,
-      revision: 3,
-      // 'ghost' is in `order` but not `providers`; numbers are not keys.
-      order: ['ghost', 7, 'ccs-x-ab12cd34'],
-      providers: { 'ccs-x-ab12cd34': { displayName: null, models: 'nope', api: undefined } },
-    } } }),
-  })
-  await controller.refresh()
-  const harness = createHarness()
-  const tree = harness.render(React.createElement(ProviderManagerSection, { controller, t }))
-  // The one provider present is listed once, under its key, with no models.
-  assert.match(textOf(tree), /ccs-x-ab12cd34/)
-  assert.match(textOf(tree), /无模型/)
-  assert.equal(findByText(tree, 'ghost'), undefined, 'a key with no provider must not become a row')
-})
-
-// --- dialogs opened from the table -------------------------------------------
-
-const PROVIDER_KEY = 'ccs-deepseek-ab12cd34'
-
-test('opening "edit" passes the revision the form was opened at, not the live one', async () => {
-  // The revision has to *move* for this test to mean anything: if both reads
-  // report the same number, a form that pinned the revision and one that read
-  // the live value are indistinguishable.
-  let revision = 7
-  const saves = []
-  const controller = createCCSwitchManagerController({
-    fetchImpl: stubFetch({
-      [PROVIDERS_PATH]: () => ({ body: {
-        exists: true,
-        revision,
-        order: [PROVIDER_KEY],
-        providers: { [PROVIDER_KEY]: hostProvider() },
-        apiProtocols: ['openai-completions', 'openai-responses', 'anthropic-messages'],
-      } }),
-      [`${PROVIDERS_PATH}/save`]: (init) => {
-        saves.push(JSON.parse(init.body))
-        return { body: { key: PROVIDER_KEY, status: 'updated' } }
-      },
-    }),
-  })
-  await controller.refresh()
-  assert.equal(controller.getSnapshot().revision, 7)
-
-  const harness = createHarness()
-  let tree = harness.render(React.createElement(ProviderManagerSection, { controller, t }))
-  buttonByText(tree, '编辑').props.onClick()
-
-  // Someone else edits the document while the form is open.
-  revision = 9
-  await controller.refresh()
-  assert.equal(controller.getSnapshot().revision, 9, 'the table is now on a newer revision')
-
-  tree = harness.render(React.createElement(ProviderManagerSection, { controller, t }))
-  const form = byType(tree, 'form')[0]
-  assert.ok(form, 'the edit form opened')
-  form.props.onSubmit({ preventDefault() {} })
-  await new Promise((resolve) => setTimeout(resolve, 0))
-
-  assert.equal(saves.length, 1)
-  // 7 is the revision the form was opened at. Reading the live revision (9) at
-  // submit time would compare the write against itself and always succeed,
-  // silently overwriting the edit that landed meanwhile.
-  assert.equal(saves[0].expectedRevision, 7)
-  assert.equal(saves[0].key, PROVIDER_KEY)
-})
-
-test('a second dialog does not open showing the previous attempt’s errors', async () => {
-  const controller = await readyController(
-    { [PROVIDER_KEY]: hostProvider() },
-    { routes: { [`${PROVIDERS_PATH}/save`]: {
-      status: 400,
-      body: { error: 'provider is not usable', errors: ['displayName is required'] },
-    } } },
-  )
-  const harness = createHarness()
-  let tree = harness.render(React.createElement(ProviderManagerSection, { controller, t }))
-
-  // Open edit, submit, and let the Host reject it.
-  buttonByText(tree, '编辑').props.onClick()
-  tree = harness.render(React.createElement(ProviderManagerSection, { controller, t }))
-  byType(tree, 'form')[0].props.onSubmit({ preventDefault() {} })
-  await new Promise((resolve) => setTimeout(resolve, 0))
-
-  tree = harness.render(React.createElement(ProviderManagerSection, { controller, t }))
-  assert.match(textOf(tree), /displayName is required/, 'the rejection is shown')
-
-  // Close it, then open a fresh dialog: the abandoned attempt’s errors must
-  // not greet the user, because they may name fields already fixed.
-  buttonByText(tree, '取消').props.onClick()
-  tree = harness.render(React.createElement(ProviderManagerSection, { controller, t }))
-  assert.equal(byType(tree, 'form').length, 0, 'the dialog closed')
-
-  buttonByText(tree, '新增 provider').props.onClick()
-  tree = harness.render(React.createElement(ProviderManagerSection, { controller, t }))
-  const form = byType(tree, 'form')[0]
-  assert.ok(form, 'a fresh dialog opened')
-  assert.equal(findAll(tree, (node) => node.props?.role === 'alert').length, 0,
-    'the new dialog shows no errors from the abandoned attempt')
-})
-
-test('duplicate opens a create form for a new key, keeping the settings', async () => {
-  const controller = await readyController({ [PROVIDER_KEY]: hostProvider() })
-  const harness = createHarness()
-  let tree = harness.render(React.createElement(ProviderManagerSection, { controller, t }))
-  buttonByText(tree, '复制').props.onClick()
-  tree = harness.render(React.createElement(ProviderManagerSection, { controller, t }))
-
-  // A create form, so the save is unambiguously a new provider.
-  assert.match(textOf(byType(tree, 'form')[0]), /新增 provider/)
-  const values = byType(tree, 'input').map((input) => input.props.value)
-  assert.ok(values.includes('DeepSeek'), 'the source name is carried over')
-  // The protocol select is populated from the Host list, in the Host's own
-  // order — it is not hardcoded, and the draft's existing protocol is not
-  // hoisted to the front.
-  assert.deepEqual(
-    byType(tree, 'select')[0].props.children.filter(Boolean).map((option) => option.props.value),
-    ['openai-completions', 'openai-responses', 'anthropic-messages'],
-  )
-})
-
-test('delete asks for confirmation and does nothing when it is declined', async () => {
-  let deletes = 0
-  const controller = await readyController(
-    { [PROVIDER_KEY]: hostProvider() },
-    { routes: { [`${PROVIDERS_PATH}/delete`]: () => { deletes += 1; return { body: { key: PROVIDER_KEY, status: 'removed' } } } } },
-  )
-  const harness = createHarness()
-  const tree = harness.render(React.createElement(ProviderManagerSection, { controller, t }))
-
-  const previousConfirm = globalThis.window
-  globalThis.window = { confirm: () => false }
-  try {
-    buttonByText(tree, '删除').props.onClick()
-    await new Promise((resolve) => setTimeout(resolve, 0))
-  } finally {
-    globalThis.window = previousConfirm
-  }
-  // Declining must not delete: the row is irreplaceable once the credential is
-  // gone with it.
-  assert.equal(deletes, 0)
-})
-
-test('delete proceeds once confirmed', async () => {
-  let deleted = undefined
-  const controller = await readyController(
-    { [PROVIDER_KEY]: hostProvider() },
-    { routes: { [`${PROVIDERS_PATH}/delete`]: (init) => {
-      deleted = JSON.parse(init.body).key
-      return { body: { key: PROVIDER_KEY, status: 'removed' } }
-    } } },
-  )
-  const harness = createHarness()
-  const tree = harness.render(React.createElement(ProviderManagerSection, { controller, t }))
-
-  const previousWindow = globalThis.window
-  globalThis.window = { confirm: () => true }
-  try {
-    buttonByText(tree, '删除').props.onClick()
-    await new Promise((resolve) => setTimeout(resolve, 0))
-  } finally {
-    globalThis.window = previousWindow
-  }
-  assert.equal(deleted, PROVIDER_KEY)
 })
 
 // --- the modal ---------------------------------------------------------------
@@ -1108,86 +807,6 @@ test('no manager means no manager tab, and the importer keeps working', () => {
   assert.equal(registrations[0].name, MODELS_FOOTER_SLOT)
 })
 
-// --- search: CC Switch's ProviderList filter --------------------------------
-//
-// CC Switch builds one lowercased haystack per provider out of
-// `[name, notes, websiteUrl, extractProviderBaseUrl(settingsConfig)]` and asks
-// whether it contains the trimmed, lowercased query — a plain substring test,
-// not a word or prefix match. These pin the fields this plugin has an
-// equivalent for, and the two states a search can put the table into.
-
-test('providerMatches searches name, notes and endpoint, case-insensitively', () => {
-  const provider = {
-    displayName: 'DeepSeek',
-    notes: '备用线路',
-    baseURL: 'https://api.deepseek.com/anthropic',
-  }
-  // Empty and whitespace-only queries match everything: that is what lets the
-  // caller run every row through this without a separate "is searching" branch.
-  assert.equal(providerMatches(provider, ''), true)
-  assert.equal(providerMatches(provider, '   '), true)
-  assert.equal(providerMatches(provider, undefined), true)
-
-  assert.equal(providerMatches(provider, 'deep'), true, 'name')
-  assert.equal(providerMatches(provider, 'DEEPSEEK'), true, 'case-insensitive')
-  assert.equal(providerMatches(provider, '备用'), true, 'notes')
-  assert.equal(providerMatches(provider, 'api.deepseek.com'), true, 'endpoint')
-  assert.equal(providerMatches(provider, 'seek.com'), true, 'mid-string substring')
-  assert.equal(providerMatches(provider, 'moonshot'), false)
-  // A provider missing an optional field must not throw, and must not match on
-  // the literal string "undefined" the way a template would.
-  assert.equal(providerMatches({ displayName: 'X' }, 'x'), true)
-  assert.equal(providerMatches({ displayName: 'X' }, 'undefined'), false)
-  assert.equal(providerMatches(undefined, 'x'), false)
-})
-
-test('the search box narrows the table and has its own empty state', async () => {
-  const controller = await readyController({
-    'ccs-a-ab12cd34': hostProvider({ key: 'ccs-a-ab12cd34', displayName: 'Alpha' }),
-    'ccs-b-ab12cd34': hostProvider({ key: 'ccs-b-ab12cd34', displayName: 'Beta' }),
-  })
-  const harness = createHarness()
-  const render = () => harness.render(React.createElement(ProviderManagerSection, { controller, t }))
-  const rowsOf = (tree) => findAll(tree, (node) => typeof node.props?.className === 'string'
-    && node.props.className.includes('dsh-ccswitch-manager__row')
-    && !node.props.className.includes('__row-actions')
-    && !node.props.className.includes('__row-error'))
-
-  const tree = render()
-  assert.equal(rowsOf(tree).length, 2, 'both rows render before searching')
-  const input = findAll(tree, (node) => node.props?.['aria-label'] === '搜索供应商')[0]
-  assert.ok(input, 'the search box rendered')
-  assert.equal(input.props.type, 'text')
-
-  input.props.onChange({ target: { value: 'beta' } })
-  const filtered = render()
-  assert.equal(rowsOf(filtered).length, 1, 'only the matching row remains')
-  assert.match(textOf(rowsOf(filtered)[0]), /Beta/)
-
-  // A query nothing matches must say so. Rendering the "no providers yet" line
-  // here would be a lie: the catalogue is non-empty, the search is hiding it.
-  input.props.onChange({ target: { value: 'zzz' } })
-  const none = render()
-  assert.equal(rowsOf(none).length, 0)
-  assert.match(textOf(none), /没有符合搜索条件的供应商/)
-  assert.doesNotMatch(textOf(none), /还没有 provider/)
-
-  input.props.onChange({ target: { value: '' } })
-  assert.equal(rowsOf(render()).length, 2, 'clearing restores the full list')
-})
-
-test('the search box is absent while there is nothing to search', async () => {
-  const empty = createCCSwitchManagerController({
-    fetchImpl: stubFetch({ [PROVIDERS_PATH]: { body: { exists: true, revision: 1, order: [], providers: {}, apiProtocols: [] } } }),
-  })
-  await empty.refresh()
-  const harness = createHarness()
-  const tree = harness.render(React.createElement(ProviderManagerSection, { controller: empty, t }))
-  // A control that cannot do anything, sitting above the sentence explaining
-  // how to get a provider, is worse than no control.
-  assert.equal(findAll(tree, (node) => node.props?.['aria-label'] === '搜索供应商').length, 0)
-})
-
 // --- the preset picker: CC Switch's groups and version labels ---------------
 
 test('presetOptionLabel appends the version suffix CC Switch shows', () => {
@@ -1274,160 +893,6 @@ test('the picker distinguishes two versions of one vendor', async () => {
   assert.ok(labels.includes('Kimi · 编程订阅 · 海外'), `labels were ${JSON.stringify(labels)}`)
 })
 
-// --- the per-row connection probe -------------------------------------------
-//
-// The manager reuses the importer's read-only probe route. The button is shown
-// only where that route can actually answer — a provider that came through an
-// import — because a control that can never succeed reads as a bug rather than
-// as a limit of what was imported.
-
-const PROBE_PATH = '/api/dsh-ccswitch/probe'
-
-/** A probe outcome as the Host sends one. */
-function probeOutcome(overrides = {}) {
-  return {
-    profileId: 'deepseek-1',
-    ok: true,
-    reason: 'ok',
-    check: 'models',
-    httpStatus: 200,
-    latencyMs: 42,
-    modelCount: 3,
-    message: '模型探测成功',
-    ...overrides,
-  }
-}
-
-test('the probe button appears only where the probe route can answer', async () => {
-  const controller = await readyController({
-    'ccs-imported-ab12cd34': hostProvider({ key: 'ccs-imported-ab12cd34', displayName: 'Imported', sourceProfileId: 'deepseek-1' }),
-    'ccs-hand-ab12cd34': hostProvider({ key: 'ccs-hand-ab12cd34', displayName: 'HandAdded' }),
-  })
-  const harness = createHarness()
-  const tree = harness.render(React.createElement(ProviderManagerSection, { controller, t }))
-
-  const probes = findAll(tree, (node) => node.type === 'button' && textOf(node).includes('测试连接'))
-  assert.equal(probes.length, 1, 'only the imported row offers a probe')
-
-  const rows = findAll(tree, (node) => typeof node.props?.className === 'string'
-    && node.props.className.includes('dsh-ccswitch-manager__row')
-    && !node.props.className.includes('__row-actions')
-    && !node.props.className.includes('__row-error'))
-  const imported = rows.find((row) => textOf(row).includes('Imported'))
-  const hand = rows.find((row) => textOf(row).includes('HandAdded'))
-  assert.equal(findAll(imported, (node) => textOf(node).includes('测试连接')).length > 0, true)
-  assert.equal(findAll(hand, (node) => textOf(node).includes('测试连接')).length, 0)
-  // The hand-added row still renders its other actions — its membership toggle
-  // above all, which is the one control every row has.
-  assert.ok(findAll(hand, (node) => node.props?.['aria-label'] === '加入 DSH 的路由表：HandAdded')[0])
-})
-
-test('a probe result renders inline on the row that asked for it', async () => {
-  const controller = await readyController({
-    'ccs-imported-ab12cd34': hostProvider({ key: 'ccs-imported-ab12cd34', displayName: 'Imported', sourceProfileId: 'deepseek-1' }),
-    'ccs-other-ab12cd34': hostProvider({ key: 'ccs-other-ab12cd34', displayName: 'Other', sourceProfileId: 'deepseek-2' }),
-  }, {
-    routes: { [PROBE_PATH]: { body: { results: [probeOutcome()] } } },
-  })
-  const harness = createHarness()
-  const render = () => harness.render(React.createElement(ProviderManagerSection, { controller, t }))
-
-  const button = findAll(render(), (node) => node.type === 'button' && textOf(node).includes('测试连接'))[0]
-  assert.ok(button, 'the probe button rendered')
-  button.props.onClick()
-  // The click kicks off an async request; let it settle before re-rendering.
-  await new Promise((resolve) => setTimeout(resolve, 0))
-  const tree = render()
-
-  const status = findAll(tree, (node) => node.props?.role === 'status'
-    && typeof node.props?.className === 'string'
-    && node.props.className.includes('dsh-ccswitch-import__probe'))
-  assert.equal(status.length, 1, 'exactly one row shows a verdict')
-  // Model count and latency, in the same wording the import tab uses.
-  assert.match(textOf(status[0]), /连通/)
-  assert.match(textOf(status[0]), /42ms/)
-
-  // The verdict belongs to the row that asked for it, not to its neighbour.
-  const rows = findAll(tree, (node) => typeof node.props?.className === 'string'
-    && node.props.className.includes('dsh-ccswitch-manager__row')
-    && !node.props.className.includes('__row-actions')
-    && !node.props.className.includes('__row-error'))
-  const other = rows.find((row) => textOf(row).includes('Other'))
-  assert.doesNotMatch(textOf(other), /连通/)
-})
-
-test('a failed probe says why, and a stale Host is named', async () => {
-  const controller = await readyController({
-    'ccs-imported-ab12cd34': hostProvider({ key: 'ccs-imported-ab12cd34', displayName: 'Imported', sourceProfileId: 'deepseek-1' }),
-  }, {
-    routes: { [PROBE_PATH]: { body: { results: [
-      probeOutcome({ ok: false, reason: 'http-error', check: 'none', httpStatus: 401, detail: 'Invalid token', latencyMs: 12 }),
-    ] } } },
-  })
-  const harness = createHarness()
-  const render = () => harness.render(React.createElement(ProviderManagerSection, { controller, t }))
-
-  findAll(render(), (node) => node.type === 'button' && textOf(node).includes('测试连接'))[0].props.onClick()
-  await new Promise((resolve) => setTimeout(resolve, 0))
-  const text = textOf(render())
-  assert.match(text, /失败/)
-  assert.match(text, /HTTP 401/)
-  // The upstream's own words are the actionable part of a failure.
-  assert.match(text, /Invalid token/)
-})
-
-test('a probe the Host does not know about says so instead of blaming the provider', async () => {
-  // A 404 from the probe *route* means the Host half predates the endpoint.
-  // Reporting that as "network error" would send the user hunting a problem
-  // that is not there.
-  const controller = await readyController({
-    'ccs-imported-ab12cd34': hostProvider({ key: 'ccs-imported-ab12cd34', displayName: 'Imported', sourceProfileId: 'deepseek-1' }),
-  }, {
-    routes: { [PROBE_PATH]: { status: 404, body: { error: 'HTTP 404' } } },
-  })
-  const harness = createHarness()
-  const render = () => harness.render(React.createElement(ProviderManagerSection, { controller, t }))
-
-  findAll(render(), (node) => node.type === 'button' && textOf(node).includes('测试连接'))[0].props.onClick()
-  await new Promise((resolve) => setTimeout(resolve, 0))
-  const text = textOf(render())
-  assert.match(text, /宿主未加载该接口/)
-})
-
-test('the search box and the probe survive each other', async () => {
-  // The search filters the rows; a verdict is stored against a provider key, so
-  // narrowing the table must not drop it, and a probe must not clear the query.
-  const controller = await readyController({
-    'ccs-a-ab12cd34': hostProvider({ key: 'ccs-a-ab12cd34', displayName: 'Alpha', sourceProfileId: 'a-1' }),
-    'ccs-b-ab12cd34': hostProvider({ key: 'ccs-b-ab12cd34', displayName: 'Beta', sourceProfileId: 'b-1' }),
-  }, {
-    routes: { [PROBE_PATH]: { body: { results: [probeOutcome({ profileId: 'a-1' })] } } },
-  })
-  const harness = createHarness()
-  const render = () => harness.render(React.createElement(ProviderManagerSection, { controller, t }))
-
-  findAll(render(), (node) => node.type === 'button' && textOf(node).includes('测试连接'))[0].props.onClick()
-  await new Promise((resolve) => setTimeout(resolve, 0))
-
-  const input = findAll(render(), (node) => node.props?.['aria-label'] === '搜索供应商')[0]
-  input.props.onChange({ target: { value: 'alpha' } })
-  const filtered = render()
-  assert.match(textOf(filtered), /连通/, 'the verdict survives filtering to its own row')
-  // And it is still there when the filter is cleared.
-  input.props.onChange({ target: { value: '' } })
-  assert.match(textOf(render()), /连通/)
-})
-
-// --- moving a row ------------------------------------------------------------
-//
-// The reorder route was built and tested on the Host, and nothing in the UI
-// called it, so the list order was fixed. These cover the controls that now do.
-
-/** Every button whose own text is exactly `label`, in document order. */
-function buttonsLabelled(root, label) {
-  return findAll(root, (node) => node.type === 'button' && textOf(node).trim() === label)
-}
-
 /** The option values a `<select>` offers, flattened. */
 function optionValues(select) {
   return (Array.isArray(select.props.children) ? select.props.children : [])
@@ -1435,114 +900,12 @@ function optionValues(select) {
     .map((option) => option.props.value)
 }
 
-const THREE_KEYS = ['ccs-a-ab12cd34', 'ccs-b-ab12cd34', 'ccs-c-ab12cd34']
-
-function threeProviders() {
-  return Object.fromEntries(THREE_KEYS.map((key) => [key, hostProvider({ key, displayName: key })]))
-}
-
-function searchBox(root) {
-  return findAll(root, (node) => node.type === 'input'
-    && typeof node.props.placeholder === 'string'
-    && node.props.placeholder.includes('搜索'))[0]
-}
-
-test('the move buttons write the whole new order, and are dead at the ends', async () => {
-  const reorders = []
-  const controller = await readyController(threeProviders(), {
-    routes: {
-      [`${PROVIDERS_PATH}/reorder`]: (init) => {
-        reorders.push(JSON.parse(init.body))
-        return { body: { status: 'reordered', order: JSON.parse(init.body).keys } }
-      },
-    },
-  })
-  const harness = createHarness()
-  const tree = harness.render(React.createElement(ProviderManagerSection, { controller, t }))
-
-  const ups = buttonsLabelled(tree, '↑')
-  const downs = buttonsLabelled(tree, '↓')
-  assert.equal(ups.length, 3, 'one up button per row')
-  assert.equal(downs.length, 3, 'one down button per row')
-  // There is nowhere for the first row to go up, nor the last to go down. The
-  // Host accepts either as a no-op move, which would cost a settings write and
-  // a revision bump to store the order that is already there.
-  assert.equal(ups[0].props.disabled, true, 'the first row cannot move up')
-  assert.equal(downs[2].props.disabled, true, 'the last row cannot move down')
-  assert.equal(ups[1].props.disabled, false)
-  assert.equal(downs[0].props.disabled, false)
-
-  // Move the middle row up.
-  ups[1].props.onClick()
-  await new Promise((resolve) => setTimeout(resolve, 0))
-  assert.equal(reorders.length, 1, 'exactly one reorder was sent')
-  // The complete order, re-indexed by position — what the Host requires.
-  assert.deepEqual(reorders[0].keys, ['ccs-b-ab12cd34', 'ccs-a-ab12cd34', 'ccs-c-ab12cd34'])
-})
-
-test('a move made while a search is hiding rows still moves one whole slot', async () => {
-  // CC Switch resolves both ends of a drag against the unfiltered
-  // `sortedProviders`, so a move is a fact about the catalogue rather than
-  // about what the filter happens to be showing. A one-slot move has to follow
-  // the same rule, or a row moved past a hidden neighbour lands somewhere the
-  // user cannot see and did not ask for.
-  const reorders = []
-  const controller = await readyController(threeProviders(), {
-    routes: {
-      [`${PROVIDERS_PATH}/reorder`]: (init) => {
-        reorders.push(JSON.parse(init.body))
-        return { body: { status: 'reordered', order: [] } }
-      },
-    },
-  })
-  const harness = createHarness()
-  let tree = harness.render(React.createElement(ProviderManagerSection, { controller, t }))
-
-  // Narrow to the last row only.
-  const search = searchBox(tree)
-  assert.ok(search, 'the search box rendered')
-  search.props.onChange({ target: { value: 'ccs-c' } })
-  tree = harness.render(React.createElement(ProviderManagerSection, { controller, t }))
-
-  const ups = buttonsLabelled(tree, '↑')
-  assert.equal(ups.length, 1, 'the filter hides the other two rows')
-  // It is the third row of three, so up is available. Were the index resolved
-  // against the filtered list it would be the first row, and this would be off.
-  assert.equal(ups[0].props.disabled, false, 'the row is not first in the catalogue')
-  ups[0].props.onClick()
-  await new Promise((resolve) => setTimeout(resolve, 0))
-  assert.deepEqual(reorders[0].keys, ['ccs-a-ab12cd34', 'ccs-c-ab12cd34', 'ccs-b-ab12cd34'])
-})
-
-test('a failed reorder is reported as a reorder failure', async () => {
-  const controller = await readyController(threeProviders(), {
-    routes: {
-      [`${PROVIDERS_PATH}/reorder`]: { status: 400, body: { error: 'keys must name every provider exactly once' } },
-    },
-  })
-  const harness = createHarness()
-  const tree = harness.render(React.createElement(ProviderManagerSection, { controller, t }))
-  buttonsLabelled(tree, '↓')[0].props.onClick()
-  await new Promise((resolve) => setTimeout(resolve, 0))
-  // Worded as a reorder failure, not a save or delete one: the user pressed a
-  // move button and the message has to name that.
-  assert.match(textOf(harness.render(React.createElement(ProviderManagerSection, { controller, t }))), /调整顺序失败/)
-})
 
 // --- the app type control ----------------------------------------------------
 //
 // The field travelled through every draft builder but had no control, so a
 // provider added by hand silently became a Claude Code provider: the Host
 // defaults an absent app type to `claude`. It is now shown and editable.
-
-test('a row shows which app it belongs to, resolving an absent value to claude', () => {
-  // The edit form can set this, so the list has to show it — otherwise two
-  // providers with the same name in different apps look identical.
-  assert.equal(providerRowView({ key: 'k', appType: 'codex' }, {}).appType, 'codex')
-  assert.equal(providerRowView({ key: 'k' }, {}).appType, 'claude')
-  assert.equal(providerRowView({ key: 'k', appType: '' }, {}).appType, 'claude')
-  assert.equal(providerRowView({ key: 'k', appType: 7 }, {}).appType, 'claude')
-})
 
 test('a new provider names an app type instead of leaving it implied', () => {
   assert.equal(emptyDraft().appType, 'claude')

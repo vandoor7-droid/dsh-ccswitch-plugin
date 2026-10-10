@@ -60,6 +60,17 @@ export const MANAGER_API = '/api/dsh-ccswitch-manager'
 export const IMPORT_API = '/api/dsh-ccswitch'
 export const PROVIDERS_PATH = `${MANAGER_API}/providers`
 
+/**
+ * cc-switch's `StreamCheckConfig::degraded_threshold_ms` default.
+ *
+ * `services/stream_check.rs` classifies `latency <= threshold` as operational
+ * and anything above it as degraded; the default is 6000 ms, with an 8 s
+ * timeout (the comment there notes both were cut down from an older real-
+ * request check). Transcribed rather than tuned, so a probe that cc-switch
+ * calls degraded is called degraded here too.
+ */
+export const DEGRADED_THRESHOLD_MS = 6000
+
 function isRecord(value) {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
@@ -310,5 +321,81 @@ export const INVOKE_ROUTES = {
    */
   get_current_provider: {
     run: () => '',
+  },
+
+  /**
+   * The card's "Connectivity check", answered by the importer's probe route.
+   *
+   * cc-switch probes `base_url` with a header-only request and classifies the
+   * result as `operational` / `degraded` / `failed` against a 6000 ms threshold
+   * (`services/stream_check.rs` — `latency <= threshold` is operational, the
+   * `Default` impl pins `degraded_threshold_ms: 6000`). This plugin already
+   * probes endpoints for the import preview, so the same measurement is reused
+   * rather than a second probe written.
+   *
+   * Two things differ, both handled here:
+   *
+   * - The probe route is addressed by **CC Switch profile id**, not by the
+   *   catalogue key, so the row is looked up first. A provider added by hand
+   *   has no CC Switch row to probe; it answers `failed` with a reason rather
+   *   than throwing, because the caller turns a throw into "检查出错: Error:
+   *   …" and that reads like a bug instead of a limit.
+   * - Anything slower than the threshold is `degraded`, exactly as upstream
+   *   classifies it.
+   */
+  stream_check_provider: {
+    run: async (args, ctx) => {
+      const unprobeable = (message) => ({
+        status: 'failed',
+        success: false,
+        message,
+        testedAt: Math.floor(Date.now() / 1000),
+        retryCount: 0,
+      })
+      let profileId
+      try {
+        const { providers } = await readCatalogue(ctx)
+        profileId = providers[args?.providerId]?.sourceProfileId
+      } catch (error) {
+        return unprobeable(String(error?.message ?? error))
+      }
+      if (typeof profileId !== 'string' || profileId === '') {
+        return unprobeable('this provider was added here, so there is no CC Switch row to probe')
+      }
+      let results
+      try {
+        const body = await ctx.request({
+          path: `${IMPORT_API}/probe`,
+          method: 'POST',
+          body: { profileIds: [profileId] },
+        })
+        results = Array.isArray(body?.results) ? body.results : []
+      } catch (error) {
+        return unprobeable(String(error?.message ?? error))
+      }
+      const result = results.find((entry) => entry?.profileId === profileId)
+      if (result === undefined) {
+        return unprobeable('the probe had no answer for this provider')
+      }
+      const latency = Number.isInteger(result.latencyMs) ? result.latencyMs : undefined
+      if (result.ok !== true) {
+        return {
+          status: 'failed',
+          success: false,
+          message: String(result.message ?? result.detail ?? result.reason ?? 'unreachable'),
+          testedAt: Math.floor(Date.now() / 1000),
+          retryCount: 0,
+        }
+      }
+      return {
+        status: latency !== undefined && latency > DEGRADED_THRESHOLD_MS ? 'degraded' : 'operational',
+        success: true,
+        message: 'Reachable',
+        responseTimeMs: latency,
+        httpStatus: Number.isInteger(result.httpStatus) ? result.httpStatus : undefined,
+        testedAt: Math.floor(Date.now() / 1000),
+        retryCount: 0,
+      }
+    },
   },
 }

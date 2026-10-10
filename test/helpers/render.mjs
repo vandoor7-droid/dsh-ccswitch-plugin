@@ -158,8 +158,13 @@ export async function bundleModule(name, source) {
     // Resolved from `test/.tmp` at runtime, which is inside the repo — so these
     // come from the same `node_modules` the test itself uses. Bundling a second
     // React would be the one mistake that fails as "Invalid hook call" rather
-    // than as a build error.
-    external: ['react', 'react-dom', 'react-dom/client', 'react/jsx-runtime', 'react-dom/server'],
+    // than as a build error. `@tanstack/react-query` is listed for the same
+    // reason one level up: its `QueryClientContext` is an object identity, and
+    // a bundled copy would hand the test a *different* one to answer with.
+    external: [
+      'react', 'react-dom', 'react-dom/client', 'react/jsx-runtime', 'react-dom/server',
+      '@tanstack/react-query',
+    ],
   })
   const namespace = await import(`file://${outfile.split('\\').join('/')}`)
   bundles.set(name, namespace)

@@ -294,6 +294,60 @@ test("the command table only ever names exact plugin routes", () => {
   }
 });
 
+test("connectivity check reuses the importer's probe and keeps cc-switch's thresholds", async () => {
+  const fetchImpl = fakeFetch([
+    { status: 200, body: { providers: { k: { sourceProfileId: "row-1" } } } },
+    {
+      status: 200,
+      body: { results: [{ profileId: "row-1", ok: true, latencyMs: 900, httpStatus: 200 }] },
+    },
+  ])
+  const fast = await createInvoke({ fetchImpl })("stream_check_provider", { appType: "mcode", providerId: "k" })
+  assert.equal(fast.status, "operational")
+  assert.equal(fast.success, true)
+  assert.equal(fast.responseTimeMs, 900)
+  assert.equal(fast.httpStatus, 200)
+  // The probe is addressed by CC Switch's row id, not the catalogue key.
+  assert.deepEqual(JSON.parse(fetchImpl.calls[1].init.body), { profileIds: ["row-1"] })
+
+  // Above cc-switch's 6000 ms `degraded_threshold_ms` the verdict flips; the
+  // boundary itself is inclusive, matching `latency <= threshold`.
+  const probeAt = async (latencyMs) => {
+    const slow = fakeFetch([
+      { status: 200, body: { providers: { k: { sourceProfileId: "row-1" } } } },
+      { status: 200, body: { results: [{ profileId: "row-1", ok: true, latencyMs }] } },
+    ])
+    return createInvoke({ fetchImpl: slow })("stream_check_provider", { providerId: "k" })
+  }
+  assert.equal((await probeAt(6000)).status, "operational")
+  assert.equal((await probeAt(6001)).status, "degraded")
+
+  // A probe that did not reach the endpoint reports `failed`, which is the
+  // branch `useStreamCheck` renders as an error toast.
+  const down = fakeFetch([
+    { status: 200, body: { providers: { k: { sourceProfileId: "row-1" } } } },
+    { status: 200, body: { results: [{ profileId: "row-1", ok: false, message: "connection refused" }] } },
+  ])
+  const failed = await createInvoke({ fetchImpl: down })("stream_check_provider", { providerId: "k" })
+  assert.equal(failed.status, "failed")
+  assert.equal(failed.success, false)
+  assert.equal(failed.message, "connection refused")
+})
+
+test("a row this plugin created has no CC Switch row to probe, and says so", async () => {
+  const fetchImpl = fakeFetch([{ status: 200, body: { providers: { k: {} } } }])
+  const invoke = createInvoke({ fetchImpl })
+
+  const result = await invoke("stream_check_provider", { providerId: "k" })
+  assert.equal(result.status, "failed")
+  assert.equal(result.success, false)
+  assert.match(result.message, /no CC Switch row/)
+  // The look-up is the only request: probing an address we do not have would
+  // be a request to nowhere, and a throw here reaches the caller as
+  // "检查出错: Error: …", which reads like a bug rather than a limit.
+  assert.equal(fetchImpl.calls.length, 1)
+})
+
 test("cc-switch's event bus is refused loudly rather than stubbed out", async () => {
   await assert.rejects(
     () => listen("proxy-status", () => {}),

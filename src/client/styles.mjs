@@ -24,31 +24,6 @@ const MANAGER_CSS = [
   ".dsh-ccswitch-manager__preset-filter{flex:1 1 auto;width:auto;min-width:120px;max-width:220px;}",
   ".dsh-ccswitch-manager__preset-label{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;white-space:nowrap;}",
   ".dsh-ccswitch-manager__note{margin:0;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;overflow-wrap:anywhere;}",
-  ".dsh-ccswitch-manager__empty{margin:0;color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:20px;}",
-  ".dsh-ccswitch-manager__search{display:flex;align-items:center;gap:8px;min-width:0;}",
-  // `width:auto` overrides the field class's `width:100%`, which in a flex
-  // row would push the clear button onto a second line.
-  ".dsh-ccswitch-manager__search input{flex:1 1 auto;width:auto;min-width:0;max-width:360px;}",
-  ".dsh-ccswitch-manager__list{display:flex;flex-direction:column;gap:8px;}",
-  ".dsh-ccswitch-manager__row{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;min-width:0;padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-1);}",
-  // The active row is marked by its border rather than a fill, so the badge
-  // stays readable in both themes.
-  ".dsh-ccswitch-manager__row--applied{border-color:var(--dsw-alias-brand-primary);}",
-  ".dsh-ccswitch-manager__content{display:flex;flex-direction:column;gap:3px;min-width:0;flex:1 1 auto;}",
-  ".dsh-ccswitch-manager__primary-line{display:flex;align-items:baseline;gap:8px;min-width:0;}",
-  ".dsh-ccswitch-manager__primary-line strong{min-width:0;color:var(--dsw-alias-label-primary);font-size:13px;font-weight:500;line-height:20px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}",
-  ".dsh-ccswitch-manager__meta-line{display:flex;align-items:baseline;flex-wrap:wrap;gap:8px;min-width:0;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;}",
-  ".dsh-ccswitch-manager__meta-line>*{min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}",
-  ".dsh-ccswitch-manager__provider-key,.dsh-ccswitch-manager__meta-line code{color:var(--dsw-alias-label-tertiary);font-family:var(--ds-font-family-code,monospace);font-size:11px;line-height:16px;}",
-  // The app type carries the same chip shape as a badge, so a row reads as
-  // "which tool, over which protocol" without either word needing a label.
-  ".dsh-ccswitch-manager__app-type{flex:none;min-height:18px;box-sizing:border-box;padding:0 7px;border:1px solid var(--dsw-alias-border-l2);border-radius:999px;color:var(--dsw-alias-label-secondary);font-size:11px;font-weight:500;line-height:16px;}",
-  ".dsh-ccswitch-manager__protocol{color:var(--dsw-alias-label-tertiary);font-family:var(--ds-font-family-code,monospace);font-size:11px;line-height:16px;}",
-  ".dsh-ccswitch-manager__failover{color:var(--dsw-alias-label-secondary);}",
-  ".dsh-ccswitch-manager__row-error{margin:2px 0 0;color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:18px;overflow-wrap:anywhere;}",
-  ".dsh-ccswitch-manager__row-actions{display:flex;align-items:center;gap:10px;flex:none;flex-wrap:wrap;justify-content:flex-end;}",
-  ".dsh-ccswitch-manager__danger{color:var(--dsw-alias-state-error-primary);}",
-  ".dsh-ccswitch-manager__danger[disabled]{color:var(--dsw-alias-label-dimmed);}",
   ".dsh-ccswitch-manager__activation{padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-1);}",
   ".dsh-ccswitch-manager__activation--warn{border-color:var(--dsw-alias-state-warn-primary);}",
   ".dsh-ccswitch-manager__activation-head{display:flex;align-items:center;justify-content:space-between;gap:12px;}",
@@ -90,8 +65,6 @@ const MANAGER_CSS = [
   "@media (max-width:640px){",
   ".dsh-ccswitch-manager__header{flex-direction:column;}",
   ".dsh-ccswitch-manager__header-actions{width:100%;}",
-  ".dsh-ccswitch-manager__row{flex-direction:column;}",
-  ".dsh-ccswitch-manager__row-actions{width:100%;justify-content:flex-start;}",
   ".dsh-ccswitch-modal__backdrop{padding:0;align-items:stretch;}",
   ".dsh-ccswitch-modal{max-width:none;border-radius:0;max-height:none;height:100%;}",
   ".dsh-ccswitch-form__grid{grid-template-columns:minmax(0,1fr);}",
