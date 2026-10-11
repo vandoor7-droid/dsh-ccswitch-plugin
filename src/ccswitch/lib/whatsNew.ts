@@ -22,10 +22,30 @@ export interface WhatsNewEntry {
   items: WhatsNewItem[];
 }
 
-const modules = import.meta.glob<WhatsNewEntry>("../whats-new/*.json", {
-  eager: true,
-  import: "default",
-});
+// ── 本文件与上游的唯一偏离（DSH 移植）────────────────────────────────────
+// 上游写的是 `import.meta.glob("../whats-new/*.json", { eager: true })`，
+// 那是 **Vite 的编译期能力**，esbuild 没有对应物：在本仓的 cjs 产物里
+// `import.meta` 是空对象，模块一初始化就会对 `undefined` 取 `()` 而抛错，
+// 整棵 App 树渲染不出来。esbuild 只会就此给出一条 warning，构建照样成功，
+// 所以它是一个**运行时**失败——挂上 App 之前从未暴露过。
+//
+// 这里改成逐份静态 import：8 个文件是闭集，新增一版时同步加一行即可
+// （漏加的表现是该版本的摘要不出现，而不是别的什么静默错位）。
+// 其余部分与上游逐字一致。
+// ─────────────────────────────────────────────────────────────────────
+import w4000 from "@/whats-new/4.0.0.json";
+import w402 from "@/whats-new/4.0.2.json";
+import w403 from "@/whats-new/4.0.3.json";
+import w404 from "@/whats-new/4.0.4.json";
+import w405 from "@/whats-new/4.0.5.json";
+import w406 from "@/whats-new/4.0.6.json";
+import w407 from "@/whats-new/4.0.7.json";
+import w408 from "@/whats-new/4.0.8.json";
+
+const modules = [w4000, w402, w403, w404, w405, w406, w407, w408] as unknown as Record<
+  string,
+  WhatsNewEntry
+>;
 
 /** 所有版本的摘要，新到旧 */
 export const WHATS_NEW_ENTRIES: WhatsNewEntry[] = Object.values(modules).sort(

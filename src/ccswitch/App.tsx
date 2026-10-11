@@ -8,7 +8,9 @@ import {
 } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "@/lib/toast";
-import { invoke } from "@tauri-apps/api/core";
+// `isTauri` 只为下面 `useAppWindowControls` 那层门卫而加（见该处的说明）；
+// 其余部分与上游逐字一致。
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   ExternalLink,
@@ -164,6 +166,7 @@ function App() {
   const [currentView, setCurrentView] = useState<View>(readStoredView);
   const [settingsSection, setSettingsSection] =
     useState<SettingsSection>("general");
+  const [appConfigScrollTarget, setAppConfigScrollTarget] = useState<AppId>();
   // 进设置前停留的页面：设置目录里的「← 返回」回到这里
   const settingsReturnViewRef = useRef<View>("providers");
   const [openclawConfigTab, setOpenclawConfigTab] =
@@ -204,8 +207,20 @@ function App() {
 
   const { data: settingsData } = useSettingsQuery();
   // Windows 一律去掉系统标题栏，用页头里的应用内窗口按钮；Linux 由设置决定
+  //
+  // —— 与上游的唯一偏离（DSH 移植）———————————————————————————
+  // 外面加了一层 `isTauri()` 门卫。这里不是 Tauri：渲染出来的是 DSH 窗口的
+  // 三个按钮，点了什么都不做（`@tauri-apps/api/window` 在本仓被别名到
+  // `src/client/tauri-shim/window.mjs`，全是 no-op），而 `setDecorations`
+  // 同样无处可去。不加这层的话 Windows 上必现三个死按钮。
+  //
+  // 用上游已有的 `isTauri()` 而不是另造一个 `isTauriRuntime()`：`windowActivity.ts`
+  // 本来就是拿它当「是否在桌面壳里」的门卫用的，`@tauri-apps/api/core` 在本仓
+  // 恒返回 false，所以语义与桌面版完全一致，且不必给 `lib/platform.ts` 打补丁。
+  // 重新 vendoring 时这一处要保留，见 src/ccswitch/README.md 的重写清单。
   const useAppWindowControls =
-    isWindows() || (isLinux() && (settingsData?.useAppWindowControls ?? false));
+    isTauri() &&
+    (isWindows() || (isLinux() && (settingsData?.useAppWindowControls ?? false)));
   const visibleApps = useMemo<VisibleApps>(
     () => ({
       ...DEFAULT_VISIBLE_APPS,
@@ -645,14 +660,18 @@ function App() {
     return true;
   };
 
-  const openSettings = (section: SettingsSection = "general") => {
+  const openSettings = (
+    section: SettingsSection = "general",
+    appConfigTarget?: AppId,
+  ) => {
     if (managementBusyRef.current) return;
-    if (confirmLeave(() => openSettings(section))) return;
+    if (confirmLeave(() => openSettings(section, appConfigTarget))) return;
     closeProviderPanels();
     if (currentViewRef.current !== "settings") {
       settingsReturnViewRef.current = currentViewRef.current;
     }
     setSettingsSection(section);
+    setAppConfigScrollTarget(appConfigTarget);
     setCurrentView("settings");
   };
 
@@ -1132,7 +1151,7 @@ function App() {
             {t("appPage.viewUsage")}
           </DropdownMenuItem>
         )}
-        <DropdownMenuItem onSelect={() => openSettings("appConfig")}>
+        <DropdownMenuItem onSelect={() => openSettings("appConfig", activeApp)}>
           {t("appPage.configDirectory")}
         </DropdownMenuItem>
         <DropdownMenuItem onSelect={() => openPage("apps")}>
@@ -1520,6 +1539,7 @@ function App() {
       return (
         <SettingsPage
           section={settingsSection}
+          appConfigScrollTarget={appConfigScrollTarget}
           onImportSuccess={handleImportSuccess}
           onOpenApps={() => setCurrentView("apps")}
           onOpenApp={selectApp}
@@ -1541,7 +1561,10 @@ function App() {
           settingsSection={settingsSection}
           onSelectApp={selectApp}
           onSelectPage={openPageFromNav}
-          onSelectSettingsSection={setSettingsSection}
+          onSelectSettingsSection={(section) => {
+            setAppConfigScrollTarget(undefined);
+            setSettingsSection(section);
+          }}
           onExitSettings={exitSettings}
           appsUpdateAvailable={
             checkToolUpdatesOnStartup && toolUpdatesAvailable
