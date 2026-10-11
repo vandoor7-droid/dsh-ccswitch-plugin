@@ -55,16 +55,43 @@ export const CCS_SRC = resolve(ROOT, "src/ccswitch");
  * Tauri IPC, and here the same call has to become an HTTP request to a plugin
  * route. Everything else in a copied component compiles untouched.
  *
- * Deliberately *not* aliased: `@tauri-apps/api/window` and the `@tauri-apps/
- * plugin-*` packages (dialog, log, process, updater). Window chrome is cut by
- * decision #3 and the rest are platform-mapping items deferred to M8, so the
- * correct behaviour today is esbuild's "Could not resolve" — a build failure
- * that names the file, rather than a shim that quietly does nothing.
+ * Still deliberately *not* aliased: `@tauri-apps/plugin-dialog` and
+ * `@tauri-apps/plugin-process`. They are imported only by `main.tsx`, which is
+ * the Tauri entry point and is never mounted — DSH renders `<App />` directly.
+ * A build failure that names the file beats a shim that quietly does nothing,
+ * so nothing here papers over a module the port has not thought about.
+ *
+ * The rest were added when the whole of `App.tsx` entered the graph (it used to
+ * stop at the provider list, so these six were unreachable and esbuild never
+ * looked at them). Each one is a deliberate answer rather than a no-op, which
+ * is the distinction the paragraph above was protecting:
+ *
+ * - `api/app`   — version. Reports the sidecar's, falling back to the vendored
+ *                 frontend's own, because both are true statements about what
+ *                 the user is looking at; see `tauri-shim/app.mjs`.
+ * - `api/path`  — `homeDir()`/`appConfigDir()` come from the sidecar and
+ *                 **throw when it has not said**. Every caller already catches,
+ *                 so an unknown directory renders as no default instead of a
+ *                 guessed one; see `tauri-shim/path.mjs`.
+ * - `api/window` — no-ops. The window belongs to DSH; `setDecorations` sits in
+ *                 a `useEffect` that would otherwise take the panel down.
+ * - `plugin-log`    — console. The sidecar has its own log file.
+ * - `plugin-updater` — `check()` returns null: "up-to-date", so no banner. The
+ *                 updater is cut by decision #3/M8 and DSH delivers this as a
+ *                 package, so saying so is honest rather than inert.
+ * - `prettier/*` — a real dependency (`UsageScriptModal` formats usage scripts
+ *                 in the browser); upstream lists it as a devDependency and
+ *                 bundles it all the same. We install it so the bundle has it.
  */
 export const CLIENT_ALIAS = {
   "@": CCS_SRC,
   "@tauri-apps/api/core": resolve(ROOT, "src/client/tauri-shim/core.mjs"),
   "@tauri-apps/api/event": resolve(ROOT, "src/client/tauri-shim/event.mjs"),
+  "@tauri-apps/api/app": resolve(ROOT, "src/client/tauri-shim/app.mjs"),
+  "@tauri-apps/api/path": resolve(ROOT, "src/client/tauri-shim/path.mjs"),
+  "@tauri-apps/api/window": resolve(ROOT, "src/client/tauri-shim/window.mjs"),
+  "@tauri-apps/plugin-log": resolve(ROOT, "src/client/tauri-shim/log.mjs"),
+  "@tauri-apps/plugin-updater": resolve(ROOT, "src/client/tauri-shim/updater.mjs"),
   // `tailwind-merge` validates class names against its own knowledge, so
   // `cn()` needs the `dsh-ccs-` prefix baked in — otherwise the merge stops
   // merging and `cn("dsh-ccs-p-4", "dsh-ccs-p-2")` emits both.

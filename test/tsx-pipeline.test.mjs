@@ -52,9 +52,36 @@ test("the Tauri IPC layer is aliased onto the plugin's own shims", () => {
     CLIENT_ALIAS["@tauri-apps/api/event"],
     resolve(ROOT, "src/client/tauri-shim/event.mjs"),
   );
-  // Window chrome and the platform plugins are deliberately absent — see the
-  // note in scripts/build.mjs.
-  assert.equal(Object.hasOwn(CLIENT_ALIAS, "@tauri-apps/api/window"), false);
+
+  // `api/window` used to be absent on purpose, and is now aliased: it only
+  // became reachable when the whole of `App.tsx` entered the graph (before
+  // that the graph stopped at the provider list, so nothing imported it).
+  // The shim is a deliberate answer — DSH owns the window — not a silent no-op;
+  // the reasoning sits next to the alias table in scripts/build.mjs.
+  for (const [spec, shim] of [
+    ["@tauri-apps/api/window", "window.mjs"],
+    ["@tauri-apps/api/app", "app.mjs"],
+    ["@tauri-apps/api/path", "path.mjs"],
+    ["@tauri-apps/plugin-log", "log.mjs"],
+    ["@tauri-apps/plugin-updater", "updater.mjs"],
+  ]) {
+    assert.equal(
+      CLIENT_ALIAS[spec],
+      resolve(ROOT, "src/client/tauri-shim/" + shim),
+      `${spec} must resolve to its shim`,
+    );
+  }
+
+  // Still absent, and absent for a structural reason: these are imported only
+  // by `main.tsx`, the Tauri entry point, which is never mounted — DSH renders
+  // `<App />` directly. Aliasing them would add code nothing can reach.
+  for (const spec of ["@tauri-apps/plugin-dialog", "@tauri-apps/plugin-process"]) {
+    assert.equal(
+      Object.hasOwn(CLIENT_ALIAS, spec),
+      false,
+      `${spec} must stay unaliased while only main.tsx imports it`,
+    );
+  }
 });
 
 test("a cc-switch-shaped TSX fixture compiles through the pipeline", async () => {

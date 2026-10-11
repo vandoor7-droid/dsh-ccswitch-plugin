@@ -5,6 +5,8 @@ import { createReasoningSettingsController } from "./controller.mjs";
 import { createCCSwitchImportController } from "./import-controller.mjs";
 import { createCCSwitchManagerController } from "./manager-controller.mjs";
 import { registerReasoningSettings } from "./registration.mjs";
+import { registerPanel } from "./panel.mjs";
+import { makeTranslator } from "./i18n.mjs";
 import { ModelsFooterPanel } from "../ui/ModelsFooterPanel.mjs";
 import { ProviderManagerSection } from "../ui/ProviderManagerSection.mjs";
 import { installEmbedStyles } from "./styles.mjs";
@@ -54,7 +56,13 @@ export function apply(ctx) {
   });
   ctx.effect(() => {
     controller.refresh();
+    // Registered inside the effect, not above it: a plugin's slots belong to
+    // the same lifetime as its controllers, so unloading the plugin drops the
+    // sidebar row and the panel body together rather than leaving a row whose
+    // body no longer resolves.
+    const disposePanel = registerPanel(ctx, t, makeTranslator);
     return () => {
+      disposePanel();
       dispose();
       removeStyles();
     };
