@@ -348,6 +348,41 @@ test("a row this plugin created has no CC Switch row to probe, and says so", asy
   assert.equal(fetchImpl.calls.length, 1)
 })
 
+test('bridge mode sends one exact route carrying {cmd, args} and returns the sidecar answer verbatim', async () => {
+  // DSH has no path parameters, so 328 per-command routes would buy nothing;
+  // one route whose body names the command fits the constraint the rest of the
+  // plugin already follows (the provider key travels in the body too).
+  const fetchImpl = fakeFetch([{ status: 200, body: { ok: true, data: { 'ccs-a-11111111': {} } } }])
+  const invoke = createInvoke({ fetchImpl, bridge: true })
+
+  const result = await invoke('get_providers', { app: 'dsh' })
+
+  assert.equal(fetchImpl.calls[0].url, '/api/dsh-ccswitch-bridge')
+  assert.equal(fetchImpl.calls[0].method, 'POST')
+  assert.deepEqual(JSON.parse(fetchImpl.calls[0].init.body), {
+    cmd: 'get_providers',
+    args: { app: 'dsh' },
+  })
+  // Verbatim — no `receive` projection: the sidecar already answers in
+  // cc-switch's own shapes, which is the whole reason for not rewriting it.
+  assert.deepEqual(result, { ok: true, data: { 'ccs-a-11111111': {} } })
+})
+
+test('bridge mode still answers local commands, and still refuses unmapped ones', async () => {
+  const fetchImpl = fakeFetch()
+  const invoke = createInvoke({ fetchImpl, bridge: true })
+
+  // Local overrides stay local even against the sidecar: these three are
+  // DSH-specific (no tray; no current pointer under the additive model; the
+  // probe is this plugin's own route).
+  assert.equal(await invoke('update_tray_menu'), true)
+  assert.equal(await invoke('get_current_provider', { app: 'dsh' }), '')
+  assert.equal(fetchImpl.calls.length, 0)
+
+  await assert.rejects(() => invoke('definitely_not_a_command'), UnmappedCommandError)
+  assert.equal(fetchImpl.calls.length, 0, 'an unmapped command never reaches the bridge either')
+})
+
 test("cc-switch's event bus is refused loudly rather than stubbed out", async () => {
   await assert.rejects(
     () => listen("proxy-status", () => {}),

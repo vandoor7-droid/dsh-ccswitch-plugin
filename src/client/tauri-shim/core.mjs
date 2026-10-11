@@ -29,6 +29,24 @@
 import { readJson, writeHeaders } from '../http.mjs'
 import { INVOKE_ROUTES } from './commands.mjs'
 
+/**
+ * The single route every command travels once the sidecar bridge is live.
+ *
+ * DSH's web server matches only `exact` and `prefix` — there are no path
+ * parameters — so "one exact route per command" would mean 328 registrations
+ * for no gain. One route whose body carries `{ cmd, args }` fits the same
+ * constraint the rest of this plugin already follows (the provider key travels
+ * in the body, never in the path).
+ *
+ * The switch is `bridge: true` in {@link createInvoke}; it stays `false` until
+ * `src/host` registers this route and supervises the sidecar (P2), because
+ * flipping it early would point every list read at a route that answers 404.
+ * Under `bridge` the table's `send`/`receive` projections are skipped
+ * deliberately: the sidecar speaks cc-switch's own argument and result shapes
+ * natively, which is the whole point of not rewriting it.
+ */
+export const BRIDGE_PATH = '/api/dsh-ccswitch-bridge'
+
 /** Raised when a command has no entry in the route table. */
 export class UnmappedCommandError extends Error {
   constructor(command) {
@@ -77,18 +95,34 @@ async function requestOnce({ path, method = 'POST', body }, fetchImpl) {
  * Build an `invoke` bound to one `fetch`.
  *
  * Exported so a test can drive the whole table with a fake without reaching for
- * the global, and so a future caller could scope a different transport (a
- * `ctx.remote` bridge, say) without touching the table.
+ * the global, and so a caller can scope a different transport without touching
+ * the table.
+ *
+ * @param {object} [options]
+ * @param {typeof fetch} [options.fetchImpl]
+ * @param {object} [options.routes] - defaults to {@link INVOKE_ROUTES}.
+ * @param {boolean} [options.bridge] - send every non-local command to
+ *   {@link BRIDGE_PATH} as `{ cmd, args }` and return the sidecar's answer
+ *   verbatim. Local `run` entries still win: they are this plugin's DSH-specific
+ *   overrides (`update_tray_menu`, `get_current_provider`, the probe), and the
+ *   sidecar's answers to those either do not apply to DSH or are the very
+ *   semantics we retired.
  */
-export function createInvoke({ fetchImpl = defaultFetch, routes = INVOKE_ROUTES } = {}) {
+export function createInvoke({ fetchImpl = defaultFetch, routes = INVOKE_ROUTES, bridge = false } = {}) {
   const request = (spec) => requestOnce(spec, fetchImpl)
   return async function invoke(command, args = {}) {
     const route = Object.hasOwn(routes, command) ? routes[command] : undefined
     if (route === undefined) throw new UnmappedCommandError(command)
     const ctx = { args: args ?? {}, request }
     // A local answer, for the commands that have no route — see the note on
-    // `update_tray_menu` in ./commands.mjs.
+    // `update_tray_menu` in ./commands.mjs. These stay local even in bridge
+    // mode; see the `bridge` option above.
     if (typeof route.run === 'function') return await route.run(ctx.args, ctx)
+    if (bridge) {
+      // No `send`/`receive`: the sidecar already speaks cc-switch's own shapes,
+      // which is the entire reason for not rewriting its backend in JS.
+      return request({ path: BRIDGE_PATH, method: 'POST', body: { cmd: command, args: ctx.args } })
+    }
     const isRead = (route.method ?? 'POST') === 'GET'
     const body = isRead
       ? undefined
