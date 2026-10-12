@@ -235,6 +235,10 @@ export const INVOKE_ROUTES = {
    * cut (decision #3).
    */
   switch_provider: {
+    // `local` keeps this on the plugin even when a sidecar is running: it writes
+    // DSH's route table (`llm-pi-ai`), which the sidecar does not know exists.
+    // Sent to the sidecar it would report success and change no routing.
+    local: true,
     path: `${PROVIDERS_PATH}/apply`,
     method: 'POST',
     send: async (args, ctx) => ({ key: await resolveKey(ctx, args?.id) }),
@@ -243,6 +247,8 @@ export const INVOKE_ROUTES = {
 
   /** Take one provider back out of DSH's route table; the row stays in the catalogue. */
   remove_provider_from_live_config: {
+    // Membership, not catalogue - see `switch_provider` above.
+    local: true,
     path: `${PROVIDERS_PATH}/withdraw`,
     method: 'POST',
     send: async (args, ctx) => ({ key: await resolveKey(ctx, args?.id) }),

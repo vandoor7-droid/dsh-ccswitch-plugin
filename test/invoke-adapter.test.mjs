@@ -392,6 +392,28 @@ test('bridge mode still answers local commands, and hands the rest — known or 
   })
 })
 
+test('a membership command stays on the plugin even in bridge mode', async () => {
+  // `switch_provider` writes llm-pi-ai, which the sidecar does not know exists.
+  // Sending it across would report success and change no routing, so the flag
+  // keeps it on this plugin's own route.
+  // The first reply is the catalogue read `send` makes to resolve an id to a
+  // key; the second is the call itself.
+  const fetchImpl = fakeFetch([
+    { status: 200, body: { providers: { "ccs-a-11111111": { sourceProfileId: "row-7" } } } },
+    { status: 200, body: { ok: true, data: { status: "applied" } } },
+  ])
+  const invoke = createInvoke({ fetchImpl, bridge: true })
+
+  await invoke('switch_provider', { id: 'ccs-a-11111111' })
+
+  const last = fetchImpl.calls[fetchImpl.calls.length - 1]
+  assert.notEqual(last.url, '/api/dsh-ccswitch-bridge')
+  assert.ok(
+    last.url.startsWith('/api/dsh-ccswitch-manager/providers/'),
+    `expected a local manager route, got ${last.url}`,
+  )
+})
+
 test('without a bridge, an unknown command still throws rather than answering nothing', async () => {
   // The table is the whole contract when nothing else is listening, so an
   // unknown name is a programming error — silence would render blank rows as

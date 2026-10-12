@@ -117,7 +117,12 @@ export function createInvoke({ fetchImpl = defaultFetch, routes = INVOKE_ROUTES,
     // `update_tray_menu` in ./commands.mjs. These stay local even in bridge
     // mode; see the `bridge` option below.
     if (typeof route?.run === 'function') return await route.run(ctx.args, ctx)
-    if (bridge) {
+    // `local` marks a command this plugin owns even when a sidecar is running —
+    // membership, not catalogue. `switch_provider` writes `llm-pi-ai` and
+    // `remove_provider_from_live_config` unsets it; the sidecar does not know
+    // DSH's route table exists, so sending either to it would report success
+    // and change no routing.
+    if (bridge && route?.local !== true) {
       // The sidecar owns the command surface here, **including** the commands
       // this table has never heard of. It answers, or says
       // `E_NOT_IMPLEMENTED: <cmd>` — the same outcome the throw below would
