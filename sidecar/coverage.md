@@ -5,15 +5,16 @@
 
 ## 一句话
 
-sidecar 实现 **182** 个命令，我们前端需要 **305** 个，命中 **176**、缺 **129**，
-**覆盖率 57.7%**。缺的 129 里有 **78 个按既定决策本就不做**，真正要补 **51 个**。
+sidecar 实现 **184** 个命令，我们前端需要 **305** 个，命中 **178**、缺 **127**，
+**覆盖率 58.4%**。缺的 127 里有 **78 个按既定决策本就不做**，真正要补 **49 个**。
 
 | 轮次 | sidecar | 我们需要 | 命中 | 缺 | 覆盖率 |
 |---|---|---|---|---|---|
 | P0 基线 | 143 | 300 | 137 | 163 | 45.7% |
 | P3 首刀（熔断/健康） | 148 | 305 | 142 | 163 | 46.6% |
 | 组1 + 组2 + 组5 部分 | 177 | 305 | 171 | 134 | 56.1% |
-| **Codex 压缩 / 过期提示 / 日志** | **182** | **305** | **176** | **129** | **57.7%** |
+| Codex 压缩 / 过期提示 / 日志 | 182 | 305 | 176 | 129 | 57.7% |
+| **备份位置** | **184** | **305** | **178** | **127** | **58.4%** |
 
 > **需要 305 而非 300**：前端升到 4.0.8 后新增 5 个调用点
 > （`acknowledge_codex_stale_clients`、`get/set_codex_session_compression`、
@@ -151,7 +152,7 @@ get_optimizer_config                 set_optimizer_config    delete_env_vars
 restore_env_backup
 ```
 
-### 组 3 · 数据面（5/23 已完成）
+### 组 3 · 数据面（7/23 已完成）
 
 **已完成 5 条 —— Codex 会话压缩 / 过期提示 / 日志（4.0.8 新增）：**
 
@@ -173,7 +174,7 @@ Web 模式下请在服务器上直接打开 <配置目录>/logs/cc-switch.log
 
 这样界面给出的是「去哪里找」，而不是「没有这个命令」。
 
-> **尚未做的 18 条**（webdav ×5、s3 ×5、profiles ×6、backup_location ×2）不是薄封装：
+> **尚未做的 16 条**（webdav ×5、s3 ×5、profiles ×6）不是薄封装：
 > `commands/webdav_sync.rs` 里有真实逻辑——密码合并 `resolve_password_for_request`
 > （敏感）、**全局同步互斥锁** `run_with_webdav_lock`（有测试断言它是单例，两个恢复
 > 同时跑会半新半旧）、导入后投影 `run_post_import_sync`、错误持久化。
@@ -187,7 +188,10 @@ s3_sync_download        s3_sync_fetch_remote_info       s3_sync_save_settings
 s3_sync_upload          s3_test_connection
 list_profiles           create_profile                  update_profile
 delete_profile          apply_profile                   clear_current_profile
-list_backup_locations   delete_backup_location
+
+**已完成 2 条 —— 备份位置：** `list_backup_locations`、`delete_backup_location`
+（`reveal_backup_location` 是文件管理器动作，与 `reveal_app_log_file` 同一处置，不实现）。
+
 ```
 
 > 另注：`apply_profile` 桌面命令的注释写明「**必须保持同步命令**——`ProviderService::
