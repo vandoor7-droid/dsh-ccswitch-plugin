@@ -414,6 +414,33 @@ test('a membership command stays on the plugin even in bridge mode', async () =>
   )
 })
 
+test('a composite command stays on the plugin too, not just the pure membership ones', async () => {
+  // `add_provider` saves the row *and* applies it; `delete_provider` withdraws
+  // the member before forgetting the row. Forwarding either to the sidecar
+  // would do the catalogue half and silently drop the other — a create that
+  // never routes, or a delete that leaves DSH pointing at a row that is gone.
+  // Order follows the calls: save, then the apply it chains; then the catalogue
+  // read `delete`'s send makes to resolve an id, then the delete itself.
+  const fetchImpl = fakeFetch([
+    { status: 200, body: { key: "ccs-a-11111111" } },
+    { status: 200, body: { ok: true, data: true } },
+    { status: 200, body: { providers: { "ccs-a-11111111": { sourceProfileId: "row-7" } } } },
+    { status: 200, body: { status: "removed" } },
+  ])
+  const invoke = createInvoke({ fetchImpl, bridge: true })
+
+  await invoke('add_provider', { provider: { displayName: 'New', sourceProfileId: 'uuid-1' } })
+  await invoke('delete_provider', { id: 'ccs-a-11111111' })
+
+  for (const call of fetchImpl.calls) {
+    assert.notEqual(call.url, '/api/dsh-ccswitch-bridge', `composite call leaked to the bridge: ${call.url}`)
+  }
+  // Both halves are visible: the save and the apply it chained, the delete and
+  // the withdraw its host route performs. Dropping either half is the failure
+  // this flag exists to prevent.
+  assert.equal(fetchImpl.calls.length, 4)
+})
+
 test('without a bridge, an unknown command still throws rather than answering nothing', async () => {
   // The table is the whole contract when nothing else is listening, so an
   // unknown name is a programming error — silence would render blank rows as

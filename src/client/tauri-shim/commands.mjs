@@ -166,6 +166,11 @@ export const INVOKE_ROUTES = {
    *   provider the user can retry from, and can see as not-yet-applied.
    */
   add_provider: {
+    // Composite: it saves the row **and** applies it to `llm-pi-ai` unless
+    // `addToLive` is false. The sidecar owns the catalogue half but knows
+    // nothing of DSH's route table, so forwarding this would create the row
+    // and silently skip the membership. Split it before removing this flag.
+    local: true,
     path: `${PROVIDERS_PATH}/save`,
     method: 'POST',
     send: (args) => {
@@ -209,6 +214,9 @@ export const INVOKE_ROUTES = {
    * `409 reason: 'in-use'` and leaves everything in place.
    */
   delete_provider: {
+    // Composite for the same reason: the Host withdraws the member before
+    // forgetting the row. On the sidecar only the row would go.
+    local: true,
     path: `${PROVIDERS_PATH}/delete`,
     method: 'POST',
     send: async (args, ctx) => ({ key: await resolveKey(ctx, args?.id) }),
