@@ -1,30 +1,42 @@
 # sidecar 命令覆盖清单
 
-> **P0 产出，2026-10-12。** 数字全部来自**实测**，不是估算。
+> **P0 产出 2026-10-12；P3 更新同日。** 数字全部来自**实测**，不是估算。
 > 重跑方式见文末「再生方法」——每次跟版后重跑，不要凭记忆引用本文数字。
 
 ## 一句话
 
-sidecar 实现 **143** 个命令，我们前端需要 **300** 个，命中 **137**、缺 **163**，
-**覆盖率 45.7%**。缺的 163 里有 **78 个按既定决策本就不做**，真正要补 **85 个**。
+sidecar 实现 **148** 个命令，我们前端需要 **305** 个，命中 **142**、缺 **163**，
+**覆盖率 46.6%**。缺的 163 里有 **78 个按既定决策本就不做**，真正要补 **85 个**。
+
+| 轮次 | sidecar | 我们需要 | 命中 | 缺 | 覆盖率 |
+|---|---|---|---|---|---|
+| P0 基线 | 143 | 300 | 137 | 163 | 45.7% |
+| **P3 现状** | **148** | **305** | **142** | **163** | **46.6%** |
+
+> **需要 305 而非 300**：前端升到 4.0.8 后新增 5 个调用点
+> （`acknowledge_codex_stale_clients`、`get/set_codex_session_compression`、
+> `get_codex_sessions_disk_usage`、`reveal_app_log_file`），它们也落在缺口里，
+> 所以 MISSING 仍是 163 —— 补进去 5 条、前端又提了 5 条，两边同时长。
 
 ## 实测环境
 
 | 项 | 值 |
 |---|---|
-| fork | `vandoor7-droid/cc-switch-headless` @ `342a35b` |
+| fork | `vandoor7-droid/cc-switch-headless`（本地 `D:\项目\cc-switch-headless`） |
 | 版本 | `4.0.8`（`src-tauri/Cargo.toml`） |
-| 构建 | `cargo build --no-default-features --features server --bin cc-switch-server`，**1m58s**，无 Tauri/WebKit/显示环境 |
+| 构建 | `cargo build --no-default-features --features server --bin cc-switch-server`，无 Tauri/WebKit/显示环境 |
 | 产物 | `src-tauri/target/debug/cc-switch-server.exe`，55 MB |
-| 端点 | `127.0.0.1:15880`（避开 15800 默认值与 15721 代理） |
+| 端点 | `127.0.0.1:15881`（避开 15800 默认值与 15721 代理） |
 | 配置目录 | `CC_SWITCH_CONFIG_DIR` 指向 scratch（见下方安全注意） |
+| 质量门 | `cargo fmt --check` 与 `cargo clippy -- -D warnings` 均通过；`cargo check`（desktop feature）亦通过 |
 
 ## 传输契约（已验证）
 
 | 请求 | 结果 |
 |---|---|
 | `POST /api/invoke` body `{"cmd":"get_providers","args":{"app":"claude"}}` | `200` → `{"ok":true,"data":{...}}` |
-| `POST /api/invoke` body `{"cmd":"get_circuit_breaker_config","args":{}}` | `200` → `{"ok":false,"error":"E_NOT_IMPLEMENTED: get_circuit_breaker_config"}` |
+| `POST /api/invoke` body `{"cmd":"get_circuit_breaker_config","args":{}}` | `200` → `{"ok":true,"data":{"failureThreshold":8,...}}`（P3 已补，不再是 `E_NOT_IMPLEMENTED`） |
+| `POST /api/invoke` body `{"cmd":"webdav_test_connection","args":{}}` | `200` → `{"ok":false,"error":"E_NOT_IMPLEMENTED: webdav_test_connection"}`（仍缺的代表） |
 | `GET /api/capabilities` 带 Bearer | `200` |
 | `GET /api/capabilities` 不带 token | `401` |
 | `POST /api/invoke` 不带 token | `401` |
@@ -62,17 +74,40 @@ sidecar 实现 **143** 个命令，我们前端需要 **300** 个，命中 **137
 
 合计 `22+4+37+15+85 = 163`，与实测 missing 数一致。
 
+> E 组始终是 85：P3 补进 5 条（熔断/健康），4.0.8 前端同时提了 5 条新的
+> （`acknowledge_codex_stale_clients`、`get/set_codex_session_compression`、
+> `get_codex_sessions_disk_usage`、`reveal_app_log_file`）。下面组 1 已标注
+> 进度，4.0.8 新增的 5 条归入组 3（数据面）。
+
 ---
 
 ## E 组明细（85 个，按交付批次）
 
-### 组 1 · 供应商 + 路由/熔断/测速（23）— **首批**
+### 组 1 · 供应商 + 路由/熔断/测速（18/23 未完成）
+
+**已完成 5 条（P3）—— 熔断/健康：**
+
+```
+get_circuit_breaker_config   update_circuit_breaker_config   get_circuit_breaker_stats
+reset_circuit_breaker        get_provider_health
+```
+
+实测：`get_circuit_breaker_config` 返回真实配置
+（`failureThreshold 8 / successThreshold 3 / timeoutSeconds 90 / errorRateThreshold 0.7 / minRequests 15`）；
+`get_circuit_breaker_stats` 返回 `null` —— **上游 `commands/proxy.rs` 本身对该命令就是桩**
+（"目前先返回 None"），这里忠实保留 `null` 而非报 `E_NOT_IMPLEMENTED`，因为界面读的是
+「有没有统计」，`null` 让它安静地不显示，与桌面版一致。
+
+其中 `reset_circuit_breaker` 的「恢复后按 `sort_index` 回切」分支已抽到
+`services::failover::reset_circuit_breaker`，桌面命令与 web 派发共用同一份 ——
+按 `web/routes.rs` 模块文档的约定，真实逻辑只许在 `services/`。
+
+**未完成 18 条：**
 
 ```
 add_custom_endpoint            remove_custom_endpoint         get_custom_endpoints
 update_endpoint_last_used      test_api_endpoints             fetch_models_for_config
-get_opencode_models            get_circuit_breaker_config     get_circuit_breaker_stats
-update_circuit_breaker_config  reset_circuit_breaker          get_provider_health
+get_opencode_models
 get_proxy_stack                set_proxy_stack_member         exit_proxy_apps_in_mode
 adopt_codex_stack_catalog      restart_codex_app_server_daemon
 get_global_proxy_url           set_global_proxy_url           test_proxy_url
