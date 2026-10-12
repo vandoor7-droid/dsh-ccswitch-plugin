@@ -5,14 +5,15 @@
 
 ## 一句话
 
-sidecar 实现 **177** 个命令，我们前端需要 **305** 个，命中 **171**、缺 **134**，
-**覆盖率 56.1%**。缺的 134 里有 **78 个按既定决策本就不做**，真正要补 **56 个**。
+sidecar 实现 **182** 个命令，我们前端需要 **305** 个，命中 **176**、缺 **129**，
+**覆盖率 57.7%**。缺的 129 里有 **78 个按既定决策本就不做**，真正要补 **51 个**。
 
 | 轮次 | sidecar | 我们需要 | 命中 | 缺 | 覆盖率 |
 |---|---|---|---|---|---|
 | P0 基线 | 143 | 300 | 137 | 163 | 45.7% |
 | P3 首刀（熔断/健康） | 148 | 305 | 142 | 163 | 46.6% |
-| **P3 组1+组2+组5 部分** | **177** | **305** | **171** | **134** | **56.1%** |
+| 组1 + 组2 + 组5 部分 | 177 | 305 | 171 | 134 | 56.1% |
+| **Codex 压缩 / 过期提示 / 日志** | **182** | **305** | **176** | **129** | **57.7%** |
 
 > **需要 305 而非 300**：前端升到 4.0.8 后新增 5 个调用点
 > （`acknowledge_codex_stale_clients`、`get/set_codex_session_compression`、
@@ -75,14 +76,17 @@ sidecar 实现 **177** 个命令，我们前端需要 **305** 个，命中 **171
 | D. 外部写入器 + 深链 | 15 | **砍**（决策 #5） |
 | E. **必须补** | **85** | 按组交付 |
 
-合计 `22+4+37+15+85 = 163`，与实测 missing 数一致。
+合计 `22+4+37+15+85 = 163`，与 P0 快照的 missing 数一致。
+（当前实测是 `22+4+37+15+51 = 129`——砍掉的四类仍是 78 条，E 组已从 85 补到剩 51。）
 
-> E 组总数 85：4.0.8 前端新增的 5 条归入组 3（数据面）。
-> **当前已完成 30 条**（组1 22 + 组2 8），组5 完成 4，剩 56 条待补（含组5 的 2 条延后）。
+> **口径说明**：下表各组写的是「该组命令总数 / 已完成」。全部 5 组相加为 90 条
+> （组1 23 + 组2 8 + 组3 23 + 组4 30 + 组5 6），其中 **已交付 39、待补 51**。
+> 早期文档里出现过的「E 组 85」是某个快照下的**未实现数**，两个口径不同，
+> 不要混用——按实测，当前缺口 129 = 按决策砍 78 + 待补 51。
 
 ---
 
-## E 组明细（85 个，按交付批次）
+## E 组明细（90 条在范围内：39 已交付 / 51 待补，按交付批次）
 
 ### 组 1 · 供应商 + 路由/熔断/测速（22/23 已完成）
 
@@ -147,7 +151,34 @@ get_optimizer_config                 set_optimizer_config    delete_env_vars
 restore_env_backup
 ```
 
-### 组 3 · 数据面（18）
+### 组 3 · 数据面（5/23 已完成）
+
+**已完成 5 条 —— Codex 会话压缩 / 过期提示 / 日志（4.0.8 新增）：**
+
+```
+get_codex_session_compression   set_codex_session_compression
+get_codex_sessions_disk_usage   acknowledge_codex_stale_clients   reveal_app_log_file
+```
+
+实测：`get_codex_session_compression` → `false`；`get_codex_sessions_disk_usage`
+→ `12484894`（真实字节数）；`acknowledge_codex_stale_clients` → `null`。
+
+`reveal_app_log_file` 用 `tauri_plugin_opener`（desktop-only）定位文件管理器里的日志，
+web 模式做不到——服务端没法替**用户**弹窗口。按 fork 已有的约定（`open_config_folder`
+就是这么写的）**注册它并返回描述性错误**，而不是留 `E_NOT_IMPLEMENTED`：
+
+```
+Web 模式下请在服务器上直接打开 <配置目录>/logs/cc-switch.log
+```
+
+这样界面给出的是「去哪里找」，而不是「没有这个命令」。
+
+> **尚未做的 18 条**（webdav ×5、s3 ×5、profiles ×6、backup_location ×2）不是薄封装：
+> `commands/webdav_sync.rs` 里有真实逻辑——密码合并 `resolve_password_for_request`
+> （敏感）、**全局同步互斥锁** `run_with_webdav_lock`（有测试断言它是单例，两个恢复
+> 同时跑会半新半旧）、导入后投影 `run_post_import_sync`、错误持久化。
+> 按 `web/routes.rs` 的约定必须先抽进 `services/` 再共用，是一次独立的重构，
+> 值得单独一轮做完，不拆散。
 
 ```
 webdav_sync_download    webdav_sync_fetch_remote_info   webdav_sync_save_settings
@@ -158,6 +189,10 @@ list_profiles           create_profile                  update_profile
 delete_profile          apply_profile                   clear_current_profile
 list_backup_locations   delete_backup_location
 ```
+
+> 另注：`apply_profile` 桌面命令的注释写明「**必须保持同步命令**——`ProviderService::
+> switch` 内部用 `block_on` 取切换锁，放进 async 命令会在运行时线程 panic」。
+> web 侧移植时要走 `blocking()` 而非 `async` 块内直调，否则会踩这个 panic。
 
 ### 组 4 · OAuth 托管账号（30）
 
