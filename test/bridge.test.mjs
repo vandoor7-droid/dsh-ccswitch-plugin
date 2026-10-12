@@ -15,7 +15,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { Readable } from 'node:stream'
 
-import { BRIDGE_PATH, makeBridgeRoutes, parseBridgeBody, redactSecrets, REDACTED } from '../src/host/bridge.mjs'
+import { BRIDGE_PATH, fillRedacted, hasRedacted, makeBridgeRoutes, parseBridgeBody, redactSecrets, REDACTED } from '../src/host/bridge.mjs'
 import { SAME_ORIGIN_HEADER, SAME_ORIGIN_VALUE } from '../src/host/routes.mjs'
 import { BRIDGE_PATH as CLIENT_BRIDGE_PATH } from '../src/client/tauri-shim/core.mjs'
 
@@ -205,6 +205,99 @@ test('a body without a cmd is refused before anything is forwarded', async () =>
 
   assert.equal(response.statusCode, 400)
   assert.equal(fetchImpl.calls.length, 0)
+})
+
+test('a placeholder on the way back is restored, not stored as text', () => {
+  // The browser only ever saw the marker, so a write carrying it means "keep
+  // what is there". Without this, editing a provider name would silently turn
+  // the API key into the six characters <redacted>.
+  const current = { settingsConfig: { env: { ANTHROPIC_AUTH_TOKEN: 'sk-live-abcdef' } }, name: 'DeepSeek' }
+  const incoming = { settingsConfig: { env: { ANTHROPIC_AUTH_TOKEN: REDACTED } }, name: 'DeepSeek 2' }
+
+  const filled = fillRedacted(current, incoming)
+
+  assert.equal(filled.settingsConfig.env.ANTHROPIC_AUTH_TOKEN, 'sk-live-abcdef')
+  assert.equal(filled.name, 'DeepSeek 2')
+})
+
+test('a placeholder with nothing to restore to becomes empty, never the marker', () => {
+  // There is no stored value to fall back to. An empty key says "not
+  // configured"; a marker says "a key exists", which would be a lie the form
+  // would keep repeating.
+  assert.equal(fillRedacted({}, { apiKey: REDACTED }).apiKey, '')
+  assert.equal(fillRedacted(null, { apiKey: REDACTED }).apiKey, '')
+})
+
+test('a real value is never overwritten by the fill', () => {
+  const filled = fillRedacted(
+    { settingsConfig: { env: { ANTHROPIC_AUTH_TOKEN: 'sk-old' } } },
+    { settingsConfig: { env: { ANTHROPIC_AUTH_TOKEN: 'sk-new' } } },
+  )
+  assert.equal(filled.settingsConfig.env.ANTHROPIC_AUTH_TOKEN, 'sk-new')
+})
+
+test('the fill walks arrays by position', () => {
+  const filled = fillRedacted(
+    { headers: [{ value: 'Bearer one' }, { value: 'Bearer two' }] },
+    { headers: [{ value: REDACTED }, { value: 'keep' }] },
+  )
+  assert.equal(filled.headers[0].value, 'Bearer one')
+  assert.equal(filled.headers[1].value, 'keep')
+})
+
+test('a write carrying a placeholder asks for the stored value first', async () => {
+  // Without this the fill would have nothing to restore from and the key would
+  // be lost on any edit that touched the form.
+  const fetchImpl = fakeFetch(() => ({ status: 200, body: { ok: true, data: true } }))
+  const seen = []
+  const [route] = makeBridgeRoutes({
+    sidecar: async () => ({ origin: 'http://127.0.0.1:15881', token: 'tok' }),
+    resolveCurrent: async (cmd, args) => {
+      seen.push({ cmd, args })
+      // The contract: resolveCurrent answers in the same shape as `args`, so
+      // the fill can walk the two in parallel without knowing the command.
+      return { id: args.id, provider: { settingsConfig: { env: { ANTHROPIC_AUTH_TOKEN: 'sk-live-abcdef' } } } }
+    },
+    fetchImpl,
+  })
+
+  const response = fakeResponse()
+  await route.handler(
+    fakeRequest({
+      body: JSON.stringify({
+        cmd: 'update_provider',
+        args: { id: 'ccs-a-11111111', provider: { name: 'x', settingsConfig: { env: { ANTHROPIC_AUTH_TOKEN: REDACTED } } } },
+      }),
+    }),
+    response,
+  )
+
+  assert.equal(seen.length, 1)
+  assert.equal(seen[0].cmd, 'update_provider')
+  const forwarded = JSON.parse(fetchImpl.calls[0].init.body)
+  assert.equal(forwarded.args.provider.settingsConfig.env.ANTHROPIC_AUTH_TOKEN, 'sk-live-abcdef')
+  assert.ok(!hasRedacted(forwarded.args), 'no placeholder may reach the sidecar')
+})
+
+test('a write with no placeholder is forwarded untouched', async () => {
+  const fetchImpl = fakeFetch(() => ({ status: 200, body: { ok: true, data: true } }))
+  let called = false
+  const [route] = makeBridgeRoutes({
+    sidecar: async () => ({ origin: 'http://127.0.0.1:15881', token: 'tok' }),
+    resolveCurrent: async () => {
+      called = true
+      return {}
+    },
+    fetchImpl,
+  })
+
+  const response = fakeResponse()
+  await route.handler(
+    fakeRequest({ body: JSON.stringify({ cmd: 'update_provider', args: { id: 'a', provider: { name: 'x' } } }) }),
+    response,
+  )
+
+  assert.equal(called, false, 'an unrelated read should not be made for a write that needs none')
 })
 
 test('a request with no same-origin proof is refused by the shared fence', async () => {

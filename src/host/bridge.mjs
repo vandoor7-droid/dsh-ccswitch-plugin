@@ -125,6 +125,41 @@ function redactEnvelope(payload) {
   return payload
 }
 
+/** Whether anything in `value` is still a redaction placeholder. */
+export function hasRedacted(value) {
+  if (value === REDACTED) return true
+  if (Array.isArray(value)) return value.some(hasRedacted)
+  if (value === null || typeof value !== 'object') return false
+  return Object.values(value).some(hasRedacted)
+}
+
+/**
+ * Put a real value back where {@link redactSecrets} left a placeholder.
+ *
+ * The browser only ever sees the marker, so a write that carries it means "keep
+ * what is already stored" — not "store the six characters". Walking `incoming`
+ * and taking the value from `current` at the same position restores it, and a
+ * placeholder with nothing to restore to is left alone rather than written as
+ * the marker: an empty key is a real answer, a marker is not.
+ *
+ * This is the reason the redaction lives on the host rather than the client:
+ * only the side of the wire that replaced the value can put it back.
+ */
+export function fillRedacted(current, incoming) {
+  if (incoming === REDACTED) return current === undefined ? '' : current
+  if (Array.isArray(incoming)) {
+    const source = Array.isArray(current) ? current : []
+    return incoming.map((entry, index) => fillRedacted(source[index], entry))
+  }
+  if (incoming === null || typeof incoming !== 'object') return incoming
+  const source = current !== null && typeof current === 'object' ? current : {}
+  const out = {}
+  for (const [key, entry] of Object.entries(incoming)) {
+    out[key] = fillRedacted(source[key], entry)
+  }
+  return out
+}
+
 /**
  * Build the routes this plugin registers.
  *
@@ -132,9 +167,14 @@ function redactEnvelope(payload) {
  * @param {() => Promise<{ origin: string, token: string } | null>} deps.sidecar -
  *   resolves the running sidecar's origin and bearer token, or `null` when it
  *   is not up yet.
+ * @param {(cmd: string, args: object) => Promise<object | null>} [deps.resolveCurrent] -
+ *   the object a write is patching, **in the same shape as `args`** so the fill
+ *   can walk the two in parallel without knowing what the command means. A call
+ *   that resolves nothing turns a placeholder into an empty string rather than
+ *   letting the marker reach the database.
  * @param {typeof fetch} [deps.fetchImpl]
  */
-export function makeBridgeRoutes({ sidecar, fetchImpl = globalThis.fetch }) {
+export function makeBridgeRoutes({ sidecar, resolveCurrent, fetchImpl = globalThis.fetch }) {
   if (typeof sidecar !== 'function') throw new TypeError('makeBridgeRoutes: sidecar resolver is required')
 
   return [
@@ -172,6 +212,15 @@ export function makeBridgeRoutes({ sidecar, fetchImpl = globalThis.fetch }) {
           return
         }
 
+        let forwarded = parsed.args
+        // A write coming back from the form may carry the marker where a key
+        // used to be. Restore it from what is stored before the sidecar sees
+        // the payload — otherwise the marker itself becomes the key.
+        if (hasRedacted(parsed.args) && typeof resolveCurrent === 'function') {
+          const current = await resolveCurrent(parsed.cmd, parsed.args).catch(() => null)
+          forwarded = fillRedacted(current ?? {}, parsed.args)
+        }
+
         let upstream
         try {
           upstream = await fetchImpl(`${target.origin}/api/invoke`, {
@@ -180,7 +229,7 @@ export function makeBridgeRoutes({ sidecar, fetchImpl = globalThis.fetch }) {
               'content-type': 'application/json',
               authorization: `Bearer ${target.token}`,
             },
-            body: JSON.stringify({ cmd: parsed.cmd, args: parsed.args }),
+            body: JSON.stringify({ cmd: parsed.cmd, args: forwarded }),
           })
         } catch {
           // A sidecar that vanished mid-flight is the same as one that is not
