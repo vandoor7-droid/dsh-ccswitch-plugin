@@ -234,15 +234,24 @@ get_pi_session_discovery   update_pi_provider_usage_script
    P0 全程用 `CC_SWITCH_CONFIG_DIR` 指向 scratch，**未触碰真实库**。
    4.0.8 对真实库要跑 **v0→v20** 全量迁移——未经评估绝不能直接上。
 
-2. **`CC_SWITCH_CONFIG_DIR` 只搬 cc-switch 自己的状态目录，不搬外部 CLI 配置**。
-   实测服务端仍然：
-   - 读了真实 `~/.codex/config.toml`、OpenCode live 配置，并据此导入供应商；
-   - **写回了真实 `~/.claude`**（清掉「旧版接管留下的代理占位符」，改回直连）。
+2. ✅ **已解决** —— `CC_SWITCH_CONFIG_DIR` 只搬 cc-switch 自己的状态目录，不搬外部
+   CLI 配置。P0 实测服务端会：
+   - 读真实 `~/.codex/config.toml`、OpenCode live 配置，据此导入供应商（**只读**，
+     是决策保留的迁移通道）；
+   - **写回真实 `~/.claude`**（清掉「旧版接管留下的代理占位符」，改回直连）。
 
-   这是启动时的 live 导入与接管清理逻辑，行为本身与桌面版一致。
-   **但对插件落地意味着**：sidecar 一启动就可能改写 `~/.claude`、`~/.codex`。
-   与决策 #5「外部写入器永不接」直接冲突，**P3 必须在 sidecar 侧切断这些启动写入**
-   （或至少改为只读导入 + 显式确认），否则装进 DSH 就会动用户的真实配置。
+   后者与决策 #5「外部写入器永不接」直接冲突。已在 fork 加开关关闭：
+
+   ```
+   CC_SWITCH_CLIENT_PROJECTION=off
+   ```
+
+   默认**开**（桌面与 web 的「本地路由」都依赖它把 CLI 指向代理），置 `off` 时
+   只动 `~/.cc-switch` 自己的状态。**P3b 已验证**：scratch 配置目录下开关开启后，
+   日志报「客户端投影已关闭」且不再出现写回警告，`~/.claude/settings.json`、
+   `~/.claude.json`、`~/.codex/config.toml` 与 OpenCode 配置的 SHA-256 前后一致。
+
+   > 插件侧的宿主监督器（P4）启动 sidecar 时**必须**带上这个环境变量。
 
 3. **两进程争用风险**：sidecar 与桌面版 cc-switch 若同时打开会争 `~/.cc-switch/cc-switch.db`。
    落地时 sidecar 必须是唯一写者（计划已列为硬约束）。
