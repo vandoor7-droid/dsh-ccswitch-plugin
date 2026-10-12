@@ -8,9 +8,35 @@ import { defineCCSConfig } from '../domain/ccs-provider.mjs'
 import { PROVIDER_PRESETS } from '../domain/presets.mjs'
 import { makeManagerRoutes, MANAGER_NAMESPACE } from './manager-routes.mjs'
 import { makeRoutes } from './routes.mjs'
+import { makeBridgeRoutes } from './bridge.mjs'
+import { createSidecarManager, resolveBinaryPath, RESERVED_PORTS } from './sidecar-manager.mjs'
 
 export const name = 'dsh-ccswitch-plugin'
 export const inject = ['webServer', 'settings', 'credentials']
+
+/**
+ * The sidecar's own HTTP port.
+ *
+ * 15721 belongs to cc-switch's proxy and 15800 is its own default, so neither
+ * can be used here. The default below is deliberately outside both, and an env
+ * override exists because a fixed port collides the first time two of these
+ * run.
+ */
+function sidecarPort(env = process.env) {
+  const raw = env.CC_SWITCH_SIDECAR_PORT
+  const parsed = raw === undefined ? NaN : Number.parseInt(raw, 10)
+  const port = Number.isInteger(parsed) && parsed > 0 ? parsed : 15881
+  if (RESERVED_PORTS.includes(port)) {
+    throw new Error(`CC_SWITCH_SIDECAR_PORT=${port} is reserved by cc-switch's own proxy`)
+  }
+  return port
+}
+
+/** Where the sidecar keeps its database and settings. */
+function sidecarConfigDir(env = process.env) {
+  const raw = env.CC_SWITCH_SIDECAR_CONFIG_DIR
+  return typeof raw === 'string' && raw.trim() !== '' ? raw.trim() : undefined
+}
 
 /**
  * The plugin's own settings namespace, which DSH derives from this schema and
@@ -114,4 +140,39 @@ export function apply(ctx) {
       for (const dispose of disposers) if (typeof dispose === 'function') dispose()
     }
   }, 'dsh-ccswitch-plugin: routes')
+
+  // The sidecar and the bridge route that fronts it, in their own effect:
+  // their lifetime is the process's, not a route's. The route has to be
+  // reachable while the sidecar is still starting — otherwise a first render
+  // 404s where it should say "not ready" — and the process has to die with the
+  // plugin rather than outlive it holding a port and a database.
+  ctx.effect(() => {
+    const disposers = []
+
+    let manager = null
+    try {
+      manager = createSidecarManager({
+        binary: resolveBinaryPath(),
+        port: sidecarPort(),
+        configDir: sidecarConfigDir(),
+      })
+      manager.start()
+    } catch (error) {
+      // No binary is a normal state, not a load failure: this plugin's other
+      // surfaces work without it, and the bridge below still answers 503 so a
+      // table reads "not ready" instead of a stack.
+      console.warn(`[dsh-ccswitch-plugin] sidecar not started: ${error.message}`)
+    }
+
+    for (const route of makeBridgeRoutes({ sidecar: async () => manager?.resolve() ?? null })) {
+      disposers.push(ctx.webServer.register(route))
+    }
+
+    return () => {
+      // The manager goes first: dropping the route while the process is still
+      // running would leave a listener behind after the plugin is gone.
+      void manager?.stop()
+      for (const dispose of disposers) if (typeof dispose === 'function') dispose()
+    }
+  }, 'dsh-ccswitch-plugin: sidecar')
 }

@@ -93,7 +93,7 @@ test('Host apply registers injected routes and disposes them', async () => {
   const disposed = []
   const effects = []
   const configured = []
-  let routeCleanup
+  const cleanups = []
   // Two providers in the catalogue; only one of them is a member of
   // `llm-pi-ai`'s route table, so `inUse` has both answers to give.
   const settings = fakeSettings({
@@ -156,8 +156,10 @@ test('Host apply registers injected routes and disposes them', async () => {
     },
     effect(effect, label) {
       effects.push(label)
-      const cleanup = effect()
-      if (label === 'dsh-ccswitch-plugin: routes') routeCleanup = cleanup
+      // Every effect's cleanup is kept: the plugin registers routes in more
+      // than one of them, and disposal has to reach all of them or a listener
+      // outlives the plugin.
+      cleanups.push({ label, cleanup: effect() })
     },
   }
 
@@ -175,6 +177,10 @@ test('Host apply registers injected routes and disposes them', async () => {
     '/api/dsh-ccswitch-manager/providers/withdraw',
     '/api/dsh-ccswitch-manager/providers/reorder',
     '/api/dsh-ccswitch-manager/presets',
+    // The bridge registers even with no sidecar binary installed: a table that
+    // renders before one exists should read "not ready", not 404. Whether the
+    // process is running is the bridge's business, not the route table's.
+    '/api/dsh-ccswitch-bridge',
   ])
 
   // The three membership deps apply() injects into makeManagerRoutes must be
@@ -249,7 +255,7 @@ test('Host apply registers injected routes and disposes them', async () => {
     'only DSH\'s route table may be mutated by a member operation',
   )
 
-  routeCleanup()
+  for (const { cleanup } of cleanups) cleanup()
   assert.deepEqual(disposed, registered.map((route) => route.path))
 })
 
