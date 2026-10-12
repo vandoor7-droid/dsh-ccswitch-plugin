@@ -5,18 +5,21 @@
 
 ## 一句话
 
-sidecar 实现 **148** 个命令，我们前端需要 **305** 个，命中 **142**、缺 **163**，
-**覆盖率 46.6%**。缺的 163 里有 **78 个按既定决策本就不做**，真正要补 **85 个**。
+sidecar 实现 **177** 个命令，我们前端需要 **305** 个，命中 **171**、缺 **134**，
+**覆盖率 56.1%**。缺的 134 里有 **78 个按既定决策本就不做**，真正要补 **56 个**。
 
 | 轮次 | sidecar | 我们需要 | 命中 | 缺 | 覆盖率 |
 |---|---|---|---|---|---|
 | P0 基线 | 143 | 300 | 137 | 163 | 45.7% |
-| **P3 现状** | **148** | **305** | **142** | **163** | **46.6%** |
+| P3 首刀（熔断/健康） | 148 | 305 | 142 | 163 | 46.6% |
+| **P3 组1+组2+组5 部分** | **177** | **305** | **171** | **134** | **56.1%** |
 
 > **需要 305 而非 300**：前端升到 4.0.8 后新增 5 个调用点
 > （`acknowledge_codex_stale_clients`、`get/set_codex_session_compression`、
-> `get_codex_sessions_disk_usage`、`reveal_app_log_file`），它们也落在缺口里，
-> 所以 MISSING 仍是 163 —— 补进去 5 条、前端又提了 5 条，两边同时长。
+> `get_codex_sessions_disk_usage`、`reveal_app_log_file`），它们也落在缺口里。
+
+> **一处纠正**：某个提交信息写过「组1 18 of 18」，实为 **22/23**。
+> 漏的是 `get_opencode_models`，处置见下方组1。
 
 ## 实测环境
 
@@ -74,18 +77,16 @@ sidecar 实现 **148** 个命令，我们前端需要 **305** 个，命中 **142
 
 合计 `22+4+37+15+85 = 163`，与实测 missing 数一致。
 
-> E 组始终是 85：P3 补进 5 条（熔断/健康），4.0.8 前端同时提了 5 条新的
-> （`acknowledge_codex_stale_clients`、`get/set_codex_session_compression`、
-> `get_codex_sessions_disk_usage`、`reveal_app_log_file`）。下面组 1 已标注
-> 进度，4.0.8 新增的 5 条归入组 3（数据面）。
+> E 组总数 85：4.0.8 前端新增的 5 条归入组 3（数据面）。
+> **当前已完成 30 条**（组1 22 + 组2 8），组5 完成 4，剩 56 条待补（含组5 的 2 条延后）。
 
 ---
 
 ## E 组明细（85 个，按交付批次）
 
-### 组 1 · 供应商 + 路由/熔断/测速（18/23 未完成）
+### 组 1 · 供应商 + 路由/熔断/测速（22/23 已完成）
 
-**已完成 5 条（P3）—— 熔断/健康：**
+**熔断/健康 5 条（P3 首刀）：**
 
 ```
 get_circuit_breaker_config   update_circuit_breaker_config   get_circuit_breaker_stats
@@ -102,19 +103,43 @@ reset_circuit_breaker        get_provider_health
 `services::failover::reset_circuit_breaker`，桌面命令与 web 派发共用同一份 ——
 按 `web/routes.rs` 模块文档的约定，真实逻辑只许在 `services/`。
 
-**未完成 18 条：**
+**端点 / 测速 5 条：**
 
 ```
-add_custom_endpoint            remove_custom_endpoint         get_custom_endpoints
-update_endpoint_last_used      test_api_endpoints             fetch_models_for_config
-get_opencode_models
-get_proxy_stack                set_proxy_stack_member         exit_proxy_apps_in_mode
-adopt_codex_stack_catalog      restart_codex_app_server_daemon
-get_global_proxy_url           set_global_proxy_url           test_proxy_url
-get_upstream_proxy_status      scan_local_proxies             stream_check_provider
+get_custom_endpoints   add_custom_endpoint   remove_custom_endpoint
+update_endpoint_last_used   test_api_endpoints
 ```
 
-### 组 2 · 设置面（8）
+**全局出站代理 5 条**（类型与逻辑已从 desktop 门控的 `commands/global_proxy.rs`
+抽进 `services::global_proxy`，桌面命令改委托）：
+
+```
+get_global_proxy_url   set_global_proxy_url   test_proxy_url
+get_upstream_proxy_status   scan_local_proxies
+```
+
+**Stack（聚合）5 条 + 连通性/拉模型 2 条：**
+
+```
+get_proxy_stack   set_proxy_stack_member   exit_proxy_apps_in_mode
+adopt_codex_stack_catalog   restart_codex_app_server_daemon
+stream_check_provider   fetch_models_for_config
+```
+
+**组 1 唯一不实现的 1 条 —— `get_opencode_models`：**
+
+它靠在服务端执行本机 `opencode models` 实现。而 fork 的 web 模式**刻意拒绝运行本机
+CLI**：`host::run_tool_command` 的非 desktop 分支恒返回
+`Err("Web 模式暂不支持运行本机 CLI 工具（{tool}）")`。这条是 fork 的安全边界——
+`cc-switch-server` 可以经 SSH 隧道 / 反代暴露给另一台机器上的浏览器，此时「在服务端
+跑任意 CLI」是升级了的攻击面。
+
+我们的 sidecar 虽然只绑 `127.0.0.1` 且只被插件宿主调用，但我们**会复用同一个二进制做
+分发**（P6），把它跑命令的能力加回去等于给所有用这个二进制的人开放该攻击面。
+故此处保持 `E_NOT_IMPLEMENTED`。若将来确实需要，正解是加一个显式的
+`--allow-local-tools` 开关，而不是在 web 派发里直接放开。
+
+### 组 2 · 设置面（8/8 已完成）
 
 ```
 get_log_config     set_log_config     get_rectifier_config   set_rectifier_config
@@ -150,12 +175,21 @@ get_codex_oauth_models  get_codex_oauth_quota  get_xai_oauth_models
 get_xai_oauth_quota     get_subscription_quota get_balance  get_coding_plan_quota
 ```
 
-### 组 5 · 会话/用量余项（6）
+### 组 5 · 会话/用量余项（4/6 已完成）
 
 ```
-get_session_image    stream_session_messages    get_usage_first_date
-get_pi_current_state get_pi_session_discovery   update_pi_provider_usage_script
+get_usage_first_date   get_pi_current_state
+get_pi_session_discovery   update_pi_provider_usage_script
 ```
+
+**剩下 2 条延后到 P5（客户端接缝），不是遗漏：**
+
+- `stream_session_messages` 用 Tauri `Channel` 逐块推送。插件侧的
+  `src/client/tauri-shim/core.mjs` 里 `Channel` 构造函数**故意抛错**——给一个不会
+  说话的 channel，会话阅读器会永远等在空转录上，把「没接线」读成「没有消息」。
+  要接它得先有桥（SSE / 分块响应），那是 P5 的活。
+- `get_session_image` 返回 `tauri::ipc::Response`（二进制体 + content-type）。
+  桥接形状是 `{ body, contentType }`，属于同一处接缝。
 
 ---
 
