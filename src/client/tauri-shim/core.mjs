@@ -112,17 +112,29 @@ export function createInvoke({ fetchImpl = defaultFetch, routes = INVOKE_ROUTES,
   const request = (spec) => requestOnce(spec, fetchImpl)
   return async function invoke(command, args = {}) {
     const route = Object.hasOwn(routes, command) ? routes[command] : undefined
-    if (route === undefined) throw new UnmappedCommandError(command)
     const ctx = { args: args ?? {}, request }
     // A local answer, for the commands that have no route — see the note on
     // `update_tray_menu` in ./commands.mjs. These stay local even in bridge
-    // mode; see the `bridge` option above.
-    if (typeof route.run === 'function') return await route.run(ctx.args, ctx)
+    // mode; see the `bridge` option below.
+    if (typeof route?.run === 'function') return await route.run(ctx.args, ctx)
     if (bridge) {
-      // No `send`/`receive`: the sidecar already speaks cc-switch's own shapes,
-      // which is the entire reason for not rewriting its backend in JS.
+      // The sidecar owns the command surface here, **including** the commands
+      // this table has never heard of. It answers, or says
+      // `E_NOT_IMPLEMENTED: <cmd>` — the same outcome the throw below would
+      // give, but decided by the thing that actually knows the command list.
+      //
+      // Throwing before this point is what used to happen, and it made every
+      // command outside `./commands.mjs` unreachable for good: the sidecar
+      // serves ~180 of them and this table names 11.
+      //
+      // No `send`/`receive` either: the sidecar already speaks cc-switch's own
+      // shapes, which is the entire reason for not rewriting its backend in JS.
       return request({ path: BRIDGE_PATH, method: 'POST', body: { cmd: command, args: ctx.args } })
     }
+    // Without a bridge the table *is* the contract, so an unknown command is a
+    // programming error and must not come back as undefined — see
+    // {@link UnmappedCommandError}.
+    if (route === undefined) throw new UnmappedCommandError(command)
     const isRead = (route.method ?? 'POST') === 'GET'
     const body = isRead
       ? undefined

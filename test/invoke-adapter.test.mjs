@@ -368,8 +368,8 @@ test('bridge mode sends one exact route carrying {cmd, args} and returns the sid
   assert.deepEqual(result, { ok: true, data: { 'ccs-a-11111111': {} } })
 })
 
-test('bridge mode still answers local commands, and still refuses unmapped ones', async () => {
-  const fetchImpl = fakeFetch()
+test('bridge mode still answers local commands, and hands the rest — known or not — to the sidecar', async () => {
+  const fetchImpl = fakeFetch([{ status: 200, body: { ok: true, data: null } }])
   const invoke = createInvoke({ fetchImpl, bridge: true })
 
   // Local overrides stay local even against the sidecar: these three are
@@ -379,8 +379,27 @@ test('bridge mode still answers local commands, and still refuses unmapped ones'
   assert.equal(await invoke('get_current_provider', { app: 'dsh' }), '')
   assert.equal(fetchImpl.calls.length, 0)
 
+  // A command this table has never heard of goes through anyway. The sidecar
+  // is the one that knows the command list: it answers, or answers
+  // `E_NOT_IMPLEMENTED`. Throwing here first was what made its ~180 commands
+  // unreachable while the table named 11.
+  await invoke('definitely_not_a_command')
+  assert.equal(fetchImpl.calls.length, 1)
+  assert.equal(fetchImpl.calls[0].url, '/api/dsh-ccswitch-bridge')
+  assert.deepEqual(JSON.parse(fetchImpl.calls[0].init.body), {
+    cmd: 'definitely_not_a_command',
+    args: {},
+  })
+})
+
+test('without a bridge, an unknown command still throws rather than answering nothing', async () => {
+  // The table is the whole contract when nothing else is listening, so an
+  // unknown name is a programming error — silence would render blank rows as
+  // though the backend had answered.
+  const fetchImpl = fakeFetch()
+  const invoke = createInvoke({ fetchImpl })
   await assert.rejects(() => invoke('definitely_not_a_command'), UnmappedCommandError)
-  assert.equal(fetchImpl.calls.length, 0, 'an unmapped command never reaches the bridge either')
+  assert.equal(fetchImpl.calls.length, 0)
 })
 
 test("cc-switch's event bus is refused loudly rather than stubbed out", async () => {
